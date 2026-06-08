@@ -1,0 +1,38 @@
+{
+  "name": "@backthread/redact",
+  "version": "0.1.0",
+  "description": "The one redaction fence — pure, zero-dependency string transforms that strip source code and tool I/O out of an AI coding-agent session transcript before anything leaves the machine. Keeps only natural-language rationale.",
+  "license": "MIT",
+  "author": "Backthread",
+  "homepage": "https://github.com/backthread/backthread/tree/main/packages/redact",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backthread/backthread.git",
+    "directory": "packages/redact"
+  },
+  "bugs": "https://github.com/backthread/backthread/issues",
+  "keywords": [
+    "redaction",
+    "privacy",
+    "transcript",
+    "claude-code",
+    "ai-agent",
+    "backthread"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,7 @@
+# Build outputs — produced by `npm run build` (tsc) and `npm run bundle` (esbuild).
+# Both are regenerated from src/; neither is committed. (`dist` is also covered by
+# the root .gitignore; `dist-bundle` — the self-contained distribution artifact —
+# is not, so it's listed here.)
+node_modules/
+dist/
+dist-bundle/

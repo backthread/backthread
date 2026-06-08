@@ -1,0 +1,57 @@
+{
+  "name": "backthread",
+  "version": "0.1.0",
+  "description": "Backthread CLI — capture the *why* of your AI-coded changes from your Claude Code sessions, and query your codebase's architectural memory without leaving the terminal. Source code and tool I/O are redacted locally before anything leaves your machine.",
+  "license": "MIT",
+  "author": "Backthread",
+  "homepage": "https://backthread.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backthread/backthread.git",
+    "directory": "cli"
+  },
+  "bugs": "https://github.com/backthread/backthread/issues",
+  "keywords": [
+    "claude-code",
+    "ai",
+    "architecture",
+    "codebase",
+    "documentation",
+    "backthread",
+    "cli",
+    "mcp"
+  ],
+  "type": "module",
+  "comment": "PUBLISHED BIN = the self-contained esbuild bundle (dist-bundle/backthread.js), NOT the tsc dist/. Reason: @backthread/redact ships SOURCE-ONLY (.ts), and Node refuses to strip types for files inside node_modules — so a registry install of the tsc dist/ would fail to load redact at runtime. The bundle inlines redact (and the MCP SDK), so the published CLI has ZERO runtime dependencies and `npx backthread` stays fast and robust. Dev/test resolve @backthread/redact via the workspace symlink (realpath escapes node_modules → stripping applies).",
+  "bin": {
+    "backthread": "./dist-bundle/backthread.js"
+  },
+  "files": [
+    "dist-bundle",
+    "commands",
+    "hooks",
+    ".claude-plugin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "bundle": "node esbuild.config.mjs",
+    "prepack": "npm run build && npm run bundle",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "start": "tsx src/bin/backthread.ts",
+    "smoke": "npm run bundle && node dist-bundle/backthread.js help > /dev/null",
+    "test": "node --import tsx --test --test-force-exit src/*.test.ts && npm run build && npm run smoke"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "devDependencies": {
+    "@backthread/redact": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^22.19.19",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.6.2"
+  }
+}

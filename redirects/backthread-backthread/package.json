@@ -1,0 +1,11 @@
+{
+  "name": "@backthread/backthread",
+  "version": "0.1.0",
+  "description": "Moved — the Backthread CLI is published as `backthread`. Run `npx backthread`.",
+  "license": "MIT",
+  "keywords": ["backthread", "moved", "cli"],
+  "homepage": "https://www.npmjs.com/package/backthread",
+  "publishConfig": {
+    "access": "public"
+  }
+}

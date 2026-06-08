@@ -1,0 +1,21 @@
+{
+  "name": "backthread-oss",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backthread open-source monorepo — the `backthread` CLI and the `@backthread/redact` fence.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backthread/backthread.git"
+  },
+  "type": "module",
+  "workspaces": [
+    "cli",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w backthread",
+    "test": "npm test -w backthread",
+    "typecheck": "npm run typecheck -w backthread"
+  }
+}

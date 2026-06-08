@@ -1,0 +1,15 @@
+{
+  "$comment": "The SessionEnd capture hook, declared in the PLUGIN MANIFEST (referenced from .claude-plugin/plugin.json). When Backthread is installed as a Claude Code plugin, this registers the hook automatically — no mutation of the user's .claude/settings.json. `npx backthread capture` reads the SessionEnd payload off stdin, derives this session's decisions LOCALLY-redacted, and persists them best-effort; it always exits 0 so a capture hiccup can never disrupt the session. Mirrored by the .claude/settings.json fallback that `backthread install` writes for the bare-npx (non-plugin) path. We register ONLY SessionEnd (once per session) on purpose — `runCapture` also handles a Stop payload, but Stop fires on every turn-end, which would capture far too aggressively, so Stop is intentionally NOT registered here.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx backthread capture"
+          }
+        ]
+      }
+    ]
+  }
+}
