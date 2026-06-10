@@ -14,7 +14,7 @@ sessions, so you can ask *"how does X work?"* and stay oriented without
 spelunking through PRs. The decisions become a live **"How it works"** diagram
 and changelog at [backthread.dev](https://backthread.dev).
 
-## Your code never leaves your machine
+## Your source code never leaves your machine
 
 Backthread reads your agent **transcripts**, not your repo. Before anything is
 sent, the CLI redacts every transcript **locally**:
@@ -23,9 +23,18 @@ sent, the CLI redacts every transcript **locally**:
 - **Keeps** only natural-language prompts and the agent's reasoning.
 - **Redacts** any fenced code block to `[code redacted]`.
 
-Only the derived, natural-language *decisions* ever leave your machine. The
-redaction fence is open source ([`@backthread/redact`](https://www.npmjs.com/package/@backthread/redact))
-so you can verify it — read more at [backthread.dev/security](https://backthread.dev/security).
+So no source code and no tool I/O ever leave your machine. Because the default
+path runs inference on our servers, what *does* leave is the **redacted
+transcript** — natural-language prose only. The Worker re-runs the fenced-code
+scrub server-side as a fail-closed backstop, derives the **decisions**, and
+discards the transcript right after — processed in memory, never stored. Only
+the decisions are persisted.
+
+That's a weaker claim than the bring-your-own-key path — where nothing but the
+derived decisions ever leaves your machine — which is designed and coming. We'd
+rather say so than paper over it. The redaction fence is open source
+([`@backthread/redact`](https://www.npmjs.com/package/@backthread/redact)) so you
+can verify it — read more at [backthread.dev/security](https://backthread.dev/security).
 
 ## Quick start
 
