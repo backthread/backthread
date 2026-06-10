@@ -1,7 +1,7 @@
 {
   "name": "backthread",
-  "version": "0.1.1",
-  "description": "Backthread CLI — capture the *why* of your AI-coded changes from your Claude Code sessions, and query your codebase's architectural memory without leaving the terminal. Source code and tool I/O are redacted locally before anything leaves your machine.",
+  "version": "0.1.2",
+  "description": "Backthread CLI — capture the why behind your AI-coded changes from your Claude Code sessions, and ask how your codebase works without leaving the terminal. Source code and tool I/O are redacted locally before anything leaves your machine.",
   "license": "MIT",
   "author": "Backthread",
   "homepage": "https://backthread.dev",
