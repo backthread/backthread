@@ -147,3 +147,25 @@ test('sessionPaths is robust to garbage records + unparseable Codex args (never 
     [],
   );
 });
+
+test('sessionPaths drops ~, ../-escape, and Windows-absolute paths (keeps real relatives)', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '~/secret/key.pem' } }] } }, // home → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '../../etc/passwd' } }] } }, // escape → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'C:\\repo\\x.ts' } }] } }, // Win drive → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '\\server\\share\\y.ts' } }] } }, // Win UNC → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'src/x.ts' } }] } }, // genuine relative → keep
+  ];
+  assert.deepEqual(sessionPaths(records, '/repo'), ['src/x.ts']);
+  assert.deepEqual(sessionPaths(records), ['src/x.ts']);
+});
+
+test('sessionPaths does NOT harvest Codex shell command arrays (a command is not a file path)', () => {
+  const records = [
+    {
+      type: 'response_item',
+      payload: { type: 'function_call', name: 'shell', arguments: JSON.stringify({ command: ['cat', '/repo/secret.ts'] }) },
+    },
+  ];
+  assert.deepEqual(sessionPaths(records, '/repo'), []);
+});

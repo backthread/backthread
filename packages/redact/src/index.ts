@@ -241,6 +241,27 @@ function isAbsolute(p: string): boolean {
 }
 
 /**
+ * True iff a NON-POSIX-absolute string can't be confirmed repo-relative and so
+ * must be DROPPED rather than kept verbatim. `isAbsolute` only matches POSIX `/`,
+ * so without this guard a `~`-home, a `../`-escape, or a Windows-absolute path
+ * would fall into the "already-relative" branch and be emitted unfiltered even
+ * when a `repoRoot` was supplied. We treat as foreign (drop): a leading `~`
+ * (home dir), a leading `../` or a bare `..` segment escaping the root, and the
+ * two Windows-absolute forms — a drive letter (`X:\` / `X:/`) or a leading
+ * backslash (`\server\share`, `\repo\x.ts`). Genuinely-relative POSIX paths
+ * (`src/x.ts`, `./a/b.ts`) are NOT foreign. Pure string check, zero deps.
+ */
+function isForeignRelativePath(p: string): boolean {
+  if (p.startsWith('~')) return true; // ~/secret/key.pem, ~root/x
+  if (p.startsWith('\\')) return true; // \server\share, \repo\x.ts (Win/UNC absolute)
+  if (/^[A-Za-z]:[\\/]/.test(p)) return true; // C:\repo\x.ts or C:/repo/x.ts (Win drive)
+  // A `..` segment escaping the root, split on either separator so backslash
+  // paths are caught too. Leading `./` runs are stripped first (canonical form).
+  const stripped = p.replace(/^(?:\.[\\/])+/, '');
+  return /^\.\.(?:[\\/]|$)/.test(stripped); // ../../etc/passwd, ..\x, bare ..
+}
+
+/**
  * Normalize an absolute path to repo-relative against `root`, or null when the
  * path is NOT under `root` (foreign to this repo → dropped). Pure string ops,
  * no `node:path`: the package is dependency-free + pure-string (load-bearing for
@@ -360,9 +381,11 @@ export function sessionPaths(records: unknown[], repoRoot?: string): string[] {
         const rel = relativizeUnder(p, root);
         if (rel === null || rel.length === 0) continue;
         seen.add(rel);
-      } else {
-        // Already relative — keep as-is (a path the agent referenced relative to
-        // the repo). Strip any leading `./` for a stable, canonical form.
+      } else if (!isForeignRelativePath(p)) {
+        // Genuinely relative — keep as-is (a path the agent referenced relative
+        // to the repo). Strip any leading `./` for a stable, canonical form.
+        // Foreign forms (`~`-home, `../`-escape, Windows-absolute) are dropped
+        // above: they can't be confirmed inside the repo, so we never emit them.
         const rel = p.replace(/^(?:\.\/)+/, '');
         if (rel.length > 0) seen.add(rel);
       }
