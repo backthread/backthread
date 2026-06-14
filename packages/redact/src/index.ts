@@ -221,3 +221,176 @@ export function sessionTimestamp(records: unknown[]): string | null {
   }
   return latestIso;
 }
+
+// --- File-path harvest ------------------------------------------------------
+
+/** A leading `/` (or any run of them) — stripped when relativizing a path. */
+function stripLeadingSlashes(p: string): string {
+  let i = 0;
+  while (i < p.length && p[i] === '/') i += 1;
+  return p.slice(i);
+}
+
+/**
+ * True iff `p` is an absolute POSIX path (starts with `/`). We deliberately do
+ * NOT treat Windows drive paths or `~` as absolute: the agents we ingest stamp
+ * POSIX cwds, and over-broadening would mis-classify a relative path as foreign.
+ */
+function isAbsolute(p: string): boolean {
+  return p.startsWith('/');
+}
+
+/**
+ * True iff a NON-POSIX-absolute string can't be confirmed repo-relative and so
+ * must be DROPPED rather than kept verbatim. `isAbsolute` only matches POSIX `/`,
+ * so without this guard a `~`-home, a `../`-escape, or a Windows-absolute path
+ * would fall into the "already-relative" branch and be emitted unfiltered even
+ * when a `repoRoot` was supplied. We treat as foreign (drop): a leading `~`
+ * (home dir), a leading `../` or a bare `..` segment escaping the root, and the
+ * two Windows-absolute forms — a drive letter (`X:\` / `X:/`) or a leading
+ * backslash (`\server\share`, `\repo\x.ts`). Genuinely-relative POSIX paths
+ * (`src/x.ts`, `./a/b.ts`) are NOT foreign. Pure string check, zero deps.
+ */
+function isForeignRelativePath(p: string): boolean {
+  if (p.startsWith('~')) return true; // ~/secret/key.pem, ~root/x
+  if (p.startsWith('\\')) return true; // \server\share, \repo\x.ts (Win/UNC absolute)
+  if (/^[A-Za-z]:[\\/]/.test(p)) return true; // C:\repo\x.ts or C:/repo/x.ts (Win drive)
+  // A `..` segment escaping the root, split on either separator so backslash
+  // paths are caught too. Leading `./` runs are stripped first (canonical form).
+  const stripped = p.replace(/^(?:\.[\\/])+/, '');
+  return /^\.\.(?:[\\/]|$)/.test(stripped); // ../../etc/passwd, ..\x, bare ..
+}
+
+/**
+ * Normalize an absolute path to repo-relative against `root`, or null when the
+ * path is NOT under `root` (foreign to this repo → dropped). Pure string ops,
+ * no `node:path`: the package is dependency-free + pure-string (load-bearing for
+ * the esbuild-inlined CLI bundle). We compare on a `root` that's been trimmed of
+ * trailing slashes and require either an exact match (the repo root itself) or a
+ * `root/`-prefixed path so `/repo-other` is NOT treated as inside `/repo`.
+ */
+function relativizeUnder(abs: string, root: string): string | null {
+  const trimmedRoot = root.replace(/\/+$/, '');
+  if (trimmedRoot.length === 0) return null;
+  if (abs === trimmedRoot) return ''; // the root itself → empty relative path
+  const prefix = trimmedRoot + '/';
+  if (!abs.startsWith(prefix)) return null;
+  return stripLeadingSlashes(abs.slice(trimmedRoot.length));
+}
+
+/**
+ * Collect candidate file-path strings out of one raw record's tool I/O —
+ * BEFORE redaction drops those records. We treat all of this as DATA, never
+ * instructions: we only read string fields at known shapes and never act on
+ * their contents.
+ *
+ * Claude Code: `message.content[]` blocks with `type === 'tool_use'` →
+ *   `input.file_path` (Edit/Write/Read), plus `input.path` /
+ *   `input.notebook_path` (NotebookEdit and friends) and Bash `input.cwd`.
+ * Codex: `payload.type === 'function_call'` may carry paths inside the
+ *   JSON-string `payload.arguments` — we parse it defensively and pull the same
+ *   path-named fields if present (shell `command` arrays are NOT path-harvested:
+ *   a command string isn't a file path).
+ */
+function pathsFromRecord(rec: unknown): string[] {
+  if (!rec || typeof rec !== 'object') return [];
+  const out: string[] = [];
+  const r = rec as {
+    type?: unknown;
+    message?: { content?: unknown };
+    payload?: { type?: unknown; arguments?: unknown };
+  };
+
+  const pushFromInput = (input: unknown): void => {
+    if (!input || typeof input !== 'object') return;
+    const i = input as { file_path?: unknown; path?: unknown; notebook_path?: unknown; cwd?: unknown };
+    for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
+      if (typeof v === 'string' && v.trim().length > 0) out.push(v.trim());
+    }
+  };
+
+  // Claude Code: tool_use blocks inside an assistant message's content array.
+  const content = r.message?.content;
+  if (Array.isArray(content)) {
+    for (const raw of content) {
+      if (!raw || typeof raw !== 'object') continue;
+      const block = raw as { type?: unknown; input?: unknown };
+      if (block.type === 'tool_use') pushFromInput(block.input);
+    }
+  }
+
+  // Codex: function_call args are a JSON STRING; parse defensively (a corrupt or
+  // non-object args payload yields nothing — fail-closed, never throw).
+  if (r.payload && typeof r.payload === 'object' && r.payload.type === 'function_call') {
+    const args = r.payload.arguments;
+    if (typeof args === 'string') {
+      try {
+        pushFromInput(JSON.parse(args));
+      } catch {
+        // Unparseable args → no paths from this record.
+      }
+    } else {
+      pushFromInput(args);
+    }
+  }
+
+  return out;
+}
+
+/** The in-transcript cwd Codex stamps into `session_meta.payload.cwd`, or null.
+ *  Used as the repo-root fallback when the caller doesn't pass `repoRoot`. */
+function codexSessionCwd(records: unknown[]): string | null {
+  for (const raw of records) {
+    if (!raw || typeof raw !== 'object') continue;
+    const rec = raw as { type?: unknown; payload?: { cwd?: unknown } };
+    if (rec.type !== 'session_meta') continue;
+    const cwd = rec.payload?.cwd;
+    if (typeof cwd === 'string' && cwd.trim().length > 0) return cwd.trim();
+  }
+  return null;
+}
+
+/**
+ * Harvest the repo-relative file paths an agent session touched, from its raw
+ * (pre-redaction) records. The redaction fence DROPS the tool-use records these
+ * paths live in, so this MUST run on the parsed records BEFORE `redactTranscript`
+ * — same pre-redaction scan discipline as `sessionTimestamp`.
+ *
+ * `repoRoot` (optional): when given, each absolute path is normalized to
+ * repo-relative by stripping the `repoRoot` prefix + leading slash. The caller
+ * passes the WORKTREE root as `repoRoot`, so prefix-stripping handles worktrees
+ * — we do NOT detect worktrees here. When `repoRoot` is omitted, we fall back to
+ * an in-transcript root signal (Codex `session_meta.payload.cwd`); if no root can
+ * be resolved, absolute paths are skipped (we NEVER emit machine-absolute paths)
+ * and only already-relative paths are kept.
+ *
+ * Paths NOT under the resolved root are dropped (foreign to this repo). Already-
+ * relative paths are kept as-is (deduped). Output is deduped + sorted for a
+ * stable order. Pure → unit-testable; zero runtime deps (plain string ops).
+ */
+export function sessionPaths(records: unknown[], repoRoot?: string): string[] {
+  const root = (repoRoot && repoRoot.trim().length > 0 ? repoRoot.trim() : codexSessionCwd(records)) ?? null;
+
+  const seen = new Set<string>();
+  for (const rec of records) {
+    for (const p of pathsFromRecord(rec)) {
+      if (isAbsolute(p)) {
+        // Absolute path: needs a root to relativize against. No root → skip it
+        // (never emit a machine-absolute path). Outside the root → foreign → drop.
+        if (root === null) continue;
+        const rel = relativizeUnder(p, root);
+        if (rel === null || rel.length === 0) continue;
+        seen.add(rel);
+      } else if (!isForeignRelativePath(p)) {
+        // Genuinely relative — keep as-is (a path the agent referenced relative
+        // to the repo). Strip any leading `./` for a stable, canonical form.
+        // Foreign forms (`~`-home, `../`-escape, Windows-absolute) are dropped
+        // above: they can't be confirmed inside the repo, so we never emit them.
+        const rel = p.replace(/^(?:\.\/)+/, '');
+        if (rel.length > 0) seen.add(rel);
+      }
+    }
+  }
+
+  return Array.from(seen).sort();
+}
