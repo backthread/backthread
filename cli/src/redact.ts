@@ -27,6 +27,7 @@ export {
   parseJsonl,
   redactCodeFences,
   redactTranscript,
+  sessionPaths,
   sessionTimestamp,
   type RedactedTranscript,
   type TranscriptTurn,
