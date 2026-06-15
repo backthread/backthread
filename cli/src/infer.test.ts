@@ -138,7 +138,12 @@ test('serverInfer omits filePaths from the body when empty', async () => {
   });
 
   const sent = JSON.parse(String(calls[0].init.body));
-  assert.equal(sent.filePaths, undefined);
+  // Pin 'key absent', not merely falsy: after JSON.parse an explicit `filePaths:
+  // undefined` and a genuinely-omitted key both read as `undefined`, so an
+  // `=== undefined` check would also pass a regression that sent the key with an
+  // undefined value. Asserting the key is absent is the trust-boundary property
+  // we care about (no empty/undefined filePaths riding the wire).
+  assert.ok(!('filePaths' in sent));
 });
 
 test('serverInfer does NOT send filePaths on the derive-only leg (anchoring is persist-side)', async () => {

@@ -192,7 +192,10 @@ test('absent cwd → derive-only leg sends NO machine-absolute paths', async () 
   // The /infer-decisions body never carried filePaths (derive-only) — and crucially,
   // nothing absolute leaked anywhere in the request.
   assert.equal((inferBody as { filePaths?: unknown }).filePaths, undefined);
-  assert.doesNotMatch(JSON.stringify(inferBody), /\/work\/app|\/etc\/passwd/);
+  // Guard the trust boundary generically, not just against this fixture's two
+  // literals: forbid ANY machine-absolute path (a string value beginning with a
+  // common root dir) regardless of which dirs the fixture happened to use.
+  assert.doesNotMatch(JSON.stringify(inferBody), /(?:"|: ?")\/(?:Users|home|etc|var|work|root|tmp|opt|private)\//);
 });
 
 test('derive-only (server did not persist) → POST derived decisions to ingest-decisions', async () => {
