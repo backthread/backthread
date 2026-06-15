@@ -171,6 +171,9 @@ test('sessionPaths drops MID-path .. traversal that escapes the repo (defense-in
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/repo/../etc/passwd' } }] } },
     // a deeper mid-path escape (net traversal pops above root) → drop
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'src/a/b/../../../../../../etc/shadow' } }] } },
+    // a BACKSLASH mid-path escape — not a leading \ (so not caught as Win/UNC by
+    // isForeignRelativePath), splits on either sep + resolves above root → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'a\\..\\..\\etc\\passwd' } }] } },
     // an IN-repo redundant segment → normalized + kept (a/b/../c.ts → a/c.ts)
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'a/b/../c.ts' } }] } },
   ];
@@ -178,8 +181,8 @@ test('sessionPaths drops MID-path .. traversal that escapes the repo (defense-in
   assert.deepEqual(sessionPaths(records, '/repo'), ['a/c.ts']);
   // Same drop behavior with no resolvable root at all.
   assert.deepEqual(sessionPaths(records), ['a/c.ts']);
-  // And critically: no emitted path ever contains `..`.
-  assert.ok(sessionPaths(records, '/repo').every((p) => !p.split('/').includes('..')));
+  // And critically: no emitted path ever contains `..` (either separator).
+  assert.ok(sessionPaths(records, '/repo').every((p) => !p.split(/[\\/]/).includes('..')));
 });
 
 test('sessionPaths does NOT harvest Codex shell command arrays (a command is not a file path)', () => {

@@ -270,12 +270,15 @@ function isForeignRelativePath(p: string): boolean {
  * `/repo/../etc/passwd` that prefix-relativizes to `../etc/passwd`) would slip
  * through and be emitted verbatim. We never EMIT a path containing `..`: any
  * unresolved/escaping traversal → null (drop). An in-repo redundant segment
- * (`a/b/../c.ts`) collapses to a clean path (`a/c.ts`) and is kept. Pure string
- * ops, zero deps (no `node:path`) — load-bearing for the esbuild-inlined bundle.
+ * (`a/b/../c.ts`) collapses to a clean path (`a/c.ts`) and is kept. Splits on
+ * EITHER separator (`/` or `\`) so a backslash mid-path traversal
+ * (`a\..\..\etc\passwd`) is caught too — matching the sibling guards
+ * `isForeignRelativePath` / `relativizeUnder`, which also treat `\` as a sep.
+ * Pure string ops, zero deps (no `node:path`) — load-bearing for the bundle.
  */
 function normalizeRepoRelative(rel: string): string | null {
   const out: string[] = [];
-  for (const seg of rel.split('/')) {
+  for (const seg of rel.split(/[\\/]/)) {
     if (seg === '' || seg === '.') continue; // collapse empty + same-dir segments
     if (seg === '..') {
       if (out.length === 0) return null; // pops above root → escapes → drop
