@@ -103,6 +103,68 @@ test('serverInfer forwards the persist leg when persist + repo are set', async (
   assert.equal(sent.decidedAt, '2026-06-03T00:00:00Z');
 });
 
+test('serverInfer forwards filePaths on the persist leg (the module anchor)', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch(() => ({
+    status: 200,
+    body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'a' }] },
+  }));
+
+  const opts: InferOptions = {
+    fetchImpl,
+    env: {} as NodeJS.ProcessEnv,
+    persist: true,
+    repo: { owner: 'backthread', name: 'marola-platform' },
+    decidedAt: '2026-06-03T00:00:00Z',
+    filePaths: ['src/auth/login.ts', 'src/auth/session.ts'],
+  };
+  await serverInfer(TRANSCRIPT, CONFIG, opts);
+
+  const sent = JSON.parse(String(calls[0].init.body));
+  assert.deepEqual(sent.filePaths, ['src/auth/login.ts', 'src/auth/session.ts']);
+});
+
+test('serverInfer omits filePaths from the body when empty', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch(() => ({
+    status: 200,
+    body: { ok: true, persisted: true, decisions: [] },
+  }));
+
+  await serverInfer(TRANSCRIPT, CONFIG, {
+    fetchImpl,
+    env: {} as NodeJS.ProcessEnv,
+    persist: true,
+    repo: { owner: 'backthread', name: 'marola-platform' },
+    filePaths: [], // a code-less session → no paths → field omitted (server reads it as unanchored)
+  });
+
+  const sent = JSON.parse(String(calls[0].init.body));
+  // Pin 'key absent', not merely falsy: after JSON.parse an explicit `filePaths:
+  // undefined` and a genuinely-omitted key both read as `undefined`, so an
+  // `=== undefined` check would also pass a regression that sent the key with an
+  // undefined value. Asserting the key is absent is the trust-boundary property
+  // we care about (no empty/undefined filePaths riding the wire).
+  assert.ok(!('filePaths' in sent));
+});
+
+test('serverInfer does NOT send filePaths on the derive-only leg (anchoring is persist-side)', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch(() => ({
+    status: 200,
+    body: { ok: true, persisted: false, decisions: [] },
+  }));
+
+  // No persist target → derive-only. filePaths are anchoring metadata, which the
+  // server only consumes when it persists, so they must not ride the derive-only body.
+  await serverInfer(TRANSCRIPT, CONFIG, {
+    fetchImpl,
+    env: {} as NodeJS.ProcessEnv,
+    filePaths: ['src/auth/login.ts'],
+  });
+
+  const sent = JSON.parse(String(calls[0].init.body));
+  assert.equal(sent.filePaths, undefined);
+  assert.equal(sent.persist, undefined);
+});
+
 test('serverInfer rejects persist without a repo target (no network call)', async () => {
   const { fetch: fetchImpl, calls } = stubFetch(() => ({ status: 200, body: {} }));
   const res = await serverInfer(TRANSCRIPT, CONFIG, {
