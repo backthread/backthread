@@ -9,10 +9,16 @@
 //   2. read the .jsonl transcript off disk
 //   3. parse + REDACT it LOCALLY (redact.ts — the security fence). No source code,
 //      no tool I/O ever leaves the machine; only redacted natural-language prose +
-//      the [code redacted] sentinel survive.
+//      the [code redacted] sentinel survive. We ALSO harvest two bits of METADATA
+//      from the raw records before redaction drops them: the session timestamp
+//      (sessionTimestamp) and the repo-relative file PATHS the session touched
+//      (sessionPaths) — directory structure, NOT file contents. Paths ≠ contents,
+//      so never-store-SOURCE still holds; see /security for this metadata egress.
 //   4. derive decisions via the router (infer.ts). Default = the Model-2
-//      server path (our keys): the REDACTED transcript is POSTed to the Worker's
-//      /infer-decisions, which runs the tuned pipeline and returns derived decisions.
+//      server path (our keys): the REDACTED transcript (+ the file-path metadata)
+//      is POSTed to the Worker's /infer-decisions, which runs the tuned pipeline,
+//      returns derived decisions, and (on the persist leg) ANCHORS them to modules
+//      via the harvested paths.
 //   5. persist:
 //        - if the router already persisted (result.persisted === true) → DONE.
 //          Re-POSTing would double-write (the server's persist leg is membership-
@@ -31,13 +37,14 @@
 // TRUST BOUNDARY (load-bearing): redaction (step 3) happens BEFORE inference (step
 // 4), so the inference router only ever sees the redacted shape — the never-store-
 // source claim holds. On the Model-2 path the *redacted* transcript reaches our
-// Worker (the weaker, /security-stated claim); derived decisions are all that reach
-// ingest-decisions.
+// Worker (the weaker, /security-stated claim), alongside repo-relative file-path
+// METADATA (directory structure, not contents — the anchor signal); derived
+// decisions are all that reach ingest-decisions.
 
 import { readFile } from 'node:fs/promises';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { ensureAuth } from './login.js';
-import { parseJsonl, redactTranscript, sessionTimestamp } from './redact.js';
+import { parseJsonl, redactTranscript, sessionPaths, sessionTimestamp } from './redact.js';
 import { resolveRepo, type RemoteReader } from './repo.js';
 import { inferDecisions, type DerivedDecision, type RedactedTranscriptInput } from './infer.js';
 import { buildIngestDecisionsUrl } from './urls.js';
@@ -237,6 +244,15 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     const records = parseJsonl(rawTranscript);
     const redacted = redactTranscript(records);
     const decidedAt = sessionTimestamp(records) ?? undefined;
+    // Harvest the repo-relative file PATHS the session touched, from the RAW records
+    // — BEFORE redaction drops the tool-use records those paths live in (same pre-
+    // redaction scan discipline as sessionTimestamp). `input.cwd` (the hook's working
+    // directory, == the repo/worktree root) lets sessionPaths normalize absolute
+    // tool-use paths to repo-relative, the format the server's reconcile pass joins on.
+    // METADATA only — directory structure, never file contents; the never-store-source
+    // claim still holds (paths ≠ contents). Absent cwd → only already-relative paths
+    // survive (often []), which the server treats as "unanchored" — correct, not an error.
+    const filePaths = sessionPaths(records, input.cwd);
     // Prefer the transcript's own session id; fall back to the hook's session_id.
     const sessionId = redacted.sessionId ?? input.session_id ?? null;
 
@@ -266,6 +282,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       env,
       fetchImpl: deps.fetchImpl,
       decidedAt,
+      filePaths,
       ...(repo ? { persist: true, repo } : {}),
     });
 

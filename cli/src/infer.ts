@@ -82,6 +82,17 @@ export interface InferOptions {
   repo?: PersistTarget;
   /** ISO-8601 decided-at, threaded into the dedupe key + decided_at (persist leg). */
   decidedAt?: string;
+  /**
+   * Repo-relative file paths the session touched (the `sessionPaths` harvest,
+   * collected pre-redaction by the caller). Forwarded to the Worker so the hosted
+   * path can ANCHOR decisions to modules (the server's W3 reconcile pass maps
+   * paths → modules), exactly like the local pipeline. METADATA only — directory
+   * structure, never file contents (the redaction fence still strips all source +
+   * tool I/O). Ignored by the server when not persisting (anchoring is persist-
+   * side). Omitted from the body when empty/absent → decisions land unanchored,
+   * which is correct, not an error.
+   */
+  filePaths?: string[];
   /** Test/dev seam: inject a fetch. Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
   /** Env override seam (BACKTHREAD_WORKER_URL). Defaults to process.env. */
@@ -198,6 +209,12 @@ export async function serverInfer(
     body.persist = true;
     body.repo = { owner: opts.repo.owner, name: opts.repo.name };
     if (opts.decidedAt) body.decidedAt = opts.decidedAt;
+    // Forward the session's touched file paths so the hosted persist leg anchors
+    // decisions to modules (server-side W3 reconcile). Only when non-empty — the
+    // server treats an absent array as "unanchored", which is the same outcome.
+    // Anchoring is a persist-side concern, so this rides only on the persist leg
+    // (mirrors decidedAt). The harvest is the redact package's `sessionPaths`.
+    if (opts.filePaths && opts.filePaths.length > 0) body.filePaths = opts.filePaths;
   }
 
   let res: Response;

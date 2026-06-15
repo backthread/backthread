@@ -106,6 +106,95 @@ test('server persists (persist requested + connected) → no double-POST to inge
   assert.match(calls[0].url, /\/infer-decisions$/);
 });
 
+// --- file-path anchor (sessionPaths) -----------------------------------------
+
+// A transcript whose tool_use records carry file_path/cwd — both ABSOLUTE under
+// the hook's cwd (/work/app) and one already-relative. sessionPaths normalizes
+// the absolutes against cwd → repo-relative, and keeps the relative as-is.
+const TRANSCRIPT_WITH_PATHS = [
+  JSON.stringify({ type: 'user', sessionId: 'sess-9', message: { content: 'why this auth design?' } }),
+  JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-06-03T09:00:00Z',
+    message: {
+      content: [
+        { type: 'text', text: 'Role-split RLS keeps the writer path narrow.' },
+        { type: 'tool_use', name: 'Edit', input: { file_path: '/work/app/src/auth/rls.ts' } },
+        { type: 'tool_use', name: 'Read', input: { file_path: '/work/app/src/auth/session.ts' } },
+        // a path OUTSIDE the repo root → dropped (foreign)
+        { type: 'tool_use', name: 'Read', input: { file_path: '/etc/passwd' } },
+        // an already-relative path → kept as-is
+        { type: 'tool_use', name: 'Write', input: { file_path: 'src/auth/policy.ts' } },
+      ],
+    },
+  }),
+].join('\n');
+
+test('harvests sessionPaths (cwd-relative) and includes filePaths in the /infer-decisions body', async () => {
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'role-split RLS' }] } };
+    },
+  });
+
+  const out = await runCapture(HOOK, deps({ fetchImpl, readFileImpl: async () => TRANSCRIPT_WITH_PATHS }));
+  assert.equal(out.status, 'persisted-by-server');
+
+  const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
+  // Absolutes under /work/app are relativized; the relative one is kept; /etc/passwd
+  // is foreign → dropped. Output is deduped + sorted by sessionPaths.
+  assert.deepEqual(filePaths, ['src/auth/policy.ts', 'src/auth/rls.ts', 'src/auth/session.ts']);
+});
+
+test('code-less session (no tool_use paths) → persist leg omits filePaths (unanchored, still captured)', async () => {
+  let inferBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      inferBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'move to RLS role-split' }] } };
+    },
+  });
+
+  // TRANSCRIPT_JSONL is a planning/discussion session: its only tool_use is a Bash
+  // COMMAND (not a file path), so sessionPaths yields []. The decision is still kept
+  // + persisted (the server marks it unanchored). The body must NOT carry filePaths.
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.equal(out.status, 'persisted-by-server');
+  assert.equal((inferBody as { persist?: unknown }).persist, true);
+  assert.equal((inferBody as { filePaths?: unknown }).filePaths, undefined);
+});
+
+test('absent cwd → derive-only leg sends NO machine-absolute paths', async () => {
+  let inferBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    // Derive-only: server returns decisions but did not persist.
+    infer: (body) => {
+      inferBody = body;
+      return { status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }] } };
+    },
+  });
+
+  // No cwd on the hook → resolveRepo can't run → derive-only path (no persist leg).
+  // sessionPaths still ran on the records but, without a root to relativize against,
+  // it SKIPS every absolute path (never emits a machine-absolute path). Since
+  // filePaths ride only the persist leg, the derive-only /infer-decisions body omits
+  // them entirely — and the subsequent ingest path can't claim (no repo).
+  const hookNoCwd: HookInput = { transcript_path: '/tmp/sess.jsonl', session_id: 'sess-9' };
+  const out = await runCapture(
+    hookNoCwd,
+    deps({ fetchImpl, readFileImpl: async () => TRANSCRIPT_WITH_PATHS }),
+  );
+  // No repo → derived decisions have nothing to claim under → nothing-to-capture.
+  assert.equal(out.status, 'nothing-to-capture');
+
+  // The /infer-decisions body never carried filePaths (derive-only) — and crucially,
+  // nothing absolute leaked anywhere in the request.
+  assert.equal((inferBody as { filePaths?: unknown }).filePaths, undefined);
+  assert.doesNotMatch(JSON.stringify(inferBody), /\/work\/app|\/etc\/passwd/);
+});
+
 test('derive-only (server did not persist) → POST derived decisions to ingest-decisions', async () => {
   const { fetch: fetchImpl, calls } = stubFetch({
     infer: () => ({
