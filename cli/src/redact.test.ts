@@ -160,6 +160,28 @@ test('sessionPaths drops ~, ../-escape, and Windows-absolute paths (keeps real r
   assert.deepEqual(sessionPaths(records), ['src/x.ts']);
 });
 
+test('sessionPaths drops MID-path .. traversal that escapes the repo (defense-in-depth)', () => {
+  // isForeignRelativePath only catches a LEADING ../, so these mid-path escapes
+  // bypassed the guard pre-fix and were emitted verbatim. After normalization
+  // they resolve above root → dropped. Never EMIT a path containing `..`.
+  const records = [
+    // relative with mid-path traversal escaping root → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'a/../../etc/passwd' } }] } },
+    // absolute that prefix-relativizes to ../etc/passwd against /repo → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/repo/../etc/passwd' } }] } },
+    // a deeper mid-path escape (net traversal pops above root) → drop
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'src/a/b/../../../../../../etc/shadow' } }] } },
+    // an IN-repo redundant segment → normalized + kept (a/b/../c.ts → a/c.ts)
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'a/b/../c.ts' } }] } },
+  ];
+  // Only the in-repo redundant path survives, collapsed to its clean form.
+  assert.deepEqual(sessionPaths(records, '/repo'), ['a/c.ts']);
+  // Same drop behavior with no resolvable root at all.
+  assert.deepEqual(sessionPaths(records), ['a/c.ts']);
+  // And critically: no emitted path ever contains `..`.
+  assert.ok(sessionPaths(records, '/repo').every((p) => !p.split('/').includes('..')));
+});
+
 test('sessionPaths does NOT harvest Codex shell command arrays (a command is not a file path)', () => {
   const records = [
     {

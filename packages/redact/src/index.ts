@@ -262,6 +262,32 @@ function isForeignRelativePath(p: string): boolean {
 }
 
 /**
+ * Resolve `.` / `..` segments in a repo-RELATIVE POSIX path, returning the
+ * normalized in-repo path, or null when the path ESCAPES the repo root (a `..`
+ * pops above root, i.e. net traversal goes above the root). Defense-in-depth for
+ * the trust boundary: `isForeignRelativePath` / `relativizeUnder` only catch a
+ * LEADING `../`, so mid-path traversal (`a/../../etc/passwd`, or a
+ * `/repo/../etc/passwd` that prefix-relativizes to `../etc/passwd`) would slip
+ * through and be emitted verbatim. We never EMIT a path containing `..`: any
+ * unresolved/escaping traversal → null (drop). An in-repo redundant segment
+ * (`a/b/../c.ts`) collapses to a clean path (`a/c.ts`) and is kept. Pure string
+ * ops, zero deps (no `node:path`) — load-bearing for the esbuild-inlined bundle.
+ */
+function normalizeRepoRelative(rel: string): string | null {
+  const out: string[] = [];
+  for (const seg of rel.split('/')) {
+    if (seg === '' || seg === '.') continue; // collapse empty + same-dir segments
+    if (seg === '..') {
+      if (out.length === 0) return null; // pops above root → escapes → drop
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+/**
  * Normalize an absolute path to repo-relative against `root`, or null when the
  * path is NOT under `root` (foreign to this repo → dropped). Pure string ops,
  * no `node:path`: the package is dependency-free + pure-string (load-bearing for
@@ -380,14 +406,21 @@ export function sessionPaths(records: unknown[], repoRoot?: string): string[] {
         if (root === null) continue;
         const rel = relativizeUnder(p, root);
         if (rel === null || rel.length === 0) continue;
-        seen.add(rel);
+        // Re-check the relativized RESULT: string-prefix relativization can leave
+        // a `../`-escape (`/repo/../etc/passwd` → `../etc/passwd`). Normalize it
+        // and drop anything that still traverses above the root.
+        const norm = normalizeRepoRelative(rel);
+        if (norm === null || norm.length === 0) continue;
+        seen.add(norm);
       } else if (!isForeignRelativePath(p)) {
         // Genuinely relative — keep as-is (a path the agent referenced relative
         // to the repo). Strip any leading `./` for a stable, canonical form.
         // Foreign forms (`~`-home, `../`-escape, Windows-absolute) are dropped
         // above: they can't be confirmed inside the repo, so we never emit them.
-        const rel = p.replace(/^(?:\.\/)+/, '');
-        if (rel.length > 0) seen.add(rel);
+        // `isForeignRelativePath` only catches a LEADING `../`, so normalize to
+        // resolve MID-path `..` and drop any that escape the root.
+        const norm = normalizeRepoRelative(p.replace(/^(?:\.\/)+/, ''));
+        if (norm !== null && norm.length > 0) seen.add(norm);
       }
     }
   }
