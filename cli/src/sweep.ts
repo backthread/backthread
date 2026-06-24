@@ -44,7 +44,7 @@
 import { readFile, stat, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { runCapture, type CaptureDeps, type CaptureOutcome, type HookInput } from './capture.js';
 import { slugifyCwd } from './captureCommand.js';
 import { readConfig, type BackthreadConfig } from './config.js';
@@ -133,7 +133,7 @@ export interface DirAttribution {
 /** What a sweep produced. Never thrown — the caller (a hook) tolerates any failure. */
 export interface SweepSummary {
   /** A terse machine status for the caller/log. */
-  status: 'swept' | 'debounced' | 'no-repo' | 'no-auth';
+  status: 'swept' | 'debounced' | 'no-repo' | 'no-auth' | 'error';
   /** The target repo `owner/name`, when resolved. */
   repo: string | null;
   /** Transcript dirs we attributed to the target repo and swept. */
@@ -244,6 +244,14 @@ export function classifyDir(args: {
   // TIER 2 (heuristic): the working dir is GONE (deleted worktree) so git can't speak.
   // Include it iff its path looks like a worktree of the target's main checkout — a
   // nested worktree under the root, or a sibling whose path is `<root>-<suffix>`.
+  //
+  // KNOWN LIMITATION (caller log()s every heuristic include so it's auditable): a
+  // DELETED *ambiguous* sibling whose cwd is gone — e.g. a removed `<root>-lander` that
+  // was actually a DIFFERENT repo — also matches `<root>-` and would be attributed to
+  // the target (wrong slug). We accept this for v1: a LIVE sibling is correctly excluded
+  // by Tier 1 (its cwd resolves to its own repo), so this only bites a sibling that is
+  // BOTH a different repo AND already deleted — rare, and the durable fix is the
+  // transcript-embedded git remote (Codex carries one; CC does not yet), a Phase-2 item.
   const isNested = embeddedCwd === mainRoot || embeddedCwd.startsWith(mainRoot + '/');
   const isSibling = embeddedCwd.startsWith(mainRoot + '-');
   if (isNested || isSibling) return { include: true, mode: 'heuristic', cwd: embeddedCwd };
@@ -272,19 +280,21 @@ async function defaultPathExists(path: string): Promise<boolean> {
 }
 
 /** Default: the main-checkout root for a cwd (the dir containing the COMMON `.git`),
- *  so a hook fired from a worktree still anchors the whole family. Falls back to null
- *  (→ caller uses cwd) on any git error / old git without `--path-format`. */
+ *  so a hook fired from a worktree still anchors the whole family. `--git-common-dir`
+ *  is the MAIN repo's `.git` even from a worktree; its parent is the main checkout root.
+ *  We deliberately do NOT use `--path-format=absolute` (git >= 2.31 only) — instead we
+ *  resolve a relative result (the main checkout reports a bare `.git`) against `cwd`,
+ *  so this works on older git too. Returns null on any git error (→ caller uses cwd). */
 function defaultMainRoot(cwd: string): string | null {
   try {
-    const out = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    const out = execFileSync('git', ['rev-parse', '--git-common-dir'], {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     if (!out) return null;
-    // `--git-common-dir` is the MAIN repo's `.git` even from a worktree; its parent is
-    // the main checkout root.
-    return dirname(out.replace(/\/+$/, ''));
+    const abs = isAbsolute(out) ? out : join(cwd, out);
+    return dirname(abs.replace(/\/+$/, ''));
   } catch {
     return null;
   }
@@ -306,10 +316,9 @@ function defaultMainRoot(cwd: string): string | null {
 export async function runSweep(input: SweepInput = {}, deps: SweepDeps = {}): Promise<SweepSummary> {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m: string) => console.error(m));
-  const home = (deps.homedirImpl ?? homedir)();
-  const now = (deps.nowImpl ?? (() => new Date().toISOString()))();
   const debounceMs = deps.debounceMs ?? SWEEP_DEBOUNCE_MS;
-  const cwd = input.cwd ?? process.cwd();
+  // `home`/`now`/`cwd` call (possibly injected) impls, so resolve them INSIDE the try —
+  // a misbehaving seam must degrade to the 'error' summary, never throw into the host.
   // All I/O seams are wrapped to degrade (not throw) even when an INJECTED impl throws —
   // defense-in-depth around the never-throws posture (the real defaults already swallow).
   const baseReadDir = deps.readDirImpl ?? defaultReadDir;
@@ -350,6 +359,10 @@ export async function runSweep(input: SweepInput = {}, deps: SweepDeps = {}): Pr
   const doWriteState = deps.writeSweepStateImpl ?? writeSweepState;
 
   try {
+    const home = (deps.homedirImpl ?? homedir)();
+    const now = (deps.nowImpl ?? (() => new Date().toISOString()))();
+    const cwd = input.cwd ?? process.cwd();
+
     // (1) Target repo.
     const target = resolveRepo(cwd, readRemote);
     if (!target) {
@@ -505,10 +518,11 @@ export async function runSweep(input: SweepInput = {}, deps: SweepDeps = {}): Pr
       text,
     };
   } catch (e) {
-    // Ultimate backstop — a sweep must never throw into the host session.
+    // Ultimate backstop — a sweep must never throw into the host session. Reported as
+    // 'error' (NOT 'no-repo') so a mid-sweep throw is distinguishable from "no remote".
     const text = `backthread sweep: failed (swallowed) — ${(e as Error).message}`;
     log(text);
-    return EMPTY('no-repo', null, text);
+    return EMPTY('error', null, text);
   }
 }
 

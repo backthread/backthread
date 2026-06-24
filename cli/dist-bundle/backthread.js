@@ -7837,7 +7837,7 @@ function parseManualArgs(argv) {
 import { readFile as readFile4, stat as stat2, readdir } from "node:fs/promises";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname2, join as join6 } from "node:path";
+import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join6 } from "node:path";
 
 // src/sweepLedger.ts
 import { join as join5 } from "node:path";
@@ -7980,13 +7980,14 @@ async function defaultPathExists(path) {
 }
 function defaultMainRoot(cwd) {
   try {
-    const out = execFileSync2("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+    const out = execFileSync2("git", ["rev-parse", "--git-common-dir"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
     if (!out) return null;
-    return dirname2(out.replace(/\/+$/, ""));
+    const abs = isAbsolute2(out) ? out : join6(cwd, out);
+    return dirname2(abs.replace(/\/+$/, ""));
   } catch {
     return null;
   }
@@ -7994,10 +7995,7 @@ function defaultMainRoot(cwd) {
 async function runSweep(input = {}, deps = {}) {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m) => console.error(m));
-  const home = (deps.homedirImpl ?? homedir3)();
-  const now = (deps.nowImpl ?? (() => (/* @__PURE__ */ new Date()).toISOString()))();
   const debounceMs = deps.debounceMs ?? SWEEP_DEBOUNCE_MS;
-  const cwd = input.cwd ?? process.cwd();
   const baseReadDir = deps.readDirImpl ?? defaultReadDir;
   const doReadDir = async (d) => {
     try {
@@ -8035,6 +8033,9 @@ async function runSweep(input = {}, deps = {}) {
   const doReadState = deps.readSweepStateImpl ?? readSweepState;
   const doWriteState = deps.writeSweepStateImpl ?? writeSweepState;
   try {
+    const home = (deps.homedirImpl ?? homedir3)();
+    const now = (deps.nowImpl ?? (() => (/* @__PURE__ */ new Date()).toISOString()))();
+    const cwd = input.cwd ?? process.cwd();
     const target = resolveRepo(cwd, readRemote);
     if (!target) {
       const text2 = `backthread sweep: no git remote for ${cwd} \u2014 can't scope a gap-recovery sweep.`;
@@ -8158,7 +8159,7 @@ async function runSweep(input = {}, deps = {}) {
   } catch (e) {
     const text = `backthread sweep: failed (swallowed) \u2014 ${e.message}`;
     log(text);
-    return EMPTY("no-repo", null, text);
+    return EMPTY("error", null, text);
   }
 }
 async function runGapRecoverySweep(input = {}, deps = {}) {

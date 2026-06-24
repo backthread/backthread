@@ -367,6 +367,15 @@ test('runSweep: a readDir that throws degrades, never throws', async () => {
   assert.equal(s.found, 0);
 });
 
+test('runSweep: a misbehaving seam (nowImpl throws) degrades to status error, never throws', async () => {
+  const f = fixture();
+  f.deps.nowImpl = () => {
+    throw new Error('clock boom');
+  };
+  const s = await runSweep({ cwd: MAIN }, f.deps);
+  assert.equal(s.status, 'error'); // distinguishable from 'no-repo'
+});
+
 test('runSweep: a runCapture that throws on one transcript is swallowed; the rest run', async () => {
   const f = fixture({
     capture: async (input) => {
