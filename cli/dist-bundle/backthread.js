@@ -33199,7 +33199,9 @@ function formatQueryOutcome(outcome, question) {
 function buildMcpServer(deps = {}) {
   const server = new McpServer({
     name: deps.name ?? "backthread",
-    version: deps.version ?? "0.0.0"
+    // Report the package's real version (read from package.json, ARP-478) instead of a
+    // pinned 0.0.0, so an MCP host's serverInfo shows the installed Backthread version.
+    version: deps.version ?? cliVersion()
   });
   server.registerTool(
     "capture",
