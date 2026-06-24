@@ -56,6 +56,10 @@ import {
   type SweepState,
 } from './sweepLedger.js';
 
+// Re-export so consumers of SweepDeps (whose readSweepStateImpl/writeSweepStateImpl
+// are typed in SweepState) can name the type without reaching into sweepLedger.
+export type { SweepState } from './sweepLedger.js';
+
 /** Inputs to a sweep. */
 export interface SweepInput {
   /** A working directory inside the repo to sweep. Defaults to process.cwd(). */
