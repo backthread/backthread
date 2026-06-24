@@ -17,6 +17,7 @@ import type { BackfillSummary } from './backfill.js';
 
 const ENV = {} as NodeJS.ProcessEnv;
 const CWD = '/work/app';
+const HOME = '/home/dev';
 const AUTHED: BackthreadConfig = { account: 'acc-1', device_token: 'backthread_pat_x' };
 
 function emptyBackfill(): BackfillSummary {
@@ -25,6 +26,7 @@ function emptyBackfill(): BackfillSummary {
 
 function deps(over: Partial<InstallDeps> = {}): InstallDeps {
   return {
+    home: HOME,
     ensureAuthImpl: async () => AUTHED,
     readConfigImpl: async () => AUTHED,
     readFileImpl: async () => {
@@ -128,10 +130,10 @@ test('mergeSessionEndHook keeps a foreign hook while migrating the retired comma
 
 // --- registerHook (I/O seams) -----------------------------------------------
 
-test('registerHook writes merged settings to <cwd>/.claude/settings.json', async () => {
+test('registerHook writes merged settings to the USER-GLOBAL ~/.claude/settings.json', async () => {
   let written: { path: string; data: string } | null = null;
   let mkdirDir: string | null = null;
-  const res = await registerHook(CWD, {
+  const res = await registerHook({ home: HOME,
     readFileImpl: async () => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     },
@@ -139,8 +141,9 @@ test('registerHook writes merged settings to <cwd>/.claude/settings.json', async
     writeFileImpl: async (p, d) => void (written = { path: p, data: d }),
   });
   assert.equal(res.wrote, true);
-  assert.equal(res.path, '/work/app/.claude/settings.json');
-  assert.equal(mkdirDir, '/work/app/.claude');
+  // USER scope (ARP-680), NOT the project /work/app/.claude — survives worktrees.
+  assert.equal(res.path, '/home/dev/.claude/settings.json');
+  assert.equal(mkdirDir, '/home/dev/.claude');
   // Assert on the parsed JSON's command field directly (not a substring of the
   // serialized blob) so the assertion can't match the command appearing elsewhere.
   const parsed = JSON.parse(written!.data);
@@ -150,7 +153,7 @@ test('registerHook writes merged settings to <cwd>/.claude/settings.json', async
 
 test('registerHook is a no-op (no write) when already present', async () => {
   let wrote = false;
-  const res = await registerHook(CWD, {
+  const res = await registerHook({ home: HOME,
     readFileImpl: async () =>
       JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }] } }),
     writeFileImpl: async () => void (wrote = true),
@@ -162,7 +165,7 @@ test('registerHook is a no-op (no write) when already present', async () => {
 
 test('registerHook merges into an existing valid settings.json (preserves keys)', async () => {
   let data = '';
-  await registerHook(CWD, {
+  await registerHook({ home: HOME,
     readFileImpl: async () => JSON.stringify({ permissions: { allow: ['Bash'] } }),
     writeFileImpl: async (_p, d) => void (data = d),
     mkdirImpl: async () => {},
@@ -175,7 +178,7 @@ test('registerHook merges into an existing valid settings.json (preserves keys)'
 test('registerHook REFUSES to overwrite a corrupt (unparseable) settings.json', async () => {
   let wrote = false;
   await assert.rejects(
-    registerHook(CWD, {
+    registerHook({ home: HOME,
       readFileImpl: async () => '{ this is : not json,', // present but broken
       writeFileImpl: async () => void (wrote = true),
       mkdirImpl: async () => {},
@@ -188,7 +191,7 @@ test('registerHook REFUSES to overwrite a corrupt (unparseable) settings.json', 
 test('registerHook REFUSES to overwrite a non-object settings.json (e.g. an array)', async () => {
   let wrote = false;
   await assert.rejects(
-    registerHook(CWD, {
+    registerHook({ home: HOME,
       readFileImpl: async () => '[]',
       writeFileImpl: async () => void (wrote = true),
       mkdirImpl: async () => {},
@@ -201,7 +204,7 @@ test('registerHook REFUSES to overwrite a non-object settings.json (e.g. an arra
 test('registerHook surfaces a real read error (non-ENOENT) instead of clobbering', async () => {
   let wrote = false;
   await assert.rejects(
-    registerHook(CWD, {
+    registerHook({ home: HOME,
       readFileImpl: async () => {
         throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
       },
@@ -348,4 +351,63 @@ test('runInstall: a corrupt settings.json is reported (no clobber) but install s
   assert.equal(wrote, false); // the corrupt file was NOT overwritten
   assert.equal(res.hookRegistered, false);
   assert.equal(res.exitCode, 0); // auth + backfill ok → install does not fail on this
+});
+
+// --- runInstall --agent (per-agent writer path) ------------------------------
+
+test('runInstall --agent gemini → per-agent writer, NO CC settings.json / backfill', async () => {
+  let agentArg: string | undefined;
+  let backfillCalls = 0;
+  let ccWrote = false;
+  const res = await runInstall(
+    opts({ agent: 'gemini' }),
+    deps({
+      runInstallAgentImpl: async (a) => {
+        agentArg = a;
+        return { agent: a, writes: [{ path: '/home/dev/.gemini/settings.json', wrote: true }], versionWarning: null, deeplink: null };
+      },
+      runBackfillImpl: async () => ((backfillCalls += 1), emptyBackfill()),
+      // The CC settings.json writer must NEVER be reached on the --agent path.
+      writeFileImpl: async () => void (ccWrote = true),
+    }),
+  );
+  assert.equal(agentArg, 'gemini');
+  assert.equal(res.agentResult!.agent, 'gemini');
+  assert.equal(res.backfill, null);
+  assert.equal(backfillCalls, 0);
+  assert.equal(ccWrote, false);
+  assert.equal(res.exitCode, 0);
+});
+
+test('runInstall --agent: writes the config even when auth fails (armed), exit 1', async () => {
+  let agentCalls = 0;
+  const res = await runInstall(
+    opts({ agent: 'cursor' }),
+    deps({
+      ensureAuthImpl: async () => {
+        throw new Error('login declined');
+      },
+      runInstallAgentImpl: async (a) => {
+        agentCalls += 1;
+        return { agent: a, writes: [{ path: '/home/dev/.cursor/mcp.json', wrote: true }], versionWarning: null, deeplink: 'cursor://x' };
+      },
+    }),
+  );
+  assert.equal(agentCalls, 1); // config still written (armed for the next `backthread login`)
+  assert.equal(res.authed, false);
+  assert.equal(res.exitCode, 1);
+  assert.equal(res.agentResult!.deeplink, 'cursor://x');
+});
+
+test('runInstall --agent: a writer throw (corrupt config) is reported, install does not crash', async () => {
+  const res = await runInstall(
+    opts({ agent: 'codex' }),
+    deps({
+      runInstallAgentImpl: async () => {
+        throw new Error('config.toml is not valid');
+      },
+    }),
+  );
+  assert.equal(res.exitCode, 0); // auth ok → install succeeds; the write problem is reported
+  assert.equal(res.agentResult, null);
 });

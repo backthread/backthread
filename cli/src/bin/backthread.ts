@@ -30,6 +30,7 @@ import { parseManualArgs, runManualCapture } from '../captureCommand.js';
 import { parseAgent, runFromHook } from '../fromHook.js';
 import { startMcpServer } from '../mcp.js';
 import { runInstall } from '../install.js';
+import { parseInstallAgent } from '../installAgent.js';
 import { runStart } from '../firstRun.js';
 
 const USAGE = `backthread — capture the "why" of your AI-coded changes
@@ -54,6 +55,9 @@ Usage:
   backthread mcp                Start the MCP server (capture + query tools) over stdio
   backthread install            Set up capture for this repo (login + hook + backfill history)
                           [--claim <code>] [--skip-auth] [--skip-hook] [--skip-backfill]
+  backthread install --agent <codex|cursor|gemini>
+                          Set up capture for another agent: write its USER-GLOBAL
+                          MCP server config + session-end capture hook (idempotent)
   backthread help               Show this message
 
 Docs: https://app.backthread.dev`;
@@ -207,8 +211,18 @@ async function main(argv: string[]): Promise<number | null> {
       // (settings.json fallback) → chain the one-shot backfill. runInstall reports
       // each step to stderr and returns an exit code (non-zero only on a genuine
       // auth failure — the backfill leg is best-effort and never fails install).
+      // `--agent <codex|cursor|gemini>` writes that agent's user-global MCP + hook
+      // instead (ARP-503). A bad --agent value fails fast rather than silently
+      // falling back to the Claude Code path.
+      const agentFlag = flagValue(rest, '--agent');
+      const agent = parseInstallAgent(agentFlag);
+      if (agentFlag !== undefined && agent === null) {
+        console.error(`Unknown --agent "${agentFlag}". Use one of: codex, cursor, gemini, claude-code.`);
+        return 1;
+      }
       const result = await runInstall({
         claim: parseClaimFlag(rest),
+        agent: agent ?? undefined,
         skipAuth: rest.includes('--skip-auth'),
         skipHook: rest.includes('--skip-hook'),
         skipBackfill: rest.includes('--skip-backfill'),

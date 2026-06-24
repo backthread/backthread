@@ -7289,7 +7289,7 @@ async function ensureAuth(opts = {}) {
 }
 
 // src/capture.ts
-import { readFile as readFile5 } from "node:fs/promises";
+import { readFile as readFile6 } from "node:fs/promises";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -7717,12 +7717,13 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
 }
 
 // src/firstRun.ts
-import { join as join7 } from "node:path";
-import { readFile as readFile4, writeFile as writeFile4, mkdir as mkdir4, chmod as chmod3 } from "node:fs/promises";
+import { join as join8 } from "node:path";
+import { readFile as readFile5, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod3 } from "node:fs/promises";
 
 // src/install.ts
-import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3 } from "node:fs/promises";
-import { join as join6 } from "node:path";
+import { readFile as readFile4, writeFile as writeFile4, mkdir as mkdir4 } from "node:fs/promises";
+import { homedir as homedir5 } from "node:os";
+import { join as join7 } from "node:path";
 
 // src/backfill.ts
 import { readdir } from "node:fs/promises";
@@ -7897,6 +7898,206 @@ async function runBackfill(input = {}, deps = {}) {
   return { found: files.length, captured, decisions, results, text };
 }
 
+// src/installAgent.ts
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { homedir as homedir4 } from "node:os";
+import { join as join6, dirname as dirname2 } from "node:path";
+import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3 } from "node:fs/promises";
+var execFileP = promisify(execFile);
+var MCP_COMMAND = "npx";
+var MCP_ARGS = ["-y", "backthread", "mcp"];
+function hookCommand(agent) {
+  return `npx -y backthread capture --from-hook --agent ${agent} --detach`;
+}
+var MIN_VERSION = {
+  codex: "0.124.0",
+  cursor: "1.7.0",
+  gemini: "0.26.0"
+};
+var VERSION_BIN = {
+  codex: "codex",
+  cursor: "cursor-agent",
+  gemini: "gemini"
+};
+async function loadJsonObject(readFileImpl, path) {
+  let raw;
+  try {
+    raw = await readFileImpl(path);
+  } catch (e) {
+    if (isNotFound2(e)) return {};
+    throw e;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${path} exists but is not valid JSON \u2014 refusing to overwrite it. Fix it (or add the config manually) and re-run.`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${path} is not a JSON object \u2014 refusing to overwrite it. Fix it (or add the config manually) and re-run.`);
+  }
+  return parsed;
+}
+function isNotFound2(err) {
+  return typeof err === "object" && err !== null && "code" in err && err.code === "ENOENT";
+}
+function asObject(v) {
+  return v && typeof v === "object" && !Array.isArray(v) ? { ...v } : {};
+}
+function mcpServerEntry() {
+  return { command: MCP_COMMAND, args: [...MCP_ARGS] };
+}
+function withMcpServer(settings) {
+  const mcpServers = asObject(settings.mcpServers);
+  const desired = mcpServerEntry();
+  if (JSON.stringify(mcpServers.backthread) === JSON.stringify(desired)) {
+    return { next: settings, changed: false };
+  }
+  mcpServers.backthread = desired;
+  return { next: { ...settings, mcpServers }, changed: true };
+}
+function withNestedHook(settings, event, command, extra = {}) {
+  const hooks = asObject(settings.hooks);
+  const list = Array.isArray(hooks[event]) ? [...hooks[event]] : [];
+  const present = list.some((g) => {
+    const inner = g?.hooks;
+    return Array.isArray(inner) && inner.some((h) => h?.command === command);
+  });
+  if (present) return { next: settings, changed: false };
+  list.push({ hooks: [{ type: "command", command, ...extra }] });
+  hooks[event] = list;
+  return { next: { ...settings, hooks }, changed: true };
+}
+async function writeJson(deps, path, obj) {
+  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir3(d, { recursive: true }));
+  const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile3(p, d));
+  await doMkdir(dirname2(path));
+  await doWrite(path, JSON.stringify(obj, null, 2) + "\n");
+}
+async function installGemini(home, deps) {
+  const doRead = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
+  const path = join6(home, ".gemini", "settings.json");
+  const current = await loadJsonObject(doRead, path);
+  const a = withMcpServer(current);
+  const b = withNestedHook(a.next, "SessionEnd", hookCommand("gemini-cli"), { name: "backthread-capture" });
+  if (a.changed || b.changed) await writeJson(deps, path, b.next);
+  return [{ path, wrote: a.changed || b.changed }];
+}
+async function installCodex(home, deps) {
+  const doRead = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
+  const writes = [];
+  const tomlPath = join6(home, ".codex", "config.toml");
+  let toml = "";
+  try {
+    toml = await doRead(tomlPath);
+  } catch (e) {
+    if (!isNotFound2(e)) throw e;
+  }
+  if (toml.includes("[mcp_servers.backthread]")) {
+    writes.push({ path: tomlPath, wrote: false });
+  } else {
+    const block = `[mcp_servers.backthread]
+command = "${MCP_COMMAND}"
+args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
+`;
+    const sep = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
+    const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir3(d, { recursive: true }));
+    const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile3(p, d));
+    await doMkdir(dirname2(tomlPath));
+    await doWrite(tomlPath, toml + sep + block);
+    writes.push({ path: tomlPath, wrote: true });
+  }
+  const hooksPath = join6(home, ".codex", "hooks.json");
+  const current = await loadJsonObject(doRead, hooksPath);
+  const h = withNestedHook(current, "Stop", hookCommand("codex"), { timeout: 60 });
+  if (h.changed) await writeJson(deps, hooksPath, h.next);
+  writes.push({ path: hooksPath, wrote: h.changed });
+  return writes;
+}
+async function installCursor(home, deps) {
+  const doRead = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
+  const writes = [];
+  const mcpPath = join6(home, ".cursor", "mcp.json");
+  const mcpCurrent = await loadJsonObject(doRead, mcpPath);
+  const m = withMcpServer(mcpCurrent);
+  if (m.changed) await writeJson(deps, mcpPath, m.next);
+  writes.push({ path: mcpPath, wrote: m.changed });
+  const hooksPath = join6(home, ".cursor", "hooks.json");
+  const hooksCurrent = await loadJsonObject(doRead, hooksPath);
+  const c = withCursorStopHook(hooksCurrent);
+  if (c.changed) await writeJson(deps, hooksPath, c.next);
+  writes.push({ path: hooksPath, wrote: c.changed });
+  return writes;
+}
+function withCursorStopHook(settings) {
+  const command = hookCommand("cursor");
+  const hooks = asObject(settings.hooks);
+  const stop = Array.isArray(hooks.stop) ? [...hooks.stop] : [];
+  const present = stop.some((h) => h?.command === command);
+  const hasVersion = typeof settings.version === "number";
+  if (present && hasVersion) return { next: settings, changed: false };
+  if (!present) stop.push({ command });
+  hooks.stop = stop;
+  return { next: { ...settings, version: hasVersion ? settings.version : 1, hooks }, changed: true };
+}
+function cursorDeeplink() {
+  const config2 = Buffer.from(JSON.stringify(mcpServerEntry())).toString("base64");
+  return `cursor://anysphere.cursor-deeplink/mcp/install?name=backthread&config=${config2}`;
+}
+function parseSemver(s) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(s);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+function isBelow(a, b) {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
+}
+async function probeVersion(agent) {
+  try {
+    const { stdout } = await execFileP(VERSION_BIN[agent], ["--version"], { timeout: 3e3 });
+    return stdout?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+async function versionGate(agent, deps) {
+  const probe = deps.probeVersionImpl ?? probeVersion;
+  const raw = await probe(agent).catch(() => null);
+  if (!raw) return null;
+  const got = parseSemver(raw);
+  const min = parseSemver(MIN_VERSION[agent]);
+  if (got && isBelow(got, min)) {
+    return `Detected ${agent} ${got.join(".")}, but the capture hook needs ${MIN_VERSION[agent]}+. The MCP query tool works now; upgrade ${agent} for auto-capture.`;
+  }
+  return null;
+}
+async function runInstallAgent(agent, deps = {}) {
+  const home = deps.home ?? homedir4();
+  const versionWarning = await versionGate(agent, deps);
+  let writes;
+  switch (agent) {
+    case "gemini":
+      writes = await installGemini(home, deps);
+      break;
+    case "codex":
+      writes = await installCodex(home, deps);
+      break;
+    case "cursor":
+      writes = await installCursor(home, deps);
+      break;
+  }
+  return { agent, writes, versionWarning, deeplink: agent === "cursor" ? cursorDeeplink() : null };
+}
+function parseInstallAgent(value) {
+  if (!value) return null;
+  const v = value.trim().toLowerCase();
+  if (v === "claude-code" || v === "claude" || v === "cc") return "claude-code";
+  if (v === "gemini" || v === "gemini-cli") return "gemini";
+  if (v === "codex" || v === "cursor") return v;
+  return null;
+}
+
 // src/install.ts
 var TRUST_COPY = [
   "How Backthread handles your code (the short version):",
@@ -7910,18 +8111,19 @@ var TRUST_COPY = [
 var HOOK_COMMAND = "npx backthread capture --from-hook --agent claude-code --detach";
 var LEGACY_HOOK_COMMANDS = ["npx backthread capture"];
 var OUR_HOOK_COMMANDS = /* @__PURE__ */ new Set([HOOK_COMMAND, ...LEGACY_HOOK_COMMANDS]);
-async function registerHook(cwd, deps = {}) {
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
-  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile3(p, d));
-  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir3(d, { recursive: true }));
-  const settingsDir = join6(cwd, ".claude");
-  const settingsPath = join6(settingsDir, "settings.json");
+async function registerHook(deps = {}) {
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile4(p, "utf8"));
+  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
+  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
+  const home = deps.home ?? homedir5();
+  const settingsDir = join7(home, ".claude");
+  const settingsPath = join7(settingsDir, "settings.json");
   let settings = {};
   let raw = null;
   try {
     raw = await doReadFile(settingsPath);
   } catch (e) {
-    if (!isNotFound2(e)) throw e;
+    if (!isNotFound3(e)) throw e;
     raw = null;
   }
   if (raw !== null) {
@@ -7949,7 +8151,7 @@ async function registerHook(cwd, deps = {}) {
   await doWriteFile(settingsPath, JSON.stringify(merged, null, 2) + "\n");
   return { wrote: true, path: settingsPath };
 }
-function isNotFound2(err) {
+function isNotFound3(err) {
   return typeof err === "object" && err !== null && "code" in err && err.code === "ENOENT";
 }
 function mergeSessionEndHook(settings) {
@@ -8016,12 +8218,36 @@ async function runInstall(opts = {}, deps = {}) {
       log("      Run `backthread login` to authorize, then re-run `backthread install`.");
     }
   }
+  const targetAgent = opts.agent && opts.agent !== "claude-code" ? opts.agent : null;
+  if (targetAgent) {
+    const doAgent = deps.runInstallAgentImpl ?? runInstallAgent;
+    let agentResult = null;
+    try {
+      agentResult = await doAgent(targetAgent, deps.agentDeps);
+      if (agentResult.versionWarning) log(`      \u26A0 ${agentResult.versionWarning}`);
+      for (const w of agentResult.writes) {
+        log(
+          w.wrote ? `[2/2] ${targetAgent}: configured ${w.path}.` : `[2/2] ${targetAgent}: already configured in ${w.path} (no change).`
+        );
+      }
+      if (agentResult.deeplink) log(`      One-click MCP install: ${agentResult.deeplink}`);
+    } catch (e) {
+      log(`[2/2] ${targetAgent}: not configured \u2014 ${e.message}`);
+      log("      You can add the MCP server + hook manually (see the README).");
+    }
+    log(
+      `
+Backthread is set up for ${targetAgent}. New sessions are captured automatically.` + (authed ? "" : " Run `backthread login` to finish authorizing.")
+    );
+    const exitCode2 = !authed && !opts.skipAuth ? 1 : 0;
+    return { exitCode: exitCode2, authed, hookRegistered: agentResult !== null, backfill: null, agentResult };
+  }
   let hookRegistered = false;
   if (opts.skipHook) {
     log("[2/3] Hook: skipped (registered by the plugin manifest).");
   } else {
     try {
-      const { wrote, path } = await registerHook(cwd, deps);
+      const { wrote, path } = await registerHook(deps);
       hookRegistered = true;
       log(
         wrote ? `[2/3] Hook: SessionEnd capture hook added to ${path}.` : `[2/3] Hook: SessionEnd capture hook already present in ${path} (no change).`
@@ -8046,7 +8272,7 @@ async function runInstall(opts = {}, deps = {}) {
   }
   log("\nBackthread is set up. New sessions are captured automatically when they end.");
   const exitCode = !authed && !opts.skipAuth ? 1 : 0;
-  return { exitCode, authed, hookRegistered, backfill };
+  return { exitCode, authed, hookRegistered, backfill, agentResult: null };
 }
 
 // src/onboardingState.ts
@@ -8170,7 +8396,7 @@ function normalizeState(raw) {
 
 // src/firstRun.ts
 function firstRunStatePath(env = process.env) {
-  return join7(configDir(env), "first-run.json");
+  return join8(configDir(env), "first-run.json");
 }
 function parseFirstRunState(raw) {
   try {
@@ -8189,7 +8415,7 @@ function parseFirstRunState(raw) {
 }
 async function readFirstRunState(env = process.env) {
   try {
-    return parseFirstRunState(await readFile4(firstRunStatePath(env), "utf8"));
+    return parseFirstRunState(await readFile5(firstRunStatePath(env), "utf8"));
   } catch {
     return {};
   }
@@ -8199,11 +8425,11 @@ async function updateFirstRunState(patch, env = process.env) {
     const current = await readFirstRunState(env);
     const next = { ...current, ...patch };
     const dir = configDir(env);
-    await mkdir4(dir, { recursive: true, mode: DIR_MODE });
+    await mkdir5(dir, { recursive: true, mode: DIR_MODE });
     await chmod3(dir, DIR_MODE).catch(() => {
     });
     const path = firstRunStatePath(env);
-    await writeFile4(path, JSON.stringify(next) + "\n", { mode: CONFIG_MODE });
+    await writeFile5(path, JSON.stringify(next) + "\n", { mode: CONFIG_MODE });
     await chmod3(path, CONFIG_MODE).catch(() => {
     });
   } catch {
@@ -8356,7 +8582,7 @@ function readStream(stream) {
 async function runCapture(input, deps = {}) {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m) => console.error(m));
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
     void ensureAuth({ env: e }).catch(() => {
@@ -8511,8 +8737,8 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
 
 // src/fromHook.ts
 import { spawn as spawn2 } from "node:child_process";
-import { join as join8 } from "node:path";
-import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod4 } from "node:fs/promises";
+import { join as join9 } from "node:path";
+import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir6, chmod as chmod4 } from "node:fs/promises";
 var KNOWN_AGENTS = /* @__PURE__ */ new Set([
   "claude-code",
   "codex",
@@ -8553,7 +8779,7 @@ function normalizeHookInput(payload, _agent) {
   return out;
 }
 function captureStatePath(env = process.env) {
-  return join8(configDir(env), "capture-sessions.json");
+  return join9(configDir(env), "capture-sessions.json");
 }
 var MAX_REMEMBERED2 = 200;
 function parseState2(raw) {
@@ -8569,7 +8795,7 @@ function parseState2(raw) {
 }
 async function readState2(env) {
   try {
-    return parseState2(await readFile6(captureStatePath(env), "utf8"));
+    return parseState2(await readFile7(captureStatePath(env), "utf8"));
   } catch {
     return { captured: [] };
   }
@@ -8577,11 +8803,11 @@ async function readState2(env) {
 async function writeState2(state, env) {
   try {
     const dir = configDir(env);
-    await mkdir5(dir, { recursive: true, mode: DIR_MODE });
+    await mkdir6(dir, { recursive: true, mode: DIR_MODE });
     await chmod4(dir, DIR_MODE).catch(() => {
     });
     const path = captureStatePath(env);
-    await writeFile5(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
+    await writeFile6(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
     await chmod4(path, CONFIG_MODE).catch(() => {
     });
   } catch {
@@ -33033,6 +33259,9 @@ Usage:
   backthread mcp                Start the MCP server (capture + query tools) over stdio
   backthread install            Set up capture for this repo (login + hook + backfill history)
                           [--claim <code>] [--skip-auth] [--skip-hook] [--skip-backfill]
+  backthread install --agent <codex|cursor|gemini>
+                          Set up capture for another agent: write its USER-GLOBAL
+                          MCP server config + session-end capture hook (idempotent)
   backthread help               Show this message
 
 Docs: https://app.backthread.dev`;
@@ -33116,8 +33345,15 @@ async function main(argv) {
       return result.exitCode;
     }
     case "install": {
+      const agentFlag = flagValue(rest, "--agent");
+      const agent = parseInstallAgent(agentFlag);
+      if (agentFlag !== void 0 && agent === null) {
+        console.error(`Unknown --agent "${agentFlag}". Use one of: codex, cursor, gemini, claude-code.`);
+        return 1;
+      }
       const result = await runInstall({
         claim: parseClaimFlag(rest),
+        agent: agent ?? void 0,
         skipAuth: rest.includes("--skip-auth"),
         skipHook: rest.includes("--skip-hook"),
         skipBackfill: rest.includes("--skip-backfill")
