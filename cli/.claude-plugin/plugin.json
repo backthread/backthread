@@ -1,7 +1,7 @@
 {
   "name": "backthread",
   "displayName": "Backthread",
-  "description": "Keep the thread on what the agent shipped: Backthread captures the \"why\" of every session and answers \"how does X work?\" on a live \"how it works\" diagram — no diving through PRs. Provides the /backthread:capture slash command, the SessionEnd capture hook, and the backthread MCP server (capture + query).",
+  "description": "Backthread helps you understand your codebase while AI ships the code. It captures the why behind every Claude Code session so you can ask \"how does X work?\" without digging through PRs — and your code never leaves your machine.",
   "version": "0.2.0",
   "author": {
     "name": "Backthread"

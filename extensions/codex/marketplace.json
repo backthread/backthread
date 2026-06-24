@@ -4,12 +4,12 @@
     "name": "Backthread",
     "url": "https://backthread.dev"
   },
-  "description": "Architectural memory for AI-coded codebases — capture the \"why\" behind every Codex session and ask \"how does X work?\" without diving through PRs.",
+  "description": "Backthread helps you understand your codebase while AI ships the code.",
   "plugins": [
     {
       "name": "backthread",
       "source": { "source": "local", "path": "./plugins/backthread" },
-      "description": "Captures the \"why\" of every Codex session into your Backthread \"How it works\" log (Stop hook), and adds the backthread MCP server (capture + query). Source code and tool I/O are redacted locally before anything leaves your machine."
+      "description": "Backthread helps you understand your codebase while AI ships the code. It captures the why behind every Codex session so you can ask \"how does X work?\" without digging through PRs — and your code never leaves your machine."
     }
   ]
 }
