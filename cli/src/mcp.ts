@@ -26,6 +26,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { runCapture, type CaptureDeps, type CaptureOutcome, type HookInput } from './capture.js';
 import { queryDecisions, type QueryDeps, type QueryInput, type QueryOutcome } from './query.js';
+import { cliVersion } from './version.js';
 
 // The MCP content block shape we return (text-only). Structural so we don't depend
 // on an SDK type export — the SDK's CallToolResult accepts
@@ -197,7 +198,9 @@ export interface BuildServerDeps {
 export function buildMcpServer(deps: BuildServerDeps = {}): McpServer {
   const server = new McpServer({
     name: deps.name ?? 'backthread',
-    version: deps.version ?? '0.0.0',
+    // Report the package's real version (read from package.json, ARP-478) instead of a
+    // pinned 0.0.0, so an MCP host's serverInfo shows the installed Backthread version.
+    version: deps.version ?? cliVersion(),
   });
 
   server.registerTool(

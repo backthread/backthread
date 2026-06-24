@@ -1,0 +1,64 @@
+# Release — on a `v*` tag: test → verify version lockstep → publish `backthread` to
+# npm → cut a GitHub Release with auto-generated notes (ARP-478). Keeps the npm
+# package + the CC-plugin/extension manifests in lockstep on every release.
+#
+# SETUP (founder, one-time): add an npm AUTOMATION access token as the repo secret
+# `NPM_TOKEN` (Settings → Secrets → Actions). An *automation* token bypasses the
+# 2FA OTP prompt, which is what lets CI publish unattended. To cut a release:
+#   1. bump cli/package.json version AND the manifests it's lockstep-checked against
+#      (cli/.claude-plugin/plugin.json, extensions/gemini/gemini-extension.json,
+#       extensions/codex/plugins/backthread/plugin.json) + rebuild the bundle
+#      (`npm run bundle -w backthread`), commit, merge.
+#   2. `git tag v<version> && git push origin v<version>`  (tag MUST match the version).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# id-token: npm provenance (--provenance). contents: create the GitHub Release.
+permissions:
+  contents: write
+  id-token: write
+
+# Serialize releases so two tags pushed close together can't race the npm publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Committed bundle is in sync with src
+        run: git diff --exit-code cli/dist-bundle/backthread.js
+      # Guard: the tag must match cli/package.json (and the manifests, via the lockstep
+      # tests above) — never publish a version that doesn't match the tag.
+      - name: Tag matches cli/package.json version
+        run: |
+          PKG="v$(node -p "require('./cli/package.json').version")"
+          if [ "$PKG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME != cli/package.json ($PKG). Bump cli/package.json + the plugin/extension manifests to match the tag." >&2
+            exit 1
+          fi
+      # `npm publish` runs the cli's `prepack` (build + bundle), so the published bin is
+      # always a fresh self-contained bundle. --provenance attests the build to npm.
+      - name: Publish backthread to npm
+        run: npm publish -w backthread --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: GitHub Release (auto-generated notes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"

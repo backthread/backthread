@@ -1,0 +1,32 @@
+# CI — typecheck + test the `backthread` CLI on every PR + push to main, and verify
+# the committed self-contained bundle is in sync with src (ARP-478).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      # `npm test` runs the cli test suite + `npm run build` + `npm run bundle` (smoke),
+      # so it ALSO enforces the version-lockstep guards (plugin.json / gemini-extension.json
+      # / codex plugin.json all == cli/package.json) and regenerates dist-bundle/backthread.js.
+      - name: Test
+        run: npm test
+      # The Claude Code marketplace plugin is cloned from git with NO build step on
+      # install, so the COMMITTED bundle must equal a fresh build (ARP-477). `npm test`
+      # just rebuilt it; fail if it differs from what's committed (esbuild is
+      # deterministic for the lockfile-pinned version).
+      - name: Committed bundle is in sync with src
+        run: git diff --exit-code cli/dist-bundle/backthread.js
