@@ -94,6 +94,38 @@ test('mergeSessionEndHook appends alongside a different SessionEnd hook', () => 
   assert.equal(se[1].hooks[0].command, HOOK_COMMAND); // added
 });
 
+test('mergeSessionEndHook MIGRATES a retired (bare) command in place — never duplicates', () => {
+  // This is the upgrade path: a pre-ARP-682 install has the bare inline command. Re-running
+  // install must rewrite it to the completion-safe HOOK_COMMAND, not append a second hook
+  // (two hooks → double capture).
+  assert.notEqual(HOOK_COMMAND, 'npx backthread capture'); // guard: the test must be meaningful
+  const existing = {
+    hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: 'npx backthread capture' }] }] },
+  };
+  const out = mergeSessionEndHook(existing)!;
+  const se = (out.hooks as any).SessionEnd;
+  assert.equal(se.length, 1); // upgraded in place, NOT appended
+  assert.equal(se[0].hooks[0].command, HOOK_COMMAND);
+  // Input never mutated.
+  assert.equal((existing.hooks as any).SessionEnd[0].hooks[0].command, 'npx backthread capture');
+});
+
+test('mergeSessionEndHook keeps a foreign hook while migrating the retired command', () => {
+  const existing = {
+    hooks: {
+      SessionEnd: [
+        { hooks: [{ type: 'command', command: 'other-tool' }] },
+        { hooks: [{ type: 'command', command: 'npx backthread capture' }] },
+      ],
+    },
+  };
+  const out = mergeSessionEndHook(existing)!;
+  const se = (out.hooks as any).SessionEnd;
+  assert.equal(se.length, 2); // no new group appended
+  assert.equal(se[0].hooks[0].command, 'other-tool'); // foreign kept
+  assert.equal(se[1].hooks[0].command, HOOK_COMMAND); // migrated in place
+});
+
 // --- registerHook (I/O seams) -----------------------------------------------
 
 test('registerHook writes merged settings to <cwd>/.claude/settings.json', async () => {

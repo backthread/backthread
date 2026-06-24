@@ -388,6 +388,38 @@ test('detach mode re-spawns a detached worker and DOES NOT run the pipeline inli
   });
 });
 
+// ARP-682: CC's SessionEnd hook now routes through this same detach seam
+// (`capture --from-hook --agent claude-code --detach`) so a slow (≥30s) inference can't
+// be SIGTERM'd by CC's hook timeout or reaped on session exit. The hook process must
+// re-spawn the worker and return immediately — never run the pipeline inline.
+test('claude-code SessionEnd in detach mode re-spawns the worker and returns immediately (never inline)', async () => {
+  await withTempEnv(async (env) => {
+    const cap = captureStub(OK_OUTCOME);
+    let spawnedWith: { raw: string; agent: Agent } | null = null;
+    const r = await runFromHook({
+      env,
+      agent: 'claude-code',
+      detach: true,
+      rawPayload: JSON.stringify({
+        session_id: 'cc-1',
+        transcript_path: '/t.jsonl',
+        cwd: '/w',
+        hook_event_name: 'SessionEnd',
+      }),
+      runCaptureImpl: cap.impl,
+      spawnDetachedImpl: (raw, agent) => {
+        spawnedWith = { raw, agent };
+        return true;
+      },
+    });
+    assert.equal(r.status, 'detached');
+    assert.equal(r.exitCode, 0);
+    assert.equal(cap.calls.length, 0, 'the slow capture must run in the detached worker, not inline');
+    assert.equal(spawnedWith!.agent, 'claude-code');
+    assert.match(spawnedWith!.raw, /cc-1/);
+  });
+});
+
 test('a failed detached spawn still exits 0 (never disrupts the host agent)', async () => {
   await withTempEnv(async (env) => {
     const r = await runFromHook({

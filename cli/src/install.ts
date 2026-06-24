@@ -54,8 +54,27 @@ export const TRUST_COPY = [
   '  Full details: https://app.backthread.dev/security',
 ].join('\n');
 
-/** The command the SessionEnd hook runs. `npx backthread capture` reads the hook payload off stdin. */
-export const HOOK_COMMAND = 'npx backthread capture';
+/**
+ * The command the SessionEnd hook runs. It routes CC's SessionEnd through the shared
+ * `--from-hook` entrypoint with `--detach`: the hook reads the payload off stdin,
+ * re-spawns a DETACHED worker that does the slow redact→infer→persist round-trip, then
+ * returns immediately. This keeps a ≥30s inference from being SIGTERM'd by CC's
+ * SessionEnd hook timeout (or reaped on session exit) — completion-safe, never blocks
+ * or delays the session, still always exits 0 (ARP-682). `--agent claude-code` selects
+ * the CC payload shape; the detached child re-runs with `--no-detach` so it can't recurse.
+ */
+export const HOOK_COMMAND = 'npx backthread capture --from-hook --agent claude-code --detach';
+
+/**
+ * Earlier hook commands we still recognize, so re-running `backthread install` after an
+ * upgrade MIGRATES an existing registration to {@link HOOK_COMMAND} in place rather than
+ * leaving the stale command or appending a duplicate (which would double-capture). Append
+ * any future retired command strings here.
+ */
+const LEGACY_HOOK_COMMANDS: readonly string[] = ['npx backthread capture'];
+
+/** Every command string that is "ours" — the current one plus any retired ones. */
+const OUR_HOOK_COMMANDS: ReadonlySet<string> = new Set([HOOK_COMMAND, ...LEGACY_HOOK_COMMANDS]);
 
 /** Options for `backthread install`. */
 export interface InstallOptions {
@@ -111,9 +130,10 @@ export interface InstallResult {
 /**
  * Register the SessionEnd capture hook in the project's `.claude/settings.json`
  * (the bare-`npx backthread` fallback — the plugin path declares it in the manifest). Pure
- * merge: reads the existing settings, adds our `SessionEnd → npx backthread capture` entry
- * ONLY if an identical one isn't already present, preserves every other key/hook.
- * Idempotent. Returns whether a write happened (false = already present / no change).
+ * merge: reads the existing settings, adds our `SessionEnd → {@link HOOK_COMMAND}` entry
+ * ONLY if an identical one isn't already present (and upgrades a retired command in place),
+ * preserving every other key/hook. Idempotent. Returns whether a write happened
+ * (false = already present / no change).
  */
 export async function registerHook(
   cwd: string,
@@ -199,29 +219,59 @@ export function mergeSessionEndHook(
 
   const sessionEnd: unknown[] = Array.isArray(hooks.SessionEnd) ? [...(hooks.SessionEnd as unknown[])] : [];
 
-  // Already registered? Look for ANY matcher group that contains a command hook
-  // running our HOOK_COMMAND, so re-running install (or having hand-added it) is a
-  // no-op rather than a duplicate.
-  if (sessionEnd.some(groupHasOurCommand)) return null;
+  // Already on the CURRENT command anywhere → no-op (re-running install / hand-added).
+  if (sessionEnd.some((g) => groupHasCommand(g, HOOK_COMMAND))) return null;
 
-  sessionEnd.push({
-    hooks: [{ type: 'command', command: HOOK_COMMAND }],
+  // Otherwise, MIGRATE: if a group runs a retired command (a prior install), rewrite it
+  // to the current command in place — upgrading an existing install to the completion-safe
+  // form without leaving the old command or appending a duplicate (which would double-capture).
+  let migrated = false;
+  const nextSessionEnd = sessionEnd.map((group) => {
+    const rewritten = rewriteLegacyCommand(group);
+    if (rewritten !== group) migrated = true;
+    return rewritten;
   });
-  hooks.SessionEnd = sessionEnd;
+
+  // No prior registration of ours at all → append a fresh group, preserving any foreign hooks.
+  if (!migrated) {
+    nextSessionEnd.push({ hooks: [{ type: 'command', command: HOOK_COMMAND }] });
+  }
+
+  hooks.SessionEnd = nextSessionEnd;
   return { ...settings, hooks };
 }
 
-/** Does a SessionEnd matcher group already contain our `npx backthread capture` command hook? */
-function groupHasOurCommand(group: unknown): boolean {
+/** Does a SessionEnd matcher group contain a command hook running exactly `command`? */
+function groupHasCommand(group: unknown, command: string): boolean {
   if (!group || typeof group !== 'object') return false;
   const inner = (group as { hooks?: unknown }).hooks;
   if (!Array.isArray(inner)) return false;
   return inner.some(
-    (h) =>
-      h &&
-      typeof h === 'object' &&
-      (h as { command?: unknown }).command === HOOK_COMMAND,
+    (h) => h && typeof h === 'object' && (h as { command?: unknown }).command === command,
   );
+}
+
+/**
+ * Return a NEW group with any retired ({@link LEGACY_HOOK_COMMANDS}) command rewritten to
+ * the current {@link HOOK_COMMAND}; returns the SAME reference when nothing changed (so the
+ * caller can detect a migration by identity). Never mutates the input.
+ */
+function rewriteLegacyCommand(group: unknown): unknown {
+  if (!group || typeof group !== 'object') return group;
+  const inner = (group as { hooks?: unknown }).hooks;
+  if (!Array.isArray(inner)) return group;
+  let changed = false;
+  const nextInner = inner.map((h) => {
+    if (!h || typeof h !== 'object') return h;
+    const cmd = (h as { command?: unknown }).command;
+    // Rewrite retired commands only; the current command is left as-is (handled above).
+    if (typeof cmd === 'string' && cmd !== HOOK_COMMAND && OUR_HOOK_COMMANDS.has(cmd)) {
+      changed = true;
+      return { ...(h as Record<string, unknown>), command: HOOK_COMMAND };
+    }
+    return h;
+  });
+  return changed ? { ...(group as Record<string, unknown>), hooks: nextInner } : group;
 }
 
 /**
