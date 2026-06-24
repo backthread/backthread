@@ -17,7 +17,7 @@ summary tells you to re-run with an explicit path:
 
 ## Capture result
 
-!`npx backthread capture --manual --session "${CLAUDE_SESSION_ID}" --cwd "$(pwd)" $ARGUMENTS`
+!`BT="${CLAUDE_PLUGIN_ROOT}/dist-bundle/backthread.js"; if [ -f "$BT" ]; then node "$BT" capture --manual --session "${CLAUDE_SESSION_ID}" --cwd "$(pwd)" $ARGUMENTS; else npx backthread capture --manual --session "${CLAUDE_SESSION_ID}" --cwd "$(pwd)" $ARGUMENTS; fi`
 
 ## Your task
 

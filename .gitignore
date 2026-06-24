@@ -1,6 +1,5 @@
 node_modules/
 dist/
-dist-bundle/
 *.log
 .DS_Store
 .env

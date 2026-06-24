@@ -38,6 +38,24 @@ can verify it — read more at [backthread.dev/security](https://backthread.dev/
 
 ## Quick start
 
+### Claude Code → install the plugin (one click, recommended)
+
+In Claude Code:
+
+```
+/plugin marketplace add backthread/backthread
+/plugin install backthread@backthread
+/backthread:start
+```
+
+Installing the plugin bundles the CLI — no separate npm step — and registers, at
+**user/global scope** (so it works across every repo and git worktree), the
+SessionEnd **capture hook**, the `/backthread:capture` & `/backthread:start`
+commands, and the **backthread MCP server** (capture + `query`). `/backthread:start`
+just signs you in. That's the whole setup.
+
+### Any agent (or bare terminal) → `npx backthread install`
+
 In your project:
 
 ```bash
