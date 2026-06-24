@@ -1,7 +1,7 @@
 {
   "name": "backthread",
-  "version": "0.2.0",
-  "description": "Backthread CLI — capture the why behind your AI-coded changes from your Claude Code sessions, and ask how your codebase works without leaving the terminal. Source code and tool I/O are redacted locally before anything leaves your machine.",
+  "version": "0.2.1",
+  "description": "Backthread helps you understand your codebase while AI ships features. The CLI captures the why behind every AI session and lets you ask how your codebase works, right from the terminal.",
   "license": "MIT",
   "author": "Backthread",
   "homepage": "https://backthread.dev",
