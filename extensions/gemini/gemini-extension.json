@@ -1,0 +1,12 @@
+{
+  "name": "backthread",
+  "version": "0.1.5",
+  "description": "Capture the \"why\" behind every Gemini CLI session and ask \"how does X work?\" without spelunking through PRs. Bundles the Backthread MCP server (capture + query) and an automatic SessionEnd capture hook. Source code and tool I/O are redacted locally before anything leaves your machine.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "backthread": {
+      "command": "npx",
+      "args": ["-y", "backthread", "mcp"]
+    }
+  }
+}
