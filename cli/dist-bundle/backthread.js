@@ -7289,7 +7289,7 @@ async function ensureAuth(opts = {}) {
 }
 
 // src/capture.ts
-import { readFile as readFile6 } from "node:fs/promises";
+import { readFile as readFile8 } from "node:fs/promises";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -7717,18 +7717,13 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
 }
 
 // src/firstRun.ts
-import { join as join8 } from "node:path";
-import { readFile as readFile5, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod3 } from "node:fs/promises";
+import { join as join9 } from "node:path";
+import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir6, chmod as chmod4 } from "node:fs/promises";
 
 // src/install.ts
-import { readFile as readFile4, writeFile as writeFile4, mkdir as mkdir4 } from "node:fs/promises";
+import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5 } from "node:fs/promises";
 import { homedir as homedir5 } from "node:os";
-import { join as join7 } from "node:path";
-
-// src/backfill.ts
-import { readdir } from "node:fs/promises";
-import { homedir as homedir3 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join8 } from "node:path";
 
 // src/captureCommand.ts
 import { stat } from "node:fs/promises";
@@ -7838,9 +7833,135 @@ function parseManualArgs(argv) {
   return { manual, input };
 }
 
-// src/backfill.ts
-function claudeProjectsDir(cwd, home) {
-  return join5(home, ".claude", "projects", slugifyCwd(cwd));
+// src/sweep.ts
+import { readFile as readFile4, stat as stat2, readdir } from "node:fs/promises";
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { homedir as homedir3 } from "node:os";
+import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join6 } from "node:path";
+
+// src/sweepLedger.ts
+import { join as join5 } from "node:path";
+import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
+var MAX_PROCESSED = 2e4;
+function sweepStatePath(env = process.env) {
+  return join5(configDir(env), "sweep-state.json");
+}
+function parseSweepState(raw) {
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      const rec = obj;
+      const processed = Array.isArray(rec.processed) ? rec.processed.filter((s) => typeof s === "string") : [];
+      const lastSweptAt = {};
+      if (rec.lastSweptAt && typeof rec.lastSweptAt === "object" && !Array.isArray(rec.lastSweptAt)) {
+        for (const [k, v] of Object.entries(rec.lastSweptAt)) {
+          if (typeof v === "string" && v.length > 0) lastSweptAt[k] = v;
+        }
+      }
+      return { processed, lastSweptAt };
+    }
+  } catch {
+  }
+  return { processed: [], lastSweptAt: {} };
+}
+function serializeSweepState(state) {
+  return JSON.stringify({ processed: state.processed, lastSweptAt: state.lastSweptAt }) + "\n";
+}
+async function readSweepState(env = process.env) {
+  try {
+    return parseSweepState(await readFile3(sweepStatePath(env), "utf8"));
+  } catch {
+    return { processed: [], lastSweptAt: {} };
+  }
+}
+async function writeSweepState(state, env = process.env) {
+  try {
+    const dir = configDir(env);
+    await mkdir3(dir, { recursive: true, mode: DIR_MODE });
+    await chmod3(dir, DIR_MODE).catch(() => {
+    });
+    const path = sweepStatePath(env);
+    await writeFile3(path, serializeSweepState(state), { mode: CONFIG_MODE });
+    await chmod3(path, CONFIG_MODE).catch(() => {
+    });
+  } catch {
+  }
+}
+function addProcessed(state, sessionIds) {
+  const seen = new Set(state.processed);
+  const next = [...state.processed];
+  for (const sid of sessionIds) {
+    if (!sid || seen.has(sid)) continue;
+    seen.add(sid);
+    next.push(sid);
+  }
+  if (next.length > MAX_PROCESSED) next.splice(0, next.length - MAX_PROCESSED);
+  return { ...state, processed: next };
+}
+async function markSweepProcessed(sessionId, env = process.env) {
+  if (!sessionId || sessionId.trim().length === 0) return;
+  try {
+    const state = await readSweepState(env);
+    if (state.processed.includes(sessionId)) return;
+    await writeSweepState(addProcessed(state, [sessionId]), env);
+  } catch {
+  }
+}
+
+// src/sweep.ts
+var SWEEP_DEBOUNCE_MS = 15 * 60 * 1e3;
+var EMPTY = (status, repo, text) => ({
+  status,
+  repo,
+  dirsSwept: 0,
+  found: 0,
+  skipped: 0,
+  captured: 0,
+  decisions: 0,
+  attributions: [],
+  text
+});
+function isTerminallyProcessed(outcome) {
+  return outcome.status === "persisted" || outcome.status === "persisted-by-server" || outcome.status === "nothing-to-capture";
+}
+function syntheticRemote(repo) {
+  return `https://github.com/${repo.owner}/${repo.name}.git`;
+}
+function extractCwdFromRaw(raw) {
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let rec;
+    try {
+      rec = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!rec || typeof rec !== "object") continue;
+    const r = rec;
+    if (typeof r.cwd === "string" && r.cwd.trim().length > 0) return r.cwd.trim();
+    if (r.type === "session_meta" && typeof r.payload?.cwd === "string" && r.payload.cwd.trim().length > 0) {
+      return r.payload.cwd.trim();
+    }
+  }
+  return null;
+}
+function classifyDir(args) {
+  const { dirName, mainSlug, mainRoot, embeddedCwd, cwdExists, resolved, target } = args;
+  if (dirName !== mainSlug && !dirName.startsWith(mainSlug + "-")) {
+    return { include: false, mode: "unattributable", cwd: embeddedCwd };
+  }
+  if (!embeddedCwd) return { include: false, mode: "unattributable", cwd: null };
+  if (cwdExists) {
+    if (resolved && resolved.owner === target.owner && resolved.name === target.name) {
+      return { include: true, mode: "git", cwd: embeddedCwd };
+    }
+    return { include: false, mode: "excluded-other-repo", cwd: embeddedCwd };
+  }
+  const isNested = embeddedCwd === mainRoot || embeddedCwd.startsWith(mainRoot + "/");
+  const isSibling = embeddedCwd.startsWith(mainRoot + "-");
+  if (isNested || isSibling) return { include: true, mode: "heuristic", cwd: embeddedCwd };
+  return { include: false, mode: "unattributable", cwd: embeddedCwd };
 }
 async function defaultReadDir(dir) {
   try {
@@ -7849,61 +7970,220 @@ async function defaultReadDir(dir) {
     return [];
   }
 }
-async function runBackfill(input = {}, deps = {}) {
-  const log = deps.log ?? ((m) => console.error(m));
-  const home = (deps.homedirImpl ?? homedir3)();
-  const cwd = input.cwd ?? process.cwd();
-  const doReadDir = deps.readDirImpl ?? defaultReadDir;
-  const run = deps.runCaptureImpl ?? runCapture;
-  const dir = claudeProjectsDir(cwd, home);
-  let entries;
+async function defaultPathExists(path) {
   try {
-    entries = await doReadDir(dir);
+    await stat2(path);
+    return true;
   } catch {
-    entries = [];
+    return false;
   }
-  const files = entries.filter((n) => n.endsWith(".jsonl")).sort();
-  if (files.length === 0) {
-    const text2 = "backthread backfill: no past Claude Code sessions found for this repo \u2014 nothing to backfill. Live capture is armed; your decision log fills as you work.";
-    log(text2);
-    return { found: 0, captured: 0, decisions: 0, results: [], text: text2 };
-  }
-  log(
-    `backthread backfill: found ${files.length} past Claude Code session(s) for this repo \u2014 seeding your decision log (best-effort, this never blocks)\u2026`
-  );
-  const results = [];
-  let captured = 0;
-  let decisions = 0;
-  for (const file2 of files) {
-    const hookInput = {
-      transcript_path: join5(dir, file2),
+}
+function defaultMainRoot(cwd) {
+  try {
+    const out = execFileSync2("git", ["rev-parse", "--git-common-dir"], {
       cwd,
-      hook_event_name: "SessionEnd"
-    };
-    let outcome;
-    try {
-      outcome = await run(hookInput, deps.captureDeps);
-    } catch (e) {
-      outcome = { status: "error", detail: `capture threw (swallowed): ${e.message}` };
-    }
-    results.push({ file: file2, outcome });
-    if (outcome.status === "persisted" || outcome.status === "persisted-by-server") {
-      captured += 1;
-      decisions += typeof outcome.count === "number" ? outcome.count : 0;
-    }
-    log(`  ${file2}: ${outcome.status}${typeof outcome.count === "number" ? ` (${outcome.count})` : ""}`);
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    if (!out) return null;
+    const abs = isAbsolute2(out) ? out : join6(cwd, out);
+    return dirname2(abs.replace(/\/+$/, ""));
+  } catch {
+    return null;
   }
-  const text = `backthread backfill: processed ${files.length} session(s), captured ${decisions} decision(s) from ${captured} session(s). Your "How it works" log is no longer empty.`;
-  log(text);
-  return { found: files.length, captured, decisions, results, text };
+}
+async function runSweep(input = {}, deps = {}) {
+  const env = deps.env ?? process.env;
+  const log = deps.log ?? ((m) => console.error(m));
+  const debounceMs = deps.debounceMs ?? SWEEP_DEBOUNCE_MS;
+  const baseReadDir = deps.readDirImpl ?? defaultReadDir;
+  const doReadDir = async (d) => {
+    try {
+      return await baseReadDir(d);
+    } catch {
+      return [];
+    }
+  };
+  const baseReadFile = deps.readFileImpl ?? ((p) => readFile4(p, "utf8"));
+  const doReadFile = async (p) => {
+    try {
+      return await baseReadFile(p);
+    } catch {
+      return "";
+    }
+  };
+  const basePathExists = deps.pathExistsImpl ?? defaultPathExists;
+  const doPathExists = async (p) => {
+    try {
+      return await basePathExists(p);
+    } catch {
+      return false;
+    }
+  };
+  const doMainRoot = (c) => {
+    try {
+      return (deps.mainRootImpl ?? defaultMainRoot)(c);
+    } catch {
+      return null;
+    }
+  };
+  const readRemote = deps.readRemoteImpl;
+  const doReadConfig = deps.readConfigImpl ?? readConfig;
+  const run = deps.runCaptureImpl ?? runCapture;
+  const doReadState = deps.readSweepStateImpl ?? readSweepState;
+  const doWriteState = deps.writeSweepStateImpl ?? writeSweepState;
+  try {
+    const home = (deps.homedirImpl ?? homedir3)();
+    const now = (deps.nowImpl ?? (() => (/* @__PURE__ */ new Date()).toISOString()))();
+    const cwd = input.cwd ?? process.cwd();
+    const target = resolveRepo(cwd, readRemote);
+    if (!target) {
+      const text2 = `backthread sweep: no git remote for ${cwd} \u2014 can't scope a gap-recovery sweep.`;
+      log(text2);
+      return EMPTY("no-repo", null, text2);
+    }
+    const repoSlug = `${target.owner}/${target.name}`;
+    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
+    if (!config2.device_token) {
+      const text2 = `backthread sweep: not logged in \u2014 skipping gap recovery for ${repoSlug}.`;
+      log(text2);
+      return EMPTY("no-auth", repoSlug, text2);
+    }
+    const state = await doReadState(env).catch(() => ({ processed: [], lastSweptAt: {} }));
+    if (!input.force) {
+      const last = state.lastSweptAt[repoSlug];
+      if (last) {
+        const age = Date.parse(now) - Date.parse(last);
+        if (Number.isFinite(age) && age >= 0 && age < debounceMs) {
+          return EMPTY("debounced", repoSlug, `backthread sweep: ${repoSlug} swept recently \u2014 skipped.`);
+        }
+      }
+    }
+    const mainRoot = doMainRoot(cwd) ?? cwd;
+    const mainSlug = slugifyCwd(mainRoot);
+    const projectsRoot = join6(home, ".claude", "projects");
+    const entries = await doReadDir(projectsRoot);
+    const candidates = entries.filter((n) => n === mainSlug || n.startsWith(mainSlug + "-")).sort();
+    const skip = new Set(state.processed);
+    for (const sid of input.knownCapturedSessionIds ?? []) if (sid) skip.add(sid);
+    const attributions = [];
+    const newlyProcessed = [];
+    let dirsSwept = 0;
+    let found = 0;
+    let skipped = 0;
+    let captured = 0;
+    let decisions = 0;
+    for (const dirName of candidates) {
+      const dir = join6(projectsRoot, dirName);
+      const files = (await doReadDir(dir)).filter((n) => n.endsWith(".jsonl")).sort();
+      if (files.length === 0) continue;
+      let embeddedCwd = null;
+      for (const file2 of files) {
+        embeddedCwd = extractCwdFromRaw(await doReadFile(join6(dir, file2)));
+        if (embeddedCwd) break;
+      }
+      const cwdExists = embeddedCwd ? await doPathExists(embeddedCwd) : false;
+      const resolved = embeddedCwd && cwdExists ? resolveRepo(embeddedCwd, readRemote) : null;
+      const cls = classifyDir({ dirName, mainSlug, mainRoot, embeddedCwd, cwdExists, resolved, target });
+      attributions.push({ dir: dirName, mode: cls.mode, cwd: cls.cwd, transcripts: files.length });
+      if (!cls.include) {
+        if (cls.mode === "unattributable") {
+          log(
+            `backthread sweep: ${files.length} transcript(s) in ${dirName} can't be attributed to ${repoSlug}` + (cls.cwd ? ` (cwd ${cls.cwd} is gone)` : " (no cwd recorded)") + " \u2014 left for GitHub-derived recovery (ARP-538)."
+          );
+        }
+        continue;
+      }
+      if (cls.mode === "heuristic") {
+        log(
+          `backthread sweep: attributing ${files.length} transcript(s) in deleted-worktree dir ${dirName} to ${repoSlug} by path heuristic (cwd ${cls.cwd} no longer exists).`
+        );
+      }
+      dirsSwept += 1;
+      const captureDeps = {
+        ...deps.captureDeps,
+        readRemoteImpl: () => syntheticRemote(target),
+        // A silent background sweep must NEVER pop a browser login.
+        ensureAuthImpl: deps.captureDeps?.ensureAuthImpl ?? (() => {
+        })
+      };
+      for (const file2 of files) {
+        const sid = basename(file2, ".jsonl");
+        if (skip.has(sid)) {
+          skipped += 1;
+          continue;
+        }
+        found += 1;
+        let outcome;
+        try {
+          outcome = await run(
+            {
+              transcript_path: join6(dir, file2),
+              cwd: cls.cwd ?? mainRoot,
+              session_id: sid,
+              hook_event_name: "SessionEnd"
+            },
+            captureDeps
+          );
+        } catch (e) {
+          outcome = { status: "error", detail: `capture threw (swallowed): ${e.message}` };
+        }
+        if (outcome.status === "persisted" || outcome.status === "persisted-by-server") {
+          captured += 1;
+          decisions += typeof outcome.count === "number" ? outcome.count : 0;
+        }
+        if (isTerminallyProcessed(outcome)) {
+          newlyProcessed.push(sid);
+          skip.add(sid);
+        }
+        log(`  ${dirName}/${file2}: ${outcome.status}${typeof outcome.count === "number" ? ` (${outcome.count})` : ""}`);
+      }
+    }
+    const nextState = addProcessed(state, newlyProcessed);
+    nextState.lastSweptAt = { ...nextState.lastSweptAt, [repoSlug]: now };
+    await doWriteState(nextState, env).catch(() => {
+    });
+    const text = `backthread sweep: ${repoSlug} \u2014 swept ${dirsSwept} dir(s), recovered ${decisions} decision(s) from ${captured} session(s) (${found} processed, ${skipped} already captured).`;
+    log(text);
+    return {
+      status: "swept",
+      repo: repoSlug,
+      dirsSwept,
+      found,
+      skipped,
+      captured,
+      decisions,
+      attributions,
+      text
+    };
+  } catch (e) {
+    const text = `backthread sweep: failed (swallowed) \u2014 ${e.message}`;
+    log(text);
+    return EMPTY("error", null, text);
+  }
+}
+async function runGapRecoverySweep(input = {}, deps = {}) {
+  return runSweep({ ...input, force: input.force ?? false }, deps);
+}
+
+// src/backfill.ts
+async function runBackfill(input = {}, deps = {}) {
+  const summary = await runSweep({ cwd: input.cwd, force: true }, deps);
+  return {
+    found: summary.found,
+    captured: summary.captured,
+    decisions: summary.decisions,
+    results: [],
+    text: summary.text
+  };
 }
 
 // src/installAgent.ts
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir as homedir4 } from "node:os";
-import { join as join6, dirname as dirname2 } from "node:path";
-import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3 } from "node:fs/promises";
+import { join as join7, dirname as dirname3 } from "node:path";
+import { readFile as readFile5, writeFile as writeFile4, mkdir as mkdir4 } from "node:fs/promises";
 var execFileP = promisify(execFile);
 var MCP_COMMAND = "npx";
 var MCP_ARGS = ["-y", "backthread", "mcp"];
@@ -7970,14 +8250,14 @@ function withNestedHook(settings, event, command, extra = {}) {
   return { next: { ...settings, hooks }, changed: true };
 }
 async function writeJson(deps, path, obj) {
-  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir3(d, { recursive: true }));
-  const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile3(p, d));
-  await doMkdir(dirname2(path));
+  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
+  const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
+  await doMkdir(dirname3(path));
   await doWrite(path, JSON.stringify(obj, null, 2) + "\n");
 }
 async function installGemini(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
-  const path = join6(home, ".gemini", "settings.json");
+  const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
+  const path = join7(home, ".gemini", "settings.json");
   const current = await loadJsonObject(doRead, path);
   const a = withMcpServer(current);
   const b = withNestedHook(a.next, "SessionEnd", hookCommand("gemini-cli"), { name: "backthread-capture" });
@@ -7985,9 +8265,9 @@ async function installGemini(home, deps) {
   return [{ path, wrote: a.changed || b.changed }];
 }
 async function installCodex(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
+  const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
   const writes = [];
-  const tomlPath = join6(home, ".codex", "config.toml");
+  const tomlPath = join7(home, ".codex", "config.toml");
   let toml = "";
   try {
     toml = await doRead(tomlPath);
@@ -8002,13 +8282,13 @@ command = "${MCP_COMMAND}"
 args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
 `;
     const sep = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
-    const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir3(d, { recursive: true }));
-    const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile3(p, d));
-    await doMkdir(dirname2(tomlPath));
+    const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
+    const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
+    await doMkdir(dirname3(tomlPath));
     await doWrite(tomlPath, toml + sep + block);
     writes.push({ path: tomlPath, wrote: true });
   }
-  const hooksPath = join6(home, ".codex", "hooks.json");
+  const hooksPath = join7(home, ".codex", "hooks.json");
   const current = await loadJsonObject(doRead, hooksPath);
   const h = withNestedHook(current, "Stop", hookCommand("codex"), { timeout: 60 });
   if (h.changed) await writeJson(deps, hooksPath, h.next);
@@ -8016,14 +8296,14 @@ args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
   return writes;
 }
 async function installCursor(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
+  const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
   const writes = [];
-  const mcpPath = join6(home, ".cursor", "mcp.json");
+  const mcpPath = join7(home, ".cursor", "mcp.json");
   const mcpCurrent = await loadJsonObject(doRead, mcpPath);
   const m = withMcpServer(mcpCurrent);
   if (m.changed) await writeJson(deps, mcpPath, m.next);
   writes.push({ path: mcpPath, wrote: m.changed });
-  const hooksPath = join6(home, ".cursor", "hooks.json");
+  const hooksPath = join7(home, ".cursor", "hooks.json");
   const hooksCurrent = await loadJsonObject(doRead, hooksPath);
   const c = withCursorStopHook(hooksCurrent);
   if (c.changed) await writeJson(deps, hooksPath, c.next);
@@ -8112,12 +8392,12 @@ var HOOK_COMMAND = "npx backthread capture --from-hook --agent claude-code --det
 var LEGACY_HOOK_COMMANDS = ["npx backthread capture"];
 var OUR_HOOK_COMMANDS = /* @__PURE__ */ new Set([HOOK_COMMAND, ...LEGACY_HOOK_COMMANDS]);
 async function registerHook(deps = {}) {
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile4(p, "utf8"));
-  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
-  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
+  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
   const home = deps.home ?? homedir5();
-  const settingsDir = join7(home, ".claude");
-  const settingsPath = join7(settingsDir, "settings.json");
+  const settingsDir = join8(home, ".claude");
+  const settingsPath = join8(settingsDir, "settings.json");
   let settings = {};
   let raw = null;
   try {
@@ -8396,7 +8676,7 @@ function normalizeState(raw) {
 
 // src/firstRun.ts
 function firstRunStatePath(env = process.env) {
-  return join8(configDir(env), "first-run.json");
+  return join9(configDir(env), "first-run.json");
 }
 function parseFirstRunState(raw) {
   try {
@@ -8415,7 +8695,7 @@ function parseFirstRunState(raw) {
 }
 async function readFirstRunState(env = process.env) {
   try {
-    return parseFirstRunState(await readFile5(firstRunStatePath(env), "utf8"));
+    return parseFirstRunState(await readFile7(firstRunStatePath(env), "utf8"));
   } catch {
     return {};
   }
@@ -8425,12 +8705,12 @@ async function updateFirstRunState(patch, env = process.env) {
     const current = await readFirstRunState(env);
     const next = { ...current, ...patch };
     const dir = configDir(env);
-    await mkdir5(dir, { recursive: true, mode: DIR_MODE });
-    await chmod3(dir, DIR_MODE).catch(() => {
+    await mkdir6(dir, { recursive: true, mode: DIR_MODE });
+    await chmod4(dir, DIR_MODE).catch(() => {
     });
     const path = firstRunStatePath(env);
-    await writeFile5(path, JSON.stringify(next) + "\n", { mode: CONFIG_MODE });
-    await chmod3(path, CONFIG_MODE).catch(() => {
+    await writeFile6(path, JSON.stringify(next) + "\n", { mode: CONFIG_MODE });
+    await chmod4(path, CONFIG_MODE).catch(() => {
     });
   } catch {
   }
@@ -8582,7 +8862,7 @@ function readStream(stream) {
 async function runCapture(input, deps = {}) {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m) => console.error(m));
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile8(p, "utf8"));
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
     void ensureAuth({ env: e }).catch(() => {
@@ -8737,8 +9017,8 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
 
 // src/fromHook.ts
 import { spawn as spawn2 } from "node:child_process";
-import { join as join9 } from "node:path";
-import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir6, chmod as chmod4 } from "node:fs/promises";
+import { join as join10 } from "node:path";
+import { readFile as readFile9, writeFile as writeFile7, mkdir as mkdir7, chmod as chmod5 } from "node:fs/promises";
 var KNOWN_AGENTS = /* @__PURE__ */ new Set([
   "claude-code",
   "codex",
@@ -8779,7 +9059,7 @@ function normalizeHookInput(payload, _agent) {
   return out;
 }
 function captureStatePath(env = process.env) {
-  return join9(configDir(env), "capture-sessions.json");
+  return join10(configDir(env), "capture-sessions.json");
 }
 var MAX_REMEMBERED2 = 200;
 function parseState2(raw) {
@@ -8795,7 +9075,7 @@ function parseState2(raw) {
 }
 async function readState2(env) {
   try {
-    return parseState2(await readFile7(captureStatePath(env), "utf8"));
+    return parseState2(await readFile9(captureStatePath(env), "utf8"));
   } catch {
     return { captured: [] };
   }
@@ -8803,12 +9083,12 @@ async function readState2(env) {
 async function writeState2(state, env) {
   try {
     const dir = configDir(env);
-    await mkdir6(dir, { recursive: true, mode: DIR_MODE });
-    await chmod4(dir, DIR_MODE).catch(() => {
+    await mkdir7(dir, { recursive: true, mode: DIR_MODE });
+    await chmod5(dir, DIR_MODE).catch(() => {
     });
     const path = captureStatePath(env);
-    await writeFile6(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
-    await chmod4(path, CONFIG_MODE).catch(() => {
+    await writeFile7(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
+    await chmod5(path, CONFIG_MODE).catch(() => {
     });
   } catch {
   }
@@ -8896,6 +9176,15 @@ async function runFromHook(deps = {}) {
     if (!isTransient(outcome)) {
       const mark = deps.markCapturedImpl ?? markSessionCaptured;
       await mark(input.session_id, env).catch(() => {
+      });
+      if (isTerminallyProcessed(outcome)) {
+        await (deps.markSweepProcessedImpl ?? markSweepProcessed)(input.session_id, env).catch(() => {
+        });
+      }
+    }
+    if (agent === "claude-code") {
+      const sweep = deps.runSweepImpl ?? runGapRecoverySweep;
+      await sweep({ cwd: input.cwd }, { env, captureDeps: deps.captureDeps }).catch(() => {
       });
     }
     return {

@@ -509,3 +509,88 @@ test('every entry path returns exitCode 0', async () => {
     for (const r of results) assert.equal(r.exitCode, 0);
   });
 });
+
+// --- ARP-688: gap-recovery sweep wiring --------------------------------------
+
+const CC_PAYLOAD = '{"session_id":"sX","transcript_path":"/t.jsonl","cwd":"/w"}';
+
+test('claude-code SessionEnd: after capture, triggers the sweep + durably ledgers the session', async () => {
+  await withTempEnv(async (env) => {
+    const cap = captureStub({ status: 'persisted', detail: '', count: 1 });
+    const swept: { cwd?: string }[] = [];
+    const ledgered: (string | null | undefined)[] = [];
+    const r = await runFromHook({
+      env,
+      agent: 'claude-code',
+      rawPayload: CC_PAYLOAD,
+      runCaptureImpl: cap.impl,
+      runSweepImpl: async (input) => {
+        swept.push(input);
+        return {
+          status: 'swept', repo: 'o/r', dirsSwept: 0, found: 0, skipped: 0,
+          captured: 0, decisions: 0, attributions: [], text: '',
+        };
+      },
+      markSweepProcessedImpl: async (sid) => void ledgered.push(sid),
+    });
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.status, 'captured');
+    assert.deepEqual(swept, [{ cwd: '/w' }]); // sweep fired with the session cwd
+    assert.deepEqual(ledgered, ['sX']); // terminal capture → durable ledger
+  });
+});
+
+test('non-CC agent (codex) does NOT trigger the sweep (Phase-1 scope)', async () => {
+  await withTempEnv(async (env) => {
+    const cap = captureStub({ status: 'persisted', detail: '', count: 1 });
+    let sweeps = 0;
+    await runFromHook({
+      env,
+      agent: 'codex',
+      rawPayload: CC_PAYLOAD,
+      runCaptureImpl: cap.impl,
+      runSweepImpl: async () => ((sweeps += 1), {
+        status: 'swept', repo: null, dirsSwept: 0, found: 0, skipped: 0,
+        captured: 0, decisions: 0, attributions: [], text: '',
+      }),
+    });
+    assert.equal(sweeps, 0);
+  });
+});
+
+test('a no-auth capture is NOT durably ledgered (a later sweep must still recover it)', async () => {
+  await withTempEnv(async (env) => {
+    const cap = captureStub({ status: 'no-auth', detail: '' });
+    const ledgered: (string | null | undefined)[] = [];
+    await runFromHook({
+      env,
+      agent: 'claude-code',
+      rawPayload: CC_PAYLOAD,
+      runCaptureImpl: cap.impl,
+      runSweepImpl: async () => ({
+        status: 'no-auth', repo: 'o/r', dirsSwept: 0, found: 0, skipped: 0,
+        captured: 0, decisions: 0, attributions: [], text: '',
+      }),
+      markSweepProcessedImpl: async (sid) => void ledgered.push(sid),
+    });
+    assert.deepEqual(ledgered, []); // no-auth → ring-marked only, never sweep-ledgered
+  });
+});
+
+test('a throwing sweep never breaks the always-exit-0 capture contract', async () => {
+  await withTempEnv(async (env) => {
+    const cap = captureStub({ status: 'persisted', detail: '', count: 1 });
+    const r = await runFromHook({
+      env,
+      agent: 'claude-code',
+      rawPayload: CC_PAYLOAD,
+      runCaptureImpl: cap.impl,
+      runSweepImpl: async () => {
+        throw new Error('sweep boom');
+      },
+      markSweepProcessedImpl: async () => {},
+    });
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.status, 'captured');
+  });
+});

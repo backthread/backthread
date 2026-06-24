@@ -36,6 +36,8 @@ import {
   type CaptureOutcome,
   type HookInput,
 } from './capture.js';
+import { markSweepProcessed } from './sweepLedger.js';
+import { runGapRecoverySweep, isTerminallyProcessed, type SweepDeps, type SweepSummary } from './sweep.js';
 
 // The agents this entrypoint normalizes payloads for. `claude-code` is included so
 // the SAME entrypoint can subsume the existing CC SessionEnd hook later (the bare
@@ -355,6 +357,10 @@ export interface FromHookDeps {
   wasCapturedImpl?: (sessionId: string | null | undefined, env: NodeJS.ProcessEnv) => Promise<boolean>;
   /** Test seam: the idempotence recorder. Defaults to markSessionCaptured. */
   markCapturedImpl?: (sessionId: string | null | undefined, env: NodeJS.ProcessEnv) => Promise<void>;
+  /** Test seam: the DURABLE sweep-ledger recorder. Defaults to markSweepProcessed. */
+  markSweepProcessedImpl?: (sessionId: string | null | undefined, env: NodeJS.ProcessEnv) => Promise<void>;
+  /** Test seam: the gap-recovery sweep. Defaults to runGapRecoverySweep. */
+  runSweepImpl?: (input: { cwd?: string }, deps?: SweepDeps) => Promise<SweepSummary>;
 }
 
 /**
@@ -453,6 +459,26 @@ export async function runFromHook(deps: FromHookDeps = {}): Promise<FromHookResu
     if (!isTransient(outcome)) {
       const mark = deps.markCapturedImpl ?? markSessionCaptured;
       await mark(input.session_id, env).catch(() => {});
+      // ARP-688: ALSO record in the DURABLE sweep ledger — but ONLY when the session was
+      // genuinely captured/decided (NOT no-auth, which the ring marks for popup-storm
+      // prevention but which a later sweep must still recover once authed). This makes
+      // the live-capture path the source of truth for "already captured", so the
+      // gap-recovery sweep below (and every future one) skips it BEFORE inference.
+      if (isTerminallyProcessed(outcome)) {
+        await (deps.markSweepProcessedImpl ?? markSweepProcessed)(input.session_id, env).catch(() => {});
+      }
+    }
+
+    // ARP-688: GAP-RECOVERY SWEEP. After the normal forward capture, silently heal any
+    // EARLIER un-captured sessions for this repo (a lapsed-then-restored connection
+    // otherwise only resumes forward). Gated to the detached CC worker — it rides the
+    // already-detached SessionEnd hook (ARP-682) so a multi-transcript sweep never
+    // blocks the host session; other agents' enumeration is the Phase-2 port. The
+    // current session is already in the durable ledger (marked just above), so the
+    // sweep skips it. Best-effort + freshness-debounced; NEVER throws (await-and-swallow).
+    if (agent === 'claude-code') {
+      const sweep = deps.runSweepImpl ?? runGapRecoverySweep;
+      await sweep({ cwd: input.cwd }, { env, captureDeps: deps.captureDeps }).catch(() => {});
     }
 
     return {
