@@ -75,6 +75,23 @@ That's the whole setup. `install`:
 Already added Backthread as a Claude Code plugin? The hook is wired for you —
 run `/backthread:start` (or `npx backthread start`) just to sign in.
 
+### Codex / Cursor / Gemini CLI → `npx backthread install --agent <agent>`
+
+Use another coding agent? One command wires up its **MCP server** (the `query`
+tool) **and** an automatic capture hook — written to that agent's **user-global**
+config so capture follows you across every repo and git worktree:
+
+```bash
+npx backthread install --agent codex     # ~/.codex/config.toml + ~/.codex/hooks.json
+npx backthread install --agent cursor     # ~/.cursor/mcp.json   + ~/.cursor/hooks.json
+npx backthread install --agent gemini     # ~/.gemini/settings.json (MCP + SessionEnd hook)
+```
+
+It's idempotent (re-running never duplicates anything) and a strict merge (it never
+clobbers your other config). Then `npx backthread login` once to authorize. Gemini
+users can also install the [one-command extension](https://github.com/backthread/backthread/tree/main/extensions/gemini)
+instead, and Codex users the [plugin](https://github.com/backthread/backthread/tree/main/extensions/codex).
+
 ## Onboard yourself in 3 steps
 
 1. **Install** — `npx backthread install` in your repo. One browser click to authorize.

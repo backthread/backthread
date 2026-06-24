@@ -20,12 +20,16 @@
 //     the hook ships + versions with the plugin, and uninstalling the plugin removes
 //     it cleanly. (Schema confirmed against the current Claude Code plugin docs:
 //     hooks/hooks.json, `command` type, exec form with `${CLAUDE_PLUGIN_ROOT}`.)
-//   • FALLBACK = writing the user's `.claude/settings.json`. For the bare `npx backthread`
-//     (non-plugin) install path there is no manifest doing the wiring, so
-//     `backthread install` writes the SessionEnd entry into the project's
-//     `.claude/settings.json` itself. This is what `registerHook` below does. It is
-//     idempotent (re-running install never duplicates the entry) and a strict MERGE
-//     (never clobbers the user's other hooks/settings).
+//   • FALLBACK = writing the USER-GLOBAL `~/.claude/settings.json`. For the bare
+//     `npx backthread` (non-plugin) install path there is no manifest doing the
+//     wiring, so `backthread install` writes the SessionEnd entry itself. It writes
+//     the USER scope (`~/.claude/settings.json`), NOT the project `.claude/settings.json`
+//     (ARP-680): a per-project hook is gitignored + absent from git worktrees, so
+//     worktree/multi-repo sessions silently never capture — the exact bug that froze
+//     the dogfood log for a week. The user-scope hook follows the user across every
+//     repo + worktree, matching the plugin path. This is what `registerHook` does:
+//     idempotent (re-running never duplicates the entry) + a strict MERGE (never
+//     clobbers the user's other hooks/settings).
 //
 // TRUST COPY (never-store-source, restated for the plugin per /security): printed
 // during install so the founder reads it before any transcript is processed —
@@ -38,10 +42,17 @@
 // backfill leg is best-effort and never fails the install.
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ensureAuth, type LoginOptions } from './login.js';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { runBackfill, type BackfillSummary, type BackfillDeps, type BackfillInput } from './backfill.js';
+import {
+  runInstallAgent,
+  type InstallAgent,
+  type AgentInstallDeps,
+  type AgentInstallResult,
+} from './installAgent.js';
 
 /** The never-store-source trust copy, restated for the plugin (consistent with /security). */
 export const TRUST_COPY = [
@@ -92,6 +103,12 @@ export interface InstallOptions {
   skipHook?: boolean;
   /** Skip the one-shot backfill. Default false. */
   skipBackfill?: boolean;
+  /**
+   * Target agent. undefined / 'claude-code' = the Claude Code path (user-global
+   * settings.json hook + backfill). 'codex' | 'cursor' | 'gemini' = write THAT agent's
+   * user-global MCP config + capture hook instead (no CC settings.json, no CC backfill).
+   */
+  agent?: InstallAgent | 'claude-code';
   env?: NodeJS.ProcessEnv;
   /** Where human-readable progress goes. Defaults to console.error (stderr). */
   log?: (msg: string) => void;
@@ -113,6 +130,12 @@ export interface InstallDeps {
   runBackfillImpl?: (input: BackfillInput, deps?: BackfillDeps) => Promise<BackfillSummary>;
   /** BackfillDeps threaded into the backfill (env, fetch, readers). */
   backfillDeps?: BackfillDeps;
+  /** Home dir override for the user-global hook path (tests). Defaults to os.homedir(). */
+  home?: string;
+  /** Test seam: the per-agent (codex/cursor/gemini) writer. Defaults to runInstallAgent. */
+  runInstallAgentImpl?: (agent: InstallAgent, deps?: AgentInstallDeps) => Promise<AgentInstallResult>;
+  /** AgentInstallDeps threaded into the per-agent writer. */
+  agentDeps?: AgentInstallDeps;
 }
 
 /** The outcome of an install run. */
@@ -125,25 +148,29 @@ export interface InstallResult {
   hookRegistered: boolean;
   /** The backfill summary (null when skipped). */
   backfill: BackfillSummary | null;
+  /** The per-agent writer result (codex/cursor/gemini path), or null for the Claude Code path. */
+  agentResult?: AgentInstallResult | null;
 }
 
 /**
- * Register the SessionEnd capture hook in the project's `.claude/settings.json`
- * (the bare-`npx backthread` fallback — the plugin path declares it in the manifest). Pure
- * merge: reads the existing settings, adds our `SessionEnd → {@link HOOK_COMMAND}` entry
- * ONLY if an identical one isn't already present (and upgrades a retired command in place),
- * preserving every other key/hook. Idempotent. Returns whether a write happened
- * (false = already present / no change).
+ * Register the SessionEnd capture hook in the USER-GLOBAL `~/.claude/settings.json`
+ * (the bare-`npx backthread` fallback — the plugin path declares it in the manifest).
+ * USER scope on purpose (ARP-680): a project `.claude/settings.json` hook is gitignored
+ * + absent from git worktrees, so it silently never captures there; the user-scope hook
+ * follows the user across every repo + worktree. Pure merge: reads the existing settings,
+ * adds our `SessionEnd → {@link HOOK_COMMAND}` entry ONLY if an identical one isn't already
+ * present (and upgrades a retired command in place), preserving every other key/hook.
+ * Idempotent. Returns whether a write happened (false = already present / no change).
  */
 export async function registerHook(
-  cwd: string,
   deps: InstallDeps = {},
 ): Promise<{ wrote: boolean; path: string }> {
   const doReadFile = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
   const doWriteFile = deps.writeFileImpl ?? ((p: string, d: string) => writeFile(p, d));
   const doMkdir = deps.mkdirImpl ?? (async (d: string) => void (await mkdir(d, { recursive: true })));
 
-  const settingsDir = join(cwd, '.claude');
+  const home = deps.home ?? homedir();
+  const settingsDir = join(home, '.claude');
   const settingsPath = join(settingsDir, 'settings.json');
 
   // Read the existing settings. A MISSING file (ENOENT) → start from {} and write
@@ -314,13 +341,45 @@ export async function runInstall(
     }
   }
 
+  // (2-alt) PER-AGENT WRITER — `--agent codex|cursor|gemini`. Write that agent's
+  // USER-GLOBAL MCP config + capture hook (instead of the CC settings.json + backfill)
+  // and return. The config is written regardless of auth (armed for the next
+  // `backthread login`), mirroring the CC path; exit 1 only when still unauthorized.
+  const targetAgent = opts.agent && opts.agent !== 'claude-code' ? opts.agent : null;
+  if (targetAgent) {
+    const doAgent = deps.runInstallAgentImpl ?? runInstallAgent;
+    let agentResult: AgentInstallResult | null = null;
+    try {
+      agentResult = await doAgent(targetAgent, deps.agentDeps);
+      if (agentResult.versionWarning) log(`      ⚠ ${agentResult.versionWarning}`);
+      for (const w of agentResult.writes) {
+        log(
+          w.wrote
+            ? `[2/2] ${targetAgent}: configured ${w.path}.`
+            : `[2/2] ${targetAgent}: already configured in ${w.path} (no change).`,
+        );
+      }
+      if (agentResult.deeplink) log(`      One-click MCP install: ${agentResult.deeplink}`);
+    } catch (e) {
+      // A corrupt existing config (refusing-to-clobber) lands here — report, don't fail.
+      log(`[2/2] ${targetAgent}: not configured — ${(e as Error).message}`);
+      log('      You can add the MCP server + hook manually (see the README).');
+    }
+    log(
+      `\nBackthread is set up for ${targetAgent}. New sessions are captured automatically.` +
+        (authed ? '' : ' Run `backthread login` to finish authorizing.'),
+    );
+    const exitCode = !authed && !opts.skipAuth ? 1 : 0;
+    return { exitCode, authed, hookRegistered: agentResult !== null, backfill: null, agentResult };
+  }
+
   // (2) REGISTER THE HOOK (settings.json fallback; the plugin path skips this).
   let hookRegistered = false;
   if (opts.skipHook) {
     log('[2/3] Hook: skipped (registered by the plugin manifest).');
   } else {
     try {
-      const { wrote, path } = await registerHook(cwd, deps);
+      const { wrote, path } = await registerHook(deps);
       hookRegistered = true;
       log(
         wrote
@@ -359,5 +418,5 @@ export async function runInstall(
   // Exit non-zero ONLY when we ended up unauthorized AND didn't skip auth — that's
   // the one state where capture genuinely won't work and the user must act.
   const exitCode = !authed && !opts.skipAuth ? 1 : 0;
-  return { exitCode, authed, hookRegistered, backfill };
+  return { exitCode, authed, hookRegistered, backfill, agentResult: null };
 }
