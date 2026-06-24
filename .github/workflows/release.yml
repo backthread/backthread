@@ -21,6 +21,11 @@ permissions:
   contents: write
   id-token: write
 
+# Serialize releases so two tags pushed close together can't race the npm publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
