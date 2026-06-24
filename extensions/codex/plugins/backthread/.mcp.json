@@ -1,0 +1,6 @@
+{
+  "backthread": {
+    "command": "npx",
+    "args": ["-y", "backthread", "mcp"]
+  }
+}
