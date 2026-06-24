@@ -8035,11 +8035,11 @@ function withCursorStopHook(settings) {
   const hooks = asObject(settings.hooks);
   const stop = Array.isArray(hooks.stop) ? [...hooks.stop] : [];
   const present = stop.some((h) => h?.command === command);
-  const versionOk = settings.version === 1;
-  if (present && versionOk) return { next: settings, changed: false };
+  const hasVersion = typeof settings.version === "number";
+  if (present && hasVersion) return { next: settings, changed: false };
   if (!present) stop.push({ command });
   hooks.stop = stop;
-  return { next: { ...settings, version: 1, hooks }, changed: true };
+  return { next: { ...settings, version: hasVersion ? settings.version : 1, hooks }, changed: true };
 }
 function cursorDeeplink() {
   const config2 = Buffer.from(JSON.stringify(mcpServerEntry())).toString("base64");

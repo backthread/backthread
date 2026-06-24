@@ -138,6 +138,15 @@ test('cursor: writes mcp.json + hooks.json (stop, version 1) + returns a deeplin
   assert.match(r.deeplink ?? '', /^cursor:\/\//);
 });
 
+test('cursor: preserves an existing hooks.json version (no downgrade)', async () => {
+  const path = '/home/dev/.cursor/hooks.json';
+  const fs1 = fakeFs({ [path]: JSON.stringify({ version: 2, hooks: { stop: [{ command: hookCommand('cursor') }] } }) });
+  const r = await runInstallAgent('cursor', { home: HOME, ...fs1.deps, probeVersionImpl: noProbe });
+  const hookWrite = r.writes.find((w) => w.path.endsWith('hooks.json'))!;
+  assert.equal(hookWrite.wrote, false); // our hook + a version already present → no-op
+  assert.equal(JSON.parse(fs1.files[path]).version, 2); // version untouched (not downgraded to 1)
+});
+
 test('cursor: idempotent re-run writes nothing', async () => {
   const fs1 = fakeFs();
   await runInstallAgent('cursor', { home: HOME, ...fs1.deps, probeVersionImpl: noProbe });

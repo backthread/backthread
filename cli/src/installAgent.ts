@@ -253,17 +253,22 @@ async function installCursor(home: string, deps: AgentInstallDeps): Promise<Agen
   return writes;
 }
 
-/** Cursor-specific: ensure hooks.stop contains our flat `{ command }` entry; set version:1. */
+/**
+ * Cursor-specific: ensure hooks.stop contains our flat `{ command }` entry. Sets the
+ * schema `version` to 1 only when ABSENT — never downgrades/rewrites a version the user
+ * (or a future Cursor) already set. Idempotent: our hook present + a version already set
+ * is a no-op.
+ */
 function withCursorStopHook(settings: Record<string, unknown>): { next: Record<string, unknown>; changed: boolean } {
   const command = hookCommand('cursor');
   const hooks = asObject(settings.hooks);
   const stop: unknown[] = Array.isArray(hooks.stop) ? [...(hooks.stop as unknown[])] : [];
   const present = stop.some((h) => (h as { command?: unknown })?.command === command);
-  const versionOk = settings.version === 1;
-  if (present && versionOk) return { next: settings, changed: false };
+  const hasVersion = typeof settings.version === 'number';
+  if (present && hasVersion) return { next: settings, changed: false };
   if (!present) stop.push({ command });
   hooks.stop = stop;
-  return { next: { ...settings, version: 1, hooks }, changed: true };
+  return { next: { ...settings, version: hasVersion ? settings.version : 1, hooks }, changed: true };
 }
 
 // --- the Cursor deeplink -----------------------------------------------------
