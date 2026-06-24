@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "backthread-capture",
+            "command": "npx -y backthread capture --from-hook --agent gemini-cli --detach"
+          }
+        ]
+      }
+    ]
+  }
+}
