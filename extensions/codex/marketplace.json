@@ -4,12 +4,12 @@
     "name": "Backthread",
     "url": "https://backthread.dev"
   },
-  "description": "Backthread helps you understand your codebase while AI ships the code.",
+  "description": "Backthread helps you understand your codebase while AI ships features.",
   "plugins": [
     {
       "name": "backthread",
       "source": { "source": "local", "path": "./plugins/backthread" },
-      "description": "Backthread helps you understand your codebase while AI ships the code. It captures the why behind every Codex session so you can ask \"how does X work?\" without digging through PRs — and your code never leaves your machine."
+      "description": "Backthread helps you understand your codebase while AI ships features. It captures the why behind every Codex session so you can ask \"how does X work?\" without digging through PRs."
     }
   ]
 }
