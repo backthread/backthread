@@ -1,0 +1,18 @@
+{
+  "name": "backthread",
+  "owner": {
+    "name": "Backthread",
+    "url": "https://backthread.dev"
+  },
+  "description": "Architectural memory for AI-coded codebases — capture the \"why\" behind every Claude Code session and ask \"how does X work?\" without diving through PRs.",
+  "plugins": [
+    {
+      "name": "backthread",
+      "source": "./cli",
+      "description": "Captures the \"why\" of every Claude Code session into your Backthread \"How it works\" log (SessionEnd hook), adds /backthread:capture & /backthread:start, and the backthread MCP server (capture + query). Source code and tool I/O are redacted locally before anything leaves your machine.",
+      "homepage": "https://backthread.dev",
+      "license": "MIT",
+      "keywords": ["claude-code", "ai", "architecture", "codebase", "documentation", "mcp"]
+    }
+  ]
+}

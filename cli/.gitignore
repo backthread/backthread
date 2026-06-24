@@ -1,7 +1,13 @@
-# Build outputs — produced by `npm run build` (tsc) and `npm run bundle` (esbuild).
-# Both are regenerated from src/; neither is committed. (`dist` is also covered by
-# the root .gitignore; `dist-bundle` — the self-contained distribution artifact —
-# is not, so it's listed here.)
+# Build outputs. `dist/` (tsc multi-file) is ephemeral and never committed.
+#
+# `dist-bundle/backthread.js` (esbuild self-contained bin) is the EXCEPTION: it is a
+# COMMITTED distribution artifact. The Claude Code marketplace plugin references it via
+# ${CLAUDE_PLUGIN_ROOT}/dist-bundle/backthread.js, and CC runs NO build step when it
+# clones/installs the plugin (ARP-477) — so the bundle MUST be in git or the installed
+# plugin's hook + MCP server can't find their bin. `npm run bundle` regenerates it;
+# commit the result on each release (ARP-478's release CI keeps it in sync). Ignore
+# anything else that lands in the dir, but track the bundle itself.
 node_modules/
 dist/
-dist-bundle/
+dist-bundle/*
+!dist-bundle/backthread.js

@@ -2,10 +2,16 @@
   "name": "backthread",
   "displayName": "Backthread",
   "description": "Keep the thread on what the agent shipped: Backthread captures the \"why\" of every session and answers \"how does X work?\" on a live \"how it works\" diagram — no diving through PRs. Provides the /backthread:capture slash command, the SessionEnd capture hook, and the backthread MCP server (capture + query).",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "author": {
     "name": "Backthread"
   },
   "homepage": "https://backthread.dev",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "backthread": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist-bundle/backthread.js", "mcp"]
+    }
+  }
 }

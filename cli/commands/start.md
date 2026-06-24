@@ -16,7 +16,7 @@ If the web app handed you a claim code, pass it: `/backthread:start --claim <cod
 
 ## Setup result
 
-!`npx backthread start $ARGUMENTS`
+!`BT="${CLAUDE_PLUGIN_ROOT}/dist-bundle/backthread.js"; if [ -f "$BT" ]; then node "$BT" start $ARGUMENTS; else npx backthread start $ARGUMENTS; fi`
 
 ## Your task
 
