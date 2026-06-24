@@ -1,5 +1,4 @@
 {
-  "$comment": "Claude Code plugin MARKETPLACE manifest (ARP-477). Lives at the REPOSITORY ROOT — that's where `/plugin marketplace add backthread/backthread` looks for it (CC does not search subdirectories). It lists ONE plugin, `backthread`, whose source is the `./cli` subdirectory (relative to the marketplace root = this repo root); the plugin's own manifest is cli/.claude-plugin/plugin.json. Installing it (`/plugin install backthread@backthread`) registers the SessionEnd capture hook + the /backthread:capture & /backthread:start commands + the backthread MCP server (capture + query) — all running the committed, self-contained dist-bundle bin, with zero npm/PATH setup. The plugin's `version` is the authoritative one (kept in lockstep with cli/package.json by ARP-478's release CI), so it is intentionally NOT duplicated here.",
   "name": "backthread",
   "owner": {
     "name": "Backthread",

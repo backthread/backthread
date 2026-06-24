@@ -8,7 +8,6 @@
   },
   "homepage": "https://backthread.dev",
   "hooks": "./hooks/hooks.json",
-  "$mcpComment": "The backthread MCP server (capture + query tools), run from the plugin's BUNDLED bin via ${CLAUDE_PLUGIN_ROOT} (ARP-477). Declared inline so installing the plugin auto-registers the stdio server with zero PATH/npm setup — `node <plugin>/dist-bundle/backthread.js mcp`. ${CLAUDE_PLUGIN_ROOT} expands in mcpServers command/args (CC sets it to the plugin's install dir). The bundle is committed to git (CC runs no build step on install). Keep the plugin `version` in lockstep with cli/package.json (ARP-478 release CI enforces it).",
   "mcpServers": {
     "backthread": {
       "command": "node",
