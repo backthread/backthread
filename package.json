@@ -16,6 +16,7 @@
   "scripts": {
     "build": "npm run build -w backthread",
     "test": "npm test -w backthread",
-    "typecheck": "npm run typecheck -w backthread"
+    "typecheck": "npm run typecheck -w backthread",
+    "bump": "node scripts/bump-version.mjs"
   }
 }
