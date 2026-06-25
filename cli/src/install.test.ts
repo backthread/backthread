@@ -6,6 +6,8 @@ import {
   mergeSessionEndHook,
   registerHook,
   runInstall,
+  stripSessionEndHook,
+  unregisterProjectHook,
   type InstallDeps,
   type InstallOptions,
 } from './install.js';
@@ -216,6 +218,123 @@ test('registerHook surfaces a real read error (non-ENOENT) instead of clobbering
   assert.equal(wrote, false);
 });
 
+// --- stripSessionEndHook (pure) — the project→user migration (ARP-689) -------
+
+test('stripSessionEndHook returns null when nothing of ours is present', () => {
+  assert.equal(stripSessionEndHook({}), null);
+  assert.equal(stripSessionEndHook({ hooks: {} }), null);
+  assert.equal(stripSessionEndHook({ hooks: { SessionEnd: [] } }), null);
+  assert.equal(
+    stripSessionEndHook({ hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: 'other-tool' }] }] } }),
+    null,
+  );
+});
+
+test('stripSessionEndHook removes our hook + prunes the emptied SessionEnd/hooks', () => {
+  const existing = { model: 'opus', hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }] } };
+  const out = stripSessionEndHook(existing)!;
+  assert.ok(out);
+  assert.equal(out.model, 'opus'); // other keys preserved
+  assert.equal(out.hooks, undefined); // emptied hooks object pruned
+  // Input never mutated.
+  assert.equal((existing.hooks as any).SessionEnd.length, 1);
+});
+
+test('stripSessionEndHook strips the RETIRED bare command too (npx backthread capture)', () => {
+  const existing = { hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: 'npx backthread capture' }] }] } };
+  const out = stripSessionEndHook(existing)!;
+  assert.equal(out.hooks, undefined);
+});
+
+test('stripSessionEndHook keeps foreign hooks + other events while removing ours', () => {
+  const existing = {
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo' }] }],
+      SessionEnd: [
+        { hooks: [{ type: 'command', command: 'other-tool' }] },
+        { hooks: [{ type: 'command', command: HOOK_COMMAND }] },
+      ],
+    },
+  };
+  const out = stripSessionEndHook(existing)!;
+  const se = (out.hooks as any).SessionEnd;
+  assert.equal(se.length, 1); // ours dropped, foreign group kept
+  assert.equal(se[0].hooks[0].command, 'other-tool');
+  assert.deepEqual((out.hooks as any).PreToolUse, existing.hooks.PreToolUse); // other event untouched
+});
+
+test('stripSessionEndHook removes ours from a MIXED group, keeping the foreign hook in it', () => {
+  const existing = {
+    hooks: {
+      SessionEnd: [
+        { hooks: [
+          { type: 'command', command: 'other-tool' },
+          { type: 'command', command: HOOK_COMMAND },
+        ] },
+      ],
+    },
+  };
+  const out = stripSessionEndHook(existing)!;
+  const se = (out.hooks as any).SessionEnd;
+  assert.equal(se.length, 1);
+  assert.equal(se[0].hooks.length, 1); // only the foreign hook remains in the group
+  assert.equal(se[0].hooks[0].command, 'other-tool');
+});
+
+// --- unregisterProjectHook (I/O seams) ---------------------------------------
+
+test('unregisterProjectHook: missing project file → no-op (no write)', async () => {
+  let wrote = false;
+  const res = await unregisterProjectHook('/work/app', {
+    readFileImpl: async () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    },
+    writeFileImpl: async () => void (wrote = true),
+  });
+  assert.equal(res.stripped, false);
+  assert.equal(res.path, '/work/app/.claude/settings.json'); // PROJECT scope, not user
+  assert.equal(wrote, false);
+});
+
+test('unregisterProjectHook: strips our hook from the project settings.json, preserving foreign keys', async () => {
+  let data = '';
+  const res = await unregisterProjectHook('/work/app', {
+    readFileImpl: async () =>
+      JSON.stringify({
+        permissions: { allow: ['Bash'] },
+        hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }] },
+      }),
+    writeFileImpl: async (_p, d) => void (data = d),
+  });
+  assert.equal(res.stripped, true);
+  const parsed = JSON.parse(data);
+  assert.deepEqual(parsed.permissions, { allow: ['Bash'] }); // foreign key preserved
+  assert.equal(parsed.hooks, undefined); // our hook removed + pruned
+});
+
+test('unregisterProjectHook: no write when nothing of ours is present (idempotent re-run)', async () => {
+  let wrote = false;
+  const res = await unregisterProjectHook('/work/app', {
+    readFileImpl: async () =>
+      JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: 'other-tool' }] }] } }),
+    writeFileImpl: async () => void (wrote = true),
+  });
+  assert.equal(res.stripped, false);
+  assert.equal(wrote, false);
+});
+
+test('unregisterProjectHook: REFUSES to modify a corrupt project settings.json (no clobber)', async () => {
+  let wrote = false;
+  await assert.rejects(
+    unregisterProjectHook('/work/app', {
+      readFileImpl: async () => '{ broken json',
+      writeFileImpl: async () => void (wrote = true),
+    }),
+    /not valid JSON|refusing to modify/i,
+  );
+  assert.equal(wrote, false);
+});
+
 // --- runInstall: the full flow ----------------------------------------------
 
 test('runInstall: happy path → auth + hook + backfill, exit 0', async () => {
@@ -289,6 +408,55 @@ test('runInstall --skip-auth + already authed → exit 0, runs backfill', async 
   );
   assert.equal(res.exitCode, 0);
   assert.equal(backfillCalls, 1);
+});
+
+test('runInstall: migrates a stale PROJECT-scope hook to user scope (ARP-689)', async () => {
+  const userPath = '/home/dev/.claude/settings.json';
+  const projPath = '/work/app/.claude/settings.json';
+  const writes: Record<string, string> = {};
+  const res = await runInstall(
+    opts(),
+    deps({
+      readFileImpl: async (p) => {
+        // Project file carries the OLD bare command; the user-global file doesn't exist yet.
+        if (p === projPath)
+          return JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: 'npx backthread capture' }] }] } });
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      writeFileImpl: async (p, d) => void (writes[p] = d),
+    }),
+  );
+  assert.equal(res.projectHookMigrated, true);
+  // The user-global hook is registered…
+  assert.equal(JSON.parse(writes[userPath]).hooks.SessionEnd[0].hooks[0].command, HOOK_COMMAND);
+  // …and the stale project hook is stripped (so CC no longer double-fires).
+  assert.equal(JSON.parse(writes[projPath]).hooks, undefined);
+});
+
+test('runInstall: no project file → no migration (projectHookMigrated false)', async () => {
+  const res = await runInstall(opts(), deps());
+  assert.equal(res.projectHookMigrated, false);
+});
+
+test('runInstall: a corrupt PROJECT settings.json is reported (no clobber) but install still succeeds', async () => {
+  const userPath = '/home/dev/.claude/settings.json';
+  const projPath = '/work/app/.claude/settings.json';
+  const writes: Record<string, string> = {};
+  const res = await runInstall(
+    opts(),
+    deps({
+      readFileImpl: async (p) => {
+        if (p === projPath) return '{ broken json'; // present but unparseable
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      writeFileImpl: async (p, d) => void (writes[p] = d),
+    }),
+  );
+  assert.equal(res.exitCode, 0); // migration failure never fails the install
+  assert.equal(res.projectHookMigrated, false);
+  assert.equal(writes[projPath], undefined); // the corrupt project file was NOT overwritten
+  // The user-global hook still got registered (migration is independent of it).
+  assert.equal(JSON.parse(writes[userPath]).hooks.SessionEnd[0].hooks[0].command, HOOK_COMMAND);
 });
 
 test('runInstall --skip-hook → does not write settings.json (plugin path)', async () => {
