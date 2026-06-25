@@ -104,6 +104,8 @@ instead, and Codex users the [plugin](https://github.com/backthread/backthread/t
 ## Commands
 
 ```
+backthread           Set up Backthread — the unified front door (same as `start`).
+                     Idempotent: a returning user is told they're good to go.
 backthread install   Set up capture for this repo (sign in + hook + backfill)
 backthread start     First-run for the Claude Code plugin (sign in + your next step)
 backthread login     Authorize this device (opens your browser)

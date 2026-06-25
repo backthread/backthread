@@ -1,7 +1,17 @@
 #!/usr/bin/env node
 // backthread — the Backthread CLI/plugin entrypoint.
 //
+// A BARE `npx backthread` (no subcommand) IS the canonical unified front door
+// (ARP-703): it runs the SAME onboarding as `backthread start` — never-store-source
+// trust copy → one-tap auth → entry-aware capture step + connect nudge — and is
+// idempotent for a returning user. (`backthread help` still shows usage; an unknown
+// subcommand still errors with usage.) The order is entry-point-aware: the terminal
+// door (bare npx / plugin) leads with CAPTURE then nudges connect-repo; the web door
+// (`--claim` handoff) skips the connect re-nudge. See entry.ts.
+//
 // The shared spine the later surfaces hang off of:
+//   backthread (no args)        the unified front door — alias of `backthread start`
+//                         (entry = terminal). Bare `npx backthread` runs onboarding.
 //   backthread start            the CC-plugin first-run: never-store-source trust
 //                         copy → one-tap auth (claim handoff / browser loopback) → the
 //                         unified state's next step. Idempotent (returning user not
@@ -23,6 +33,8 @@
 //
 // Distribution: `npx backthread` (this bin). A Claude Code plugin manifest can wrap the
 // same bin later. See cli/README.md.
+import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { login } from '../login.js';
 import { readConfig } from '../config.js';
 import { readHookInput, readRawHookInput, runCapture } from '../capture.js';
@@ -32,10 +44,14 @@ import { startMcpServer } from '../mcp.js';
 import { runInstall } from '../install.js';
 import { parseInstallAgent } from '../installAgent.js';
 import { runStart } from '../firstRun.js';
+import { detectEntry } from '../entry.js';
 
 const USAGE = `backthread — capture the "why" of your AI-coded changes
 
 Usage:
+  backthread                    Set up Backthread (the unified front door — same as
+                          \`backthread start\`): trust copy + one-tap auth + your next
+                          step. Idempotent. [--claim <code>]
   backthread start              First-run setup (backs the /backthread:start slash command):
                           trust copy + one-tap auth + your next step. Idempotent.
                           [--claim <code>]
@@ -95,8 +111,36 @@ function flagValue(rest: string[], flag: string): string | undefined {
   return value;
 }
 
-async function main(argv: string[]): Promise<number | null> {
+/**
+ * The unified onboarding front door, shared by a bare `npx backthread` and the
+ * explicit `backthread start` (and its `/backthread:start` slash command). Idempotent:
+ * a returning, onboarded user is short-circuited inside runStart (never re-wizarded).
+ * The entry point is derived (a `--claim` code ⇒ web-initiated, else terminal-first)
+ * so the step order is right for how the user arrived. Returns the process exit code.
+ */
+export async function runOnboarding(rest: string[]): Promise<number> {
+  const claim = parseClaimFlag(rest);
+  const result = await runStart({
+    claim,
+    device: rest.includes('--device'),
+    entry: detectEntry({ claim }),
+  });
+  return result.exitCode;
+}
+
+/**
+ * Test seams for the command dispatch. Only the surfaces the dispatch tests need to
+ * keep off the network/browser are injectable; everything else runs the real impl.
+ * Defaults wire the production behavior, so `main(argv)` works with no second arg.
+ */
+export interface MainDeps {
+  /** The unified onboarding runner (bare `npx backthread` + `start`). Defaults to runOnboarding. */
+  runOnboardingImpl?: (rest: string[]) => Promise<number>;
+}
+
+export async function main(argv: string[], deps: MainDeps = {}): Promise<number | null> {
   const [command, ...rest] = argv;
+  const onboarding = deps.runOnboardingImpl ?? runOnboarding;
 
   switch (command) {
     case 'login': {
@@ -194,17 +238,14 @@ async function main(argv: string[]): Promise<number | null> {
     }
     case 'start': {
       // The CC-plugin FIRST-RUN experience, behind the
-      // `/backthread:start` slash command. Idempotent: a returning user is short-
+      // `/backthread:start` slash command — and the SAME flow a bare `npx backthread`
+      // runs (see the `undefined` case). Idempotent: a returning user is short-
       // circuited (never re-onboarded). Otherwise: never-store-source trust copy →
       // one-tap auth (claim handoff or browser loopback; `--device` is OUT OF SCOPE →
       // loud stub) → the unified state's canonical next step (the connect
       // nudge when no repo). runStart reports each step to stderr and returns a non-zero
       // exit ONLY on a genuine auth failure (capture won't run until the user acts).
-      const result = await runStart({
-        claim: parseClaimFlag(rest),
-        device: rest.includes('--device'),
-      });
-      return result.exitCode;
+      return onboarding(rest);
     }
     case 'install': {
       // onboarding glue: auth handshake → register the SessionEnd hook
@@ -229,28 +270,68 @@ async function main(argv: string[]): Promise<number | null> {
       });
       return result.exitCode;
     }
+    case undefined:
+      // BARE `npx backthread` (no subcommand) IS the canonical unified front door
+      // (ARP-703): run the SAME onboarding as `backthread start` — NOT help. Idempotent
+      // for a returning user; entry-point-aware order (terminal-first by default, web-
+      // initiated when a `--claim` code is present). `backthread help` still shows usage.
+      return onboarding(rest);
     case 'help':
     case '--help':
     case '-h':
-    case undefined:
       console.log(USAGE);
       return 0;
     default:
+      // A leading FLAG (e.g. `npx backthread --claim <code>` / `--device`) is still the
+      // bare front door — the user passed an onboarding flag with no subcommand, so
+      // route the whole arg list to onboarding (help flags were handled just above).
+      // Anything else is a genuine unknown subcommand → error + usage.
+      if (command.startsWith('-')) return onboarding(argv);
       console.error(`Unknown command: ${command}\n\n${USAGE}`);
       return 1;
   }
 }
 
-main(process.argv.slice(2))
-  .then((code) => {
-    // null ⇒ a long-running command (`backthread mcp`) is now serving; don't exit, let
-    // the event loop keep the stdio transport alive until the host closes stdin.
-    if (code === null) return;
-    process.exit(code);
-  })
-  .catch((err) => {
-    // Never let an unexpected throw leak a token (it never reaches here anyway —
-    // the token isn't carried in any error). Print the message, exit non-zero.
-    console.error(`backthread: ${(err as Error).message ?? err}`);
-    process.exit(1);
-  });
+// Auto-run ONLY when this file is the process entry point (invoked as the bin /
+// the bundle / the detached re-spawn) — NOT when a test imports `main`/`runOnboarding`
+// for dispatch coverage. We compare this module's path to argv[1] AFTER resolving
+// symlinks on BOTH sides: an npm-installed bin lives at `node_modules/.bin/backthread`
+// (a SYMLINK to the real file), and Node leaves argv[1] as that symlink path while
+// import.meta.url is the realpath — so a naive string compare would wrongly suppress a
+// real run. realpathSync collapses both to the same target. Wrapped defensively: any
+// resolution hiccup FALLS BACK TO RUNNING (a bin must execute; never accidentally
+// no-op). The only thing it suppresses is the import-from-a-test case (argv[1] is the
+// test runner, never this file), which is exactly what we want.
+function isEntryPoint(): boolean {
+  try {
+    const entry = process.argv[1];
+    if (!entry) return false;
+    const self = fileURLToPath(import.meta.url);
+    const resolve = (p: string): string => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return p; // not on disk (unusual) → compare the raw path
+      }
+    };
+    return resolve(self) === resolve(entry);
+  } catch {
+    return true; // never let a guard failure stop the bin from running
+  }
+}
+
+if (isEntryPoint()) {
+  main(process.argv.slice(2))
+    .then((code) => {
+      // null ⇒ a long-running command (`backthread mcp`) is now serving; don't exit, let
+      // the event loop keep the stdio transport alive until the host closes stdin.
+      if (code === null) return;
+      process.exit(code);
+    })
+    .catch((err) => {
+      // Never let an unexpected throw leak a token (it never reaches here anyway —
+      // the token isn't carried in any error). Print the message, exit non-zero.
+      console.error(`backthread: ${(err as Error).message ?? err}`);
+      process.exit(1);
+    });
+}
