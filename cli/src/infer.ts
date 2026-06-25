@@ -93,6 +93,15 @@ export interface InferOptions {
    * which is correct, not an error.
    */
   filePaths?: string[];
+  /**
+   * ARP-696 — the session's local git context (current branch + HEAD sha + a
+   * capture timestamp), forwarded to the persist leg so the server HOLDS the
+   * decision as `pending_merge` until that work merges (epic ARP-694). Rides only
+   * on the persist leg (like filePaths/decidedAt). The cli REPORTS git state; the
+   * server decides the held state — an old client omits this → `merged`, shown
+   * immediately. Individual null fields are omitted from the body.
+   */
+  captured?: { branch?: string | null; headSha?: string | null; at?: string | null };
   /** Test/dev seam: inject a fetch. Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
   /** Env override seam (BACKTHREAD_WORKER_URL). Defaults to process.env. */
@@ -215,6 +224,12 @@ export async function serverInfer(
     // Anchoring is a persist-side concern, so this rides only on the persist leg
     // (mirrors decidedAt). The harvest is the redact package's `sessionPaths`.
     if (opts.filePaths && opts.filePaths.length > 0) body.filePaths = opts.filePaths;
+    // ARP-696 — session-level git context (branch/sha/at). Each field rides only
+    // when present; absent/null → omitted, so the server reads "no capture ctx" for
+    // that field. A capture with neither branch nor sha → the server keeps it merged.
+    if (opts.captured?.branch != null) body.capturedBranch = opts.captured.branch;
+    if (opts.captured?.headSha != null) body.capturedHeadSha = opts.captured.headSha;
+    if (opts.captured?.at != null) body.capturedAt = opts.captured.at;
   }
 
   let res: Response;

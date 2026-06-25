@@ -73,3 +73,52 @@ export function resolveRepo(cwd: string, readRemote: RemoteReader = defaultRemot
   const remote = readRemote(cwd);
   return remote ? parseRepoFromRemote(remote) : null;
 }
+
+// --- ARP-696: local git context for merge-gated capture ----------------------
+//
+// The capture hook reports the session's git state (current branch + HEAD sha) so
+// the server can HOLD the decision as `pending_merge` until that work merges (epic
+// ARP-694). This is the cli's only job here: REPORT git state — the server decides
+// the held state (locked decision #3, no client-side merge assertion). It is plain
+// VCS METADATA (a ref name + a commit sha), never source, so the never-store-source
+// claim is unaffected (same posture as the file-path metadata in redact.ts).
+
+export interface GitContext {
+  /** Current branch (`git rev-parse --abbrev-ref HEAD`); null when detached/none. */
+  branch: string | null;
+  /** Current HEAD sha (`git rev-parse HEAD`); null when none. */
+  headSha: string | null;
+}
+
+/** The git-command runner seam — shells out by default, injectable for tests. */
+export type GitRunner = (cwd: string, args: string[]) => string | null;
+
+const defaultGitRunner: GitRunner = (cwd, args) => {
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null; // not a git repo / git missing → caller treats as "no context"
+  }
+};
+
+/**
+ * Resolve a session's cwd to its git context. Pure-ish (the git read is injectable).
+ * A detached HEAD reports the literal branch `HEAD` from `--abbrev-ref` — we map that
+ * to null (it's not a real ref to match a merged PR against) and rely on the sha for
+ * ancestry matching. Either field is null when unavailable (non-git cwd, no commits);
+ * the server then simply won't HOLD the decision (held ⟺ releasable), which is correct.
+ */
+export function resolveGitContext(cwd: string, run: GitRunner = defaultGitRunner): GitContext {
+  const rawBranch = run(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = rawBranch ? rawBranch.trim() : '';
+  const rawSha = run(cwd, ['rev-parse', 'HEAD']);
+  const sha = rawSha ? rawSha.trim() : '';
+  return {
+    branch: branch && branch !== 'HEAD' ? branch : null,
+    headSha: sha || null,
+  };
+}

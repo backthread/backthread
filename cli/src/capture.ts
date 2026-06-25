@@ -45,7 +45,7 @@ import { readFile } from 'node:fs/promises';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { ensureAuth } from './login.js';
 import { parseJsonl, redactTranscript, sessionPaths, sessionTimestamp } from './redact.js';
-import { resolveRepo, type RemoteReader } from './repo.js';
+import { resolveRepo, resolveGitContext, type RemoteReader, type GitRunner } from './repo.js';
 import { inferDecisions, type DerivedDecision, type RedactedTranscriptInput } from './infer.js';
 import { buildIngestDecisionsUrl } from './urls.js';
 import { versionHeaders } from './version.js';
@@ -101,6 +101,8 @@ export interface CaptureDeps {
   readConfigImpl?: (env: NodeJS.ProcessEnv) => Promise<BackthreadConfig>;
   /** Test seam: the git-remote reader threaded into resolveRepo. */
   readRemoteImpl?: RemoteReader;
+  /** Test seam: the git-command runner threaded into resolveGitContext (ARP-696). */
+  readGitImpl?: GitRunner;
   /** Test seam: the auto-login trigger. Defaults to fire-and-forget ensureAuth. */
   ensureAuthImpl?: (env: NodeJS.ProcessEnv) => void;
   /**
@@ -273,6 +275,16 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // Resolve the repo from cwd (best-effort; null → no claimable repo, see below).
     const repo = input.cwd ? resolveRepo(input.cwd, deps.readRemoteImpl) : null;
 
+    // ARP-696 — resolve the session's local git context (current branch + HEAD sha)
+    // so the server can HOLD the decision as pending_merge until that work merges.
+    // `at` is the session timestamp (decidedAt); the server defaults to now() when
+    // absent. Best-effort: a non-git cwd → both null → the server keeps it merged
+    // (shown immediately). Reported to BOTH persist paths (worker + ingest-decisions).
+    const gitContext = input.cwd
+      ? resolveGitContext(input.cwd, deps.readGitImpl)
+      : { branch: null, headSha: null };
+    const captured = { branch: gitContext.branch, headSha: gitContext.headSha, at: decidedAt ?? null };
+
     // (4) Derive decisions via the router. We ask the server to ALSO persist
     // when (and only when) we have a repo to attribute to — that's the membership-
     // gated connected path; the server returns persisted:true and we stop. When we
@@ -283,6 +295,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       fetchImpl: deps.fetchImpl,
       decidedAt,
       filePaths,
+      captured,
       ...(repo ? { persist: true, repo } : {}),
     });
 
@@ -337,6 +350,8 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       // Carry the session id so the connect-nudge can throttle once-per-session
       // — the SessionEnd hook fires once, but manual/MCP captures fire many times.
       sessionId,
+      // ARP-696 — the session's git context, for the held-state decision server-side.
+      captured,
       // first-capture confirmation seam (threaded so tests can stub it).
       firstCaptureConfirmImpl: deps.firstCaptureConfirmImpl,
     });
@@ -368,6 +383,8 @@ async function persistDerived(
     log: (m: string) => void;
     /** Session id for the connect-nudge throttle (null → nudge suppressed). */
     sessionId: string | null;
+    /** ARP-696 — the session's git context, sent so the server holds the decision. */
+    captured?: { branch?: string | null; headSha?: string | null; at?: string | null };
     /** Test seam: the once-only first-capture confirmation. Defaults to maybeFirstCaptureConfirm. */
     firstCaptureConfirmImpl?: (
       count: number,
@@ -389,6 +406,13 @@ async function persistDerived(
   // (respect any explicit dedupeKey/sessionId the server-side derivation set).
   const body = {
     repo: { owner: repo.owner, name: repo.name },
+    // ARP-696 — session-level git context (the ingest-decisions validator reads it
+    // body-level and stamps each decision). Each field only when present; absent →
+    // the server keeps the decision merged (back-compat). It's the repo-less /
+    // self-persist path, so a held decision waits for the repo to connect + reconcile.
+    ...(ctx.captured?.branch != null ? { capturedBranch: ctx.captured.branch } : {}),
+    ...(ctx.captured?.headSha != null ? { capturedHeadSha: ctx.captured.headSha } : {}),
+    ...(ctx.captured?.at != null ? { capturedAt: ctx.captured.at } : {}),
     decisions: decisions.map((d) => ({
       ...d,
       ...(decidedAt && (d as { decidedAt?: unknown }).decidedAt === undefined ? { decidedAt } : {}),
