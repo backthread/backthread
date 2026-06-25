@@ -1,11 +1,17 @@
 # Release — on a `v*` tag: test → verify version lockstep → publish `backthread` to
-# npm → cut a GitHub Release with auto-generated notes (ARP-478). Keeps the npm
-# package + the CC-plugin/extension manifests in lockstep on every release.
+# npm via OIDC TRUSTED PUBLISHING → cut a GitHub Release with auto-generated notes.
+# Keeps the npm package + the CC-plugin/extension manifests in lockstep on each release.
 #
-# SETUP (founder, one-time): add an npm AUTOMATION access token as the repo secret
-# `NPM_TOKEN` (Settings → Secrets → Actions). An *automation* token bypasses the
-# 2FA OTP prompt, which is what lets CI publish unattended. To cut a release:
-#   1. bump cli/package.json version AND the manifests it's lockstep-checked against
+# SETUP (founder, one-time, NO TOKEN): on npmjs.com → backthread → Settings →
+# Trusted Publisher, add a GitHub Actions publisher:
+#   Organization or user: backthread   Repository: backthread
+#   Workflow filename:    release.yml   Environment name: release
+#   Allowed actions:      Allow npm publish
+# Trusted publishing exchanges THIS workflow's short-lived OIDC token for an npm
+# credential at publish time — no NPM_TOKEN secret, no 2FA OTP, nothing to rotate.
+#
+# To cut a release:
+#   1. bump cli/package.json version AND the 3 manifests it's lockstep-checked against
 #      (cli/.claude-plugin/plugin.json, extensions/gemini/gemini-extension.json,
 #       extensions/codex/plugins/backthread/plugin.json) + rebuild the bundle
 #      (`npm run bundle -w backthread`), commit, merge.
@@ -16,7 +22,8 @@ on:
   push:
     tags: ['v*']
 
-# id-token: npm provenance (--provenance). contents: create the GitHub Release.
+# id-token: write → the OIDC token that trusted publishing + provenance need.
+# contents: write → create the GitHub Release.
 permissions:
   contents: write
   id-token: write
@@ -29,6 +36,10 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # MUST equal the "Environment name" set on the npm Trusted Publisher. GitHub
+    # auto-creates this environment on first use; add protection rules (e.g. required
+    # reviewers) to it later if you want a manual approval gate before each publish.
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -36,6 +47,9 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
+      # OIDC trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.x.
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
@@ -53,11 +67,11 @@ jobs:
             exit 1
           fi
       # `npm publish` runs the cli's `prepack` (build + bundle), so the published bin is
-      # always a fresh self-contained bundle. --provenance attests the build to npm.
-      - name: Publish backthread to npm
+      # always a fresh self-contained bundle. With OIDC trusted publishing npm
+      # authenticates via the workflow's id-token (no NODE_AUTH_TOKEN) and auto-attaches
+      # build provenance.
+      - name: Publish backthread to npm (OIDC trusted publishing)
         run: npm publish -w backthread --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: GitHub Release (auto-generated notes)
         env:
           GH_TOKEN: ${{ github.token }}
