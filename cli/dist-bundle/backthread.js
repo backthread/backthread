@@ -7306,9 +7306,9 @@ function redactCodeFences(text) {
   return { text: out, count };
 }
 function extractText(rec) {
-  if (rec.type !== "user" && rec.type !== "assistant") return null;
+  const role = rec.type ?? rec.role ?? rec.message?.role;
+  if (role !== "user" && role !== "assistant") return null;
   const content = rec.message?.content;
-  const role = rec.type;
   if (typeof content === "string") {
     const t = content.trim();
     return t.length > 0 ? { role, text: t } : null;

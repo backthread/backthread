@@ -78,6 +78,42 @@ test('redactTranscript keeps prose, drops tool_use/tool_result, and redacts fenc
   assert.equal(out.stats.keptRecords, 3);
 });
 
+test('redactTranscript handles CURSOR records (role at the TOP level, not `type`) — ARP-507', () => {
+  // Cursor puts the role at the top level (`role`) with Claude-style content blocks
+  // under message.content. The old parser read role from `rec.type` ONLY, so every
+  // Cursor turn got role=undefined and was dropped → "nothing to capture" on every
+  // Cursor session. Lock the multi-field role resolution + the unchanged fence.
+  const records = [
+    { role: 'user', message: { content: [{ type: 'text', text: 'why hand-rolled over Intl?' }] } },
+    {
+      role: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'Hand-rolled: full control, no extra dep.' },
+          { type: 'tool_use', name: 'Read', input: { path: '/repo/src/secret.ts' } }, // dropped
+        ],
+      },
+    },
+    // all-code assistant turn → redacts to the sentinel (kept, but carries no source).
+    { role: 'assistant', message: { content: [{ type: 'text', text: '```\nconst apiKey = 2;\n```' }] } },
+    // a non-conversational Cursor record (no role/type) → dropped.
+    { message: { content: [{ type: 'text', text: 'noise' }] } },
+  ];
+
+  const out = redactTranscript(records);
+  assert.deepEqual(out.turns, [
+    { role: 'user', text: 'why hand-rolled over Intl?' },
+    { role: 'assistant', text: 'Hand-rolled: full control, no extra dep.' },
+    { role: 'assistant', text: '[code redacted]' },
+  ]);
+  // Security fence still holds on the Cursor shape: no tool input, no source.
+  const blob = JSON.stringify(out.turns);
+  assert.doesNotMatch(blob, /secret\.ts/);
+  assert.doesNotMatch(blob, /const apiKey/);
+  assert.equal(out.stats.totalRecords, 4);
+  assert.equal(out.stats.keptRecords, 3);
+});
+
 test('sessionTimestamp returns the latest valid ISO stamp (Date.parse compare)', () => {
   const records = [
     { type: 'user', timestamp: '2026-06-01T10:00:00Z' },

@@ -1,6 +1,6 @@
 {
   "name": "@backthread/redact",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "The one redaction fence — pure, zero-dependency string transforms that strip source code and tool I/O out of an AI coding-agent session transcript before anything leaves the machine. Keeps only natural-language rationale.",
   "license": "MIT",
   "author": "Backthread",

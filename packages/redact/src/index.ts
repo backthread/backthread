@@ -51,6 +51,8 @@ export interface RedactedTranscript {
 // into the few fields we keep; everything else is ignored (and thus dropped).
 interface RawRecord {
   type?: string;
+  // Cursor records the role at the TOP level (`role`), unlike Claude Code's `type`.
+  role?: string;
   sessionId?: string;
   message?: {
     role?: string;
@@ -95,16 +97,20 @@ export function redactCodeFences(text: string): { text: string; count: number } 
 /**
  * Extract the natural-language text from one record, or null if the whole
  * record must be dropped. Drops:
- *   - any record whose type is not 'user' or 'assistant' (attachment, system,
+ *   - any record whose ROLE is not 'user' or 'assistant' (attachment, system,
  *     file-history-snapshot, mode, pr-link, …);
  *   - user records whose content is a tool_result array (no prose);
  *   - tool_use blocks within assistant content.
  * Keeps: user string prompts, and assistant `text` (+ `thinking`) blocks.
+ *
+ * The role lives at a different field per agent: `type` (Claude Code), the
+ * top-level `role` (Cursor), or `message.role`. We resolve from any of them — for
+ * Claude Code, where role === type, the behaviour is unchanged.
  */
 function extractText(rec: RawRecord): { role: 'user' | 'assistant'; text: string } | null {
-  if (rec.type !== 'user' && rec.type !== 'assistant') return null;
+  const role = rec.type ?? rec.role ?? rec.message?.role;
+  if (role !== 'user' && role !== 'assistant') return null;
   const content = rec.message?.content;
-  const role = rec.type;
 
   // A bare string is a real user prompt (the human typed it). Keep it.
   if (typeof content === 'string') {
