@@ -19,6 +19,7 @@ const HOME = '/home/dev';
 
 function fakeFs(initial: Record<string, string> = {}) {
   const files: Record<string, string> = { ...initial };
+  const modes: Record<string, number> = {};
   const deps: AgentInstallDeps = {
     readFileImpl: async (p: string) => {
       if (p in files) return files[p];
@@ -26,11 +27,16 @@ function fakeFs(initial: Record<string, string> = {}) {
     },
     writeFileImpl: async (p: string, d: string) => void (files[p] = d),
     mkdirImpl: async () => {},
+    chmodImpl: async (p: string, m: number) => void (modes[p] = m),
   };
-  return { files, deps };
+  return { files, modes, deps };
 }
 
 const noProbe = async () => null;
+
+// A deterministic Node bin dir for the Cursor wrapper-script tests (ARP-692), so the
+// generated scripts don't depend on the real `process.execPath` of the test runner.
+const NODE_BIN = '/opt/node22/bin';
 
 // --- parse + helpers ---------------------------------------------------------
 
@@ -127,31 +133,80 @@ test('codex: preserves existing config.toml content when appending the MCP table
 
 // --- Cursor ------------------------------------------------------------------
 
-test('cursor: writes mcp.json + hooks.json (stop, version 1) + returns a deeplink', async () => {
+const CAPTURE_SCRIPT = '/home/dev/.cursor/hooks/backthread-capture.sh';
+const MCP_SCRIPT = '/home/dev/.cursor/hooks/backthread-mcp.sh';
+
+test('cursor: writes node-resolving wrapper scripts + points mcp.json/hooks.json at them by absolute path (ARP-692)', async () => {
   const fs1 = fakeFs();
-  const r = await runInstallAgent('cursor', { home: HOME, ...fs1.deps, probeVersionImpl: noProbe });
+  const r = await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs1.deps, probeVersionImpl: noProbe });
+
+  // (1) Both wrapper scripts written, chmod 0755, pin the Node bin dir on PATH then exec npx.
+  const capture = fs1.files[CAPTURE_SCRIPT];
+  assert.match(capture, /^#!\/bin\/sh/);
+  assert.match(capture, /PATH="\$NODE_BIN_DIR:\$PATH"/);
+  assert.match(capture, /NODE_BIN_DIR='\/opt\/node22\/bin'/);
+  assert.match(capture, /exec npx -y backthread capture --from-hook --agent cursor --detach/);
+  assert.equal(fs1.modes[CAPTURE_SCRIPT], 0o755);
+  const mcpScript = fs1.files[MCP_SCRIPT];
+  assert.match(mcpScript, /exec npx -y backthread mcp/);
+  assert.equal(fs1.modes[MCP_SCRIPT], 0o755);
+
+  // (2) mcp.json points at the absolute MCP wrapper, not a bare `npx`.
   const mcp = JSON.parse(fs1.files['/home/dev/.cursor/mcp.json']);
-  assert.equal(mcp.mcpServers.backthread.command, 'npx');
+  assert.equal(mcp.mcpServers.backthread.command, MCP_SCRIPT);
+  assert.deepEqual(mcp.mcpServers.backthread.args, []);
+
+  // (3) hooks.json stop points at the absolute capture wrapper.
   const hj = JSON.parse(fs1.files['/home/dev/.cursor/hooks.json']);
   assert.equal(hj.version, 1);
-  assert.match(hj.hooks.stop[0].command, /--from-hook --agent cursor --detach/);
+  assert.equal(hj.hooks.stop[0].command, CAPTURE_SCRIPT);
+
+  // The deeplink stays machine-agnostic (plain npx) — it's rendered on the website.
   assert.match(r.deeplink ?? '', /^cursor:\/\//);
 });
 
-test('cursor: preserves an existing hooks.json version (no downgrade)', async () => {
+test('cursor: migrates the pre-ARP-692 inline hook command to the wrapper script (no duplicate)', async () => {
   const path = '/home/dev/.cursor/hooks.json';
-  const fs1 = fakeFs({ [path]: JSON.stringify({ version: 2, hooks: { stop: [{ command: hookCommand('cursor') }] } }) });
-  const r = await runInstallAgent('cursor', { home: HOME, ...fs1.deps, probeVersionImpl: noProbe });
+  const fs1 = fakeFs({
+    [path]: JSON.stringify({ version: 1, hooks: { stop: [{ command: hookCommand('cursor') }] } }),
+  });
+  const r = await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs1.deps, probeVersionImpl: noProbe });
   const hookWrite = r.writes.find((w) => w.path.endsWith('hooks.json'))!;
-  assert.equal(hookWrite.wrote, false); // our hook + a version already present → no-op
+  assert.equal(hookWrite.wrote, true); // migrated
+  const stop = JSON.parse(fs1.files[path]).hooks.stop;
+  assert.equal(stop.length, 1); // old inline stripped, not duplicated
+  assert.equal(stop[0].command, CAPTURE_SCRIPT);
+});
+
+test('cursor: preserves an existing hooks.json version (no downgrade) once on the wrapper', async () => {
+  const path = '/home/dev/.cursor/hooks.json';
+  const fs1 = fakeFs({ [path]: JSON.stringify({ version: 2, hooks: { stop: [{ command: CAPTURE_SCRIPT }] } }) });
+  const r = await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs1.deps, probeVersionImpl: noProbe });
+  const hookWrite = r.writes.find((w) => w.path.endsWith('hooks.json'))!;
+  assert.equal(hookWrite.wrote, false); // our wrapper hook + a version already present → no-op
   assert.equal(JSON.parse(fs1.files[path]).version, 2); // version untouched (not downgraded to 1)
+});
+
+test('cursor: preserves a foreign stop hook + foreign mcp server', async () => {
+  const fs1 = fakeFs({
+    '/home/dev/.cursor/hooks.json': JSON.stringify({ version: 1, hooks: { stop: [{ command: 'their-tool' }] } }),
+    '/home/dev/.cursor/mcp.json': JSON.stringify({ mcpServers: { other: { command: 'x' } } }),
+  });
+  await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs1.deps, probeVersionImpl: noProbe });
+  const stop = JSON.parse(fs1.files['/home/dev/.cursor/hooks.json']).hooks.stop;
+  assert.equal(stop.length, 2);
+  assert.ok(stop.some((h: { command: string }) => h.command === 'their-tool'));
+  assert.ok(stop.some((h: { command: string }) => h.command === CAPTURE_SCRIPT));
+  const mcp = JSON.parse(fs1.files['/home/dev/.cursor/mcp.json']);
+  assert.equal(mcp.mcpServers.other.command, 'x'); // foreign server kept
+  assert.equal(mcp.mcpServers.backthread.command, MCP_SCRIPT); // ours added
 });
 
 test('cursor: idempotent re-run writes nothing', async () => {
   const fs1 = fakeFs();
-  await runInstallAgent('cursor', { home: HOME, ...fs1.deps, probeVersionImpl: noProbe });
+  await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs1.deps, probeVersionImpl: noProbe });
   const fs2 = fakeFs({ ...fs1.files });
-  const r2 = await runInstallAgent('cursor', { home: HOME, ...fs2.deps, probeVersionImpl: noProbe });
+  const r2 = await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs2.deps, probeVersionImpl: noProbe });
   assert.ok(r2.writes.every((w) => !w.wrote));
 });
 
