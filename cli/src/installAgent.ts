@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 
 const execFileP = promisify(execFile);
 
@@ -68,6 +68,14 @@ export interface AgentInstallDeps {
   readFileImpl?: (p: string) => Promise<string>;
   writeFileImpl?: (p: string, d: string) => Promise<void>;
   mkdirImpl?: (d: string) => Promise<void>;
+  /** Test seam: chmod the Cursor wrapper scripts executable (0755). Defaults to fs.chmod. */
+  chmodImpl?: (p: string, mode: number) => Promise<void>;
+  /**
+   * The Node bin dir baked into the Cursor wrapper scripts' PATH (ARP-692). Defaults to
+   * the dir of the Node running the installer (`process.execPath`) — guaranteed ≥22.18
+   * (our `engines` floor), which is exactly the Node we want Cursor to re-find. Test seam.
+   */
+  nodeBinDir?: string;
   /** Test seam: the version probe. Defaults to running `<bin> --version`. */
   probeVersionImpl?: (agent: InstallAgent) => Promise<string | null>;
 }
@@ -230,44 +238,160 @@ async function installCodex(home: string, deps: AgentInstallDeps): Promise<Agent
   return writes;
 }
 
-/** Cursor: ~/.cursor/mcp.json + ~/.cursor/hooks.json (stop event; flat { command } entries). */
+/**
+ * Cursor: write two USER-GLOBAL node-resolving WRAPPER SCRIPTS (ARP-692) + point the
+ * MCP config (~/.cursor/mcp.json) and the stop hook (~/.cursor/hooks.json) at them by
+ * ABSOLUTE path.
+ *
+ * WHY wrapper scripts (Cursor-specific, ARP-692/507): Cursor is a GUI app that does NOT
+ * inherit your login/nvm shell PATH, so an inline `npx`/`node` may be missing or resolve
+ * to a too-old system Node (Backthread needs ≥22.18 — the founder's machine had Node 18
+ * at /usr/local/bin/npx). Terminal-launched CLIs (Codex/Gemini) inherit the shell PATH,
+ * so only Cursor needs this. The script prepends the install-time Node bin dir to PATH
+ * then execs `npx -y backthread …`. Pinning PATH (not just an absolute npx) is REQUIRED
+ * because npx's own `#!/usr/bin/env node` shebang re-resolves node from PATH — an
+ * absolute npx would still launch under the wrong Node. The absolute script path also
+ * sidesteps Cursor's inline-command-vs-path ambiguity: a bare executable path always works.
+ */
 async function installCursor(home: string, deps: AgentInstallDeps): Promise<AgentFileWrite[]> {
   const doRead = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
+  const nodeBinDir = deps.nodeBinDir ?? dirname(process.execPath);
   const writes: AgentFileWrite[] = [];
 
-  // MCP — ~/.cursor/mcp.json: { mcpServers: { backthread: {...} } }.
+  // (1) Wrapper scripts — ~/.cursor/hooks/backthread-{capture,mcp}.sh, chmod 0755.
+  const scriptDir = join(home, '.cursor', 'hooks');
+  const captureScriptPath = join(scriptDir, 'backthread-capture.sh');
+  const mcpScriptPath = join(scriptDir, 'backthread-mcp.sh');
+  writes.push(
+    await writeCursorScript(
+      deps,
+      captureScriptPath,
+      cursorWrapperScript(nodeBinDir, 'capture --from-hook --agent cursor --detach'),
+    ),
+  );
+  writes.push(await writeCursorScript(deps, mcpScriptPath, cursorWrapperScript(nodeBinDir, 'mcp')));
+
+  // (2) MCP — ~/.cursor/mcp.json: { mcpServers: { backthread: { command: <mcpScript>, args: [] } } }.
   const mcpPath = join(home, '.cursor', 'mcp.json');
   const mcpCurrent = await loadJsonObject(doRead, mcpPath);
-  const m = withMcpServer(mcpCurrent);
+  const m = withCursorMcpServer(mcpCurrent, mcpScriptPath);
   if (m.changed) await writeJson(deps, mcpPath, m.next);
   writes.push({ path: mcpPath, wrote: m.changed });
 
-  // Hook — ~/.cursor/hooks.json: { version: 1, hooks: { stop: [{ command }] } }. Cursor's
-  // entries are FLAT { command } (no nested type/hooks), unlike CC/Gemini/Codex — so
-  // it gets its own merge. (Shape confirmed-pending a live Cursor install, ARP-507.)
+  // (3) Hook — ~/.cursor/hooks.json: { version: 1, hooks: { stop: [{ command: <captureScript> }] } }.
+  // Cursor's entries are FLAT { command } (no nested type/hooks), unlike CC/Gemini/Codex.
   const hooksPath = join(home, '.cursor', 'hooks.json');
   const hooksCurrent = await loadJsonObject(doRead, hooksPath);
-  const c = withCursorStopHook(hooksCurrent);
+  const c = withCursorStopHook(hooksCurrent, captureScriptPath);
   if (c.changed) await writeJson(deps, hooksPath, c.next);
   writes.push({ path: hooksPath, wrote: c.changed });
   return writes;
 }
 
+/** Single-quote a string for safe interpolation into a POSIX shell script. */
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The POSIX wrapper-script body: pin a ≥22 Node on PATH, then exec `npx -y backthread <args>`. */
+function cursorWrapperScript(nodeBinDir: string, backthreadArgs: string): string {
+  return (
+    [
+      '#!/bin/sh',
+      '# Backthread wrapper for Cursor — generated by `backthread install --agent cursor` (ARP-692).',
+      '#',
+      '# Cursor is a GUI app and does NOT inherit your login/nvm shell PATH, so a bare',
+      '# `npx`/`node` here may be missing or resolve to a too-old system Node (Backthread',
+      '# needs Node >= 22.18). Prepend the Node bin dir detected at install time so capture',
+      "# and the MCP server always run on a new-enough Node. (npx's `#!/usr/bin/env node`",
+      '# shebang re-resolves node from PATH, so pinning PATH — not just an absolute npx — is',
+      '# what actually guarantees the right Node.)',
+      '#',
+      '# If your Node later moves (a new nvm version, an uninstall), re-run:',
+      '#   npx backthread install --agent cursor',
+      `NODE_BIN_DIR=${shSingleQuote(nodeBinDir)}`,
+      'if [ -d "$NODE_BIN_DIR" ]; then',
+      '  PATH="$NODE_BIN_DIR:$PATH"',
+      '  export PATH',
+      'fi',
+      `exec npx -y backthread ${backthreadArgs}`,
+    ].join('\n') + '\n'
+  );
+}
+
 /**
- * Cursor-specific: ensure hooks.stop contains our flat `{ command }` entry. Sets the
- * schema `version` to 1 only when ABSENT — never downgrades/rewrites a version the user
- * (or a future Cursor) already set. Idempotent: our hook present + a version already set
- * is a no-op.
+ * Write a Cursor wrapper script (idempotent on content) + chmod it 0755. Returns wrote:false
+ * when the on-disk content already matches (so a re-run is a no-op, like the JSON writers).
  */
-function withCursorStopHook(settings: Record<string, unknown>): { next: Record<string, unknown>; changed: boolean } {
-  const command = hookCommand('cursor');
+async function writeCursorScript(
+  deps: AgentInstallDeps,
+  path: string,
+  content: string,
+): Promise<AgentFileWrite> {
+  const doRead = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
+  const doChmod = deps.chmodImpl ?? ((p: string, mode: number) => chmod(p, mode));
+  let existing: string | null = null;
+  try {
+    existing = await doRead(path);
+  } catch (e) {
+    if (!isNotFound(e)) throw e;
+  }
+  if (existing === content) {
+    // Content already current — but still (re)assert the exec bit so a re-run SELF-HEALS
+    // a stripped 0755 (a dotfile-sync tool, a manual edit, a restrictive umask on a prior
+    // partial write). A non-executable wrapper silently breaks capture — the exact
+    // reliability failure this writer exists to fix. Best-effort: a content-match must
+    // never fail the install (it was a pure no-op before), so a chmod hiccup is swallowed.
+    await doChmod(path, 0o755).catch(() => {});
+    return { path, wrote: false };
+  }
+  const doMkdir = deps.mkdirImpl ?? (async (d: string) => void (await mkdir(d, { recursive: true })));
+  const doWrite = deps.writeFileImpl ?? ((p: string, d: string) => writeFile(p, d));
+  await doMkdir(dirname(path));
+  await doWrite(path, content);
+  await doChmod(path, 0o755);
+  return { path, wrote: true };
+}
+
+/**
+ * Ensure ~/.cursor/mcp.json's `mcpServers.backthread` points at the absolute MCP wrapper
+ * script (ARP-692). We own that key: an identical entry is a no-op; any other value
+ * (including the pre-ARP-692 plain-`npx` entry) is MIGRATED to ours. Never touches other servers.
+ */
+function withCursorMcpServer(
+  settings: Record<string, unknown>,
+  mcpScriptPath: string,
+): { next: Record<string, unknown>; changed: boolean } {
+  const mcpServers = asObject(settings.mcpServers);
+  const desired = { command: mcpScriptPath, args: [] as string[] };
+  if (JSON.stringify(mcpServers.backthread) === JSON.stringify(desired)) {
+    return { next: settings, changed: false };
+  }
+  mcpServers.backthread = desired;
+  return { next: { ...settings, mcpServers }, changed: true };
+}
+
+/**
+ * Cursor-specific: ensure hooks.stop contains our flat `{ command: <absolute captureScript> }`
+ * entry, MIGRATING the pre-ARP-692 inline command ({@link hookCommand}('cursor')) to it (strip
+ * the old, never duplicate). Sets the schema `version` to 1 only when ABSENT — never
+ * downgrades/rewrites a version the user (or a future Cursor) already set. Idempotent: our
+ * script entry present + no stale inline entry + a version already set is a no-op.
+ */
+function withCursorStopHook(
+  settings: Record<string, unknown>,
+  captureScriptPath: string,
+): { next: Record<string, unknown>; changed: boolean } {
+  const legacyInline = hookCommand('cursor'); // the retired pre-ARP-692 inline `npx …` command
   const hooks = asObject(settings.hooks);
   const stop: unknown[] = Array.isArray(hooks.stop) ? [...(hooks.stop as unknown[])] : [];
-  const present = stop.some((h) => (h as { command?: unknown })?.command === command);
+  const hadDesired = stop.some((h) => (h as { command?: unknown })?.command === captureScriptPath);
+  const next = stop.filter((h) => (h as { command?: unknown })?.command !== legacyInline);
+  const removedLegacy = next.length !== stop.length;
+  if (!hadDesired) next.push({ command: captureScriptPath });
   const hasVersion = typeof settings.version === 'number';
-  if (present && hasVersion) return { next: settings, changed: false };
-  if (!present) stop.push({ command });
-  hooks.stop = stop;
+  if (hadDesired && !removedLegacy && hasVersion) return { next: settings, changed: false };
+  hooks.stop = next;
   return { next: { ...settings, version: hasVersion ? settings.version : 1, hooks }, changed: true };
 }
 
