@@ -210,6 +210,19 @@ test('cursor: idempotent re-run writes nothing', async () => {
   assert.ok(r2.writes.every((w) => !w.wrote));
 });
 
+test('cursor: a content-identical re-run RE-ASSERTS the exec bit (self-heal a stripped 0755)', async () => {
+  const fs1 = fakeFs();
+  await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs1.deps, probeVersionImpl: noProbe });
+  // Simulate the exec bit being stripped after install (a sync tool / manual edit).
+  const fs2 = fakeFs({ ...fs1.files });
+  delete fs2.modes[CAPTURE_SCRIPT];
+  delete fs2.modes[MCP_SCRIPT];
+  const r2 = await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs2.deps, probeVersionImpl: noProbe });
+  assert.ok(r2.writes.every((w) => !w.wrote)); // content unchanged → still reported as no-write
+  assert.equal(fs2.modes[CAPTURE_SCRIPT], 0o755); // …but the exec bit was restored
+  assert.equal(fs2.modes[MCP_SCRIPT], 0o755);
+});
+
 // --- corrupt config + version gate -------------------------------------------
 
 test('a corrupt existing config THROWS (never clobbered)', async () => {

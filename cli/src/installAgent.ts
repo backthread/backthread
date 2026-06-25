@@ -306,6 +306,9 @@ function cursorWrapperScript(nodeBinDir: string, backthreadArgs: string): string
       "# and the MCP server always run on a new-enough Node. (npx's `#!/usr/bin/env node`",
       '# shebang re-resolves node from PATH, so pinning PATH — not just an absolute npx — is',
       '# what actually guarantees the right Node.)',
+      '#',
+      '# If your Node later moves (a new nvm version, an uninstall), re-run:',
+      '#   npx backthread install --agent cursor',
       `NODE_BIN_DIR=${shSingleQuote(nodeBinDir)}`,
       'if [ -d "$NODE_BIN_DIR" ]; then',
       '  PATH="$NODE_BIN_DIR:$PATH"',
@@ -326,16 +329,24 @@ async function writeCursorScript(
   content: string,
 ): Promise<AgentFileWrite> {
   const doRead = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
+  const doChmod = deps.chmodImpl ?? ((p: string, mode: number) => chmod(p, mode));
   let existing: string | null = null;
   try {
     existing = await doRead(path);
   } catch (e) {
     if (!isNotFound(e)) throw e;
   }
-  if (existing === content) return { path, wrote: false };
+  if (existing === content) {
+    // Content already current — but still (re)assert the exec bit so a re-run SELF-HEALS
+    // a stripped 0755 (a dotfile-sync tool, a manual edit, a restrictive umask on a prior
+    // partial write). A non-executable wrapper silently breaks capture — the exact
+    // reliability failure this writer exists to fix. Best-effort: a content-match must
+    // never fail the install (it was a pure no-op before), so a chmod hiccup is swallowed.
+    await doChmod(path, 0o755).catch(() => {});
+    return { path, wrote: false };
+  }
   const doMkdir = deps.mkdirImpl ?? (async (d: string) => void (await mkdir(d, { recursive: true })));
   const doWrite = deps.writeFileImpl ?? ((p: string, d: string) => writeFile(p, d));
-  const doChmod = deps.chmodImpl ?? ((p: string, mode: number) => chmod(p, mode));
   await doMkdir(dirname(path));
   await doWrite(path, content);
   await doChmod(path, 0o755);

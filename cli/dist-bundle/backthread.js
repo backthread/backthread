@@ -8364,6 +8364,9 @@ function cursorWrapperScript(nodeBinDir, backthreadArgs) {
     "# and the MCP server always run on a new-enough Node. (npx's `#!/usr/bin/env node`",
     "# shebang re-resolves node from PATH, so pinning PATH \u2014 not just an absolute npx \u2014 is",
     "# what actually guarantees the right Node.)",
+    "#",
+    "# If your Node later moves (a new nvm version, an uninstall), re-run:",
+    "#   npx backthread install --agent cursor",
     `NODE_BIN_DIR=${shSingleQuote(nodeBinDir)}`,
     'if [ -d "$NODE_BIN_DIR" ]; then',
     '  PATH="$NODE_BIN_DIR:$PATH"',
@@ -8374,16 +8377,20 @@ function cursorWrapperScript(nodeBinDir, backthreadArgs) {
 }
 async function writeCursorScript(deps, path, content) {
   const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
+  const doChmod = deps.chmodImpl ?? ((p, mode) => chmod4(p, mode));
   let existing = null;
   try {
     existing = await doRead(path);
   } catch (e) {
     if (!isNotFound2(e)) throw e;
   }
-  if (existing === content) return { path, wrote: false };
+  if (existing === content) {
+    await doChmod(path, 493).catch(() => {
+    });
+    return { path, wrote: false };
+  }
   const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
   const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
-  const doChmod = deps.chmodImpl ?? ((p, mode) => chmod4(p, mode));
   await doMkdir(dirname3(path));
   await doWrite(path, content);
   await doChmod(path, 493);
