@@ -8695,14 +8695,16 @@ Backthread is set up for ${targetAgent}. New sessions are captured automatically
       log(`[2/3] Hook: not registered \u2014 ${e.message}`);
       log("      You can add it manually (see the README \u203A Registering the hook).");
     }
-    try {
-      const { stripped, path } = await unregisterProjectHook(cwd, deps);
-      if (stripped) {
-        projectHookMigrated = true;
-        log(`      Migrated: removed the stale project-scope SessionEnd hook from ${path} (it now lives at user scope).`);
+    if (hookRegistered) {
+      try {
+        const { stripped, path } = await unregisterProjectHook(cwd, deps);
+        if (stripped) {
+          projectHookMigrated = true;
+          log(`      Migrated: removed the stale project-scope SessionEnd hook from ${path} (it now lives at user scope).`);
+        }
+      } catch (e) {
+        log(`      Note: left the project-scope settings.json untouched \u2014 ${e.message}`);
       }
-    } catch (e) {
-      log(`      Note: left the project-scope ${".claude/settings.json"} untouched \u2014 ${e.message}`);
     }
   }
   let backfill = null;

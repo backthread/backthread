@@ -496,14 +496,21 @@ export async function runInstall(
     // Strip our hook from the project file, idempotently, preserving foreign hooks/keys.
     // Best-effort: a missing project file is a no-op; a corrupt one is reported + left
     // intact; never fails the install.
-    try {
-      const { stripped, path } = await unregisterProjectHook(cwd, deps);
-      if (stripped) {
-        projectHookMigrated = true;
-        log(`      Migrated: removed the stale project-scope SessionEnd hook from ${path} (it now lives at user scope).`);
+    //
+    // GATE on hookRegistered: only remove the old project fallback once the user-global
+    // replacement is confirmed in place. If registerHook just THREW (a corrupt user
+    // settings.json), stripping the still-working project hook would leave the repo with
+    // ZERO capture — worse than the double-capture we're fixing.
+    if (hookRegistered) {
+      try {
+        const { stripped, path } = await unregisterProjectHook(cwd, deps);
+        if (stripped) {
+          projectHookMigrated = true;
+          log(`      Migrated: removed the stale project-scope SessionEnd hook from ${path} (it now lives at user scope).`);
+        }
+      } catch (e) {
+        log(`      Note: left the project-scope settings.json untouched — ${(e as Error).message}`);
       }
-    } catch (e) {
-      log(`      Note: left the project-scope ${'.claude/settings.json'} untouched — ${(e as Error).message}`);
     }
   }
 

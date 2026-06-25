@@ -438,6 +438,28 @@ test('runInstall: no project file → no migration (projectHookMigrated false)',
   assert.equal(res.projectHookMigrated, false);
 });
 
+test('runInstall: a corrupt USER settings.json does NOT strip the working project hook (gated on hookRegistered)', async () => {
+  const userPath = '/home/dev/.claude/settings.json';
+  const projPath = '/work/app/.claude/settings.json';
+  const writes: Record<string, string> = {};
+  const res = await runInstall(
+    opts(),
+    deps({
+      readFileImpl: async (p) => {
+        if (p === userPath) return '{ broken json'; // user-global registration will throw
+        if (p === projPath)
+          return JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: 'npx backthread capture' }] }] } });
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      writeFileImpl: async (p, d) => void (writes[p] = d),
+    }),
+  );
+  assert.equal(res.hookRegistered, false); // user-global registration failed (corrupt)
+  assert.equal(res.projectHookMigrated, false); // …so we did NOT strip the still-working project hook
+  assert.equal(writes[projPath], undefined); // project file untouched → repo keeps capturing
+  assert.equal(res.exitCode, 0);
+});
+
 test('runInstall: a corrupt PROJECT settings.json is reported (no clobber) but install still succeeds', async () => {
   const userPath = '/home/dev/.claude/settings.json';
   const projPath = '/work/app/.claude/settings.json';
