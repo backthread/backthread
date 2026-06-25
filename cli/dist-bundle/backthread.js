@@ -7520,6 +7520,27 @@ function resolveRepo(cwd, readRemote = defaultRemoteReader) {
   const remote = readRemote(cwd);
   return remote ? parseRepoFromRemote(remote) : null;
 }
+var defaultGitRunner = (cwd, args) => {
+  try {
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+  } catch {
+    return null;
+  }
+};
+function resolveGitContext(cwd, run = defaultGitRunner) {
+  const rawBranch = run(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const branch = rawBranch ? rawBranch.trim() : "";
+  const rawSha = run(cwd, ["rev-parse", "HEAD"]);
+  const sha = rawSha ? rawSha.trim() : "";
+  return {
+    branch: branch && branch !== "HEAD" ? branch : null,
+    headSha: sha || null
+  };
+}
 
 // src/infer.ts
 async function localByokInfer(_transcript, _config, _opts) {
@@ -7562,6 +7583,9 @@ async function serverInfer(transcript, config2, opts = {}) {
     body.repo = { owner: opts.repo.owner, name: opts.repo.name };
     if (opts.decidedAt) body.decidedAt = opts.decidedAt;
     if (opts.filePaths && opts.filePaths.length > 0) body.filePaths = opts.filePaths;
+    if (opts.captured?.branch != null) body.capturedBranch = opts.captured.branch;
+    if (opts.captured?.headSha != null) body.capturedHeadSha = opts.captured.headSha;
+    if (opts.captured?.at != null) body.capturedAt = opts.captured.at;
   }
   let res;
   try {
@@ -8933,24 +8957,31 @@ async function runCapture(input, deps = {}) {
     const decidedAt = sessionTimestamp(records) ?? void 0;
     const filePaths = sessionPaths(records, input.cwd);
     const sessionId = redacted.sessionId ?? input.session_id ?? null;
-    if (redacted.turns.length === 0) {
+    const turnCount = redacted.turns.length;
+    const fromTurn = deps.fromTurnIndex ?? 0;
+    const newTurns = fromTurn > 0 ? redacted.turns.slice(fromTurn) : redacted.turns;
+    if (newTurns.length === 0) {
       return {
         status: "nothing-to-capture",
-        detail: "redaction left no natural-language turns (session was all code / tool I/O).",
-        count: 0
+        detail: turnCount === 0 ? "redaction left no natural-language turns (session was all code / tool I/O)." : `no new turns since the last capture (watermark ${fromTurn} of ${turnCount}).`,
+        count: 0,
+        turnCount
       };
     }
     const transcript = {
       sessionId,
-      turns: redacted.turns,
+      turns: newTurns,
       stats: redacted.stats
     };
     const repo = input.cwd ? resolveRepo(input.cwd, deps.readRemoteImpl) : null;
+    const gitContext = input.cwd ? resolveGitContext(input.cwd, deps.readGitImpl) : { branch: null, headSha: null };
+    const captured = { branch: gitContext.branch, headSha: gitContext.headSha, at: decidedAt ?? null };
     const result = await inferDecisions(transcript, config2, {
       env,
       fetchImpl: deps.fetchImpl,
       decidedAt,
       filePaths,
+      captured,
       ...repo ? { persist: true, repo } : {}
     });
     if (!result.ok) {
@@ -8963,33 +8994,39 @@ async function runCapture(input, deps = {}) {
         status: "persisted-by-server",
         detail: `inference router persisted ${result.decisions.length} decision(s) server-side.`,
         count: result.decisions.length,
-        repoConnected: true
+        repoConnected: true,
+        turnCount
       };
     }
     if (result.decisions.length === 0) {
       return {
         status: "nothing-to-capture",
         detail: "inference returned no decisions for this session.",
-        count: 0
+        count: 0,
+        turnCount
       };
     }
     if (!repo) {
       return {
         status: "nothing-to-capture",
         detail: "derived decisions but could not resolve a repo from cwd (no git remote) \u2014 nothing to claim them under; skipped.",
-        count: 0
+        count: 0,
+        turnCount
       };
     }
-    return persistDerived(result.decisions, repo, config2, decidedAt, {
+    const out = await persistDerived(result.decisions, repo, config2, decidedAt, {
       env,
       fetchImpl: deps.fetchImpl,
       log,
       // Carry the session id so the connect-nudge can throttle once-per-session
       // — the SessionEnd hook fires once, but manual/MCP captures fire many times.
       sessionId,
+      // ARP-696 — the session's git context, for the held-state decision server-side.
+      captured,
       // first-capture confirmation seam (threaded so tests can stub it).
       firstCaptureConfirmImpl: deps.firstCaptureConfirmImpl
     });
+    return { ...out, turnCount };
   } catch (e) {
     return { status: "error", detail: `capture failed (swallowed): ${e.message}` };
   }
@@ -9002,6 +9039,13 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
   }
   const body = {
     repo: { owner: repo.owner, name: repo.name },
+    // ARP-696 — session-level git context (the ingest-decisions validator reads it
+    // body-level and stamps each decision). Each field only when present; absent →
+    // the server keeps the decision merged (back-compat). It's the repo-less /
+    // self-persist path, so a held decision waits for the repo to connect + reconcile.
+    ...ctx.captured?.branch != null ? { capturedBranch: ctx.captured.branch } : {},
+    ...ctx.captured?.headSha != null ? { capturedHeadSha: ctx.captured.headSha } : {},
+    ...ctx.captured?.at != null ? { capturedAt: ctx.captured.at } : {},
     decisions: decisions.map((d) => ({
       ...d,
       ...decidedAt && d.decidedAt === void 0 ? { decidedAt } : {}
@@ -9104,19 +9148,26 @@ var MAX_REMEMBERED2 = 200;
 function parseState2(raw) {
   try {
     const obj = JSON.parse(raw);
-    if (obj && typeof obj === "object" && Array.isArray(obj.captured)) {
-      const captured = obj.captured.filter((s) => typeof s === "string");
-      return { captured };
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      const o = obj;
+      const captured = Array.isArray(o.captured) ? o.captured.filter((s) => typeof s === "string") : [];
+      const watermarks = {};
+      if (o.watermarks && typeof o.watermarks === "object" && !Array.isArray(o.watermarks)) {
+        for (const [k, v] of Object.entries(o.watermarks)) {
+          if (typeof v === "number" && Number.isFinite(v) && v >= 0) watermarks[k] = v;
+        }
+      }
+      return { captured, watermarks };
     }
   } catch {
   }
-  return { captured: [] };
+  return { captured: [], watermarks: {} };
 }
 async function readState2(env) {
   try {
     return parseState2(await readFile9(captureStatePath(env), "utf8"));
   } catch {
-    return { captured: [] };
+    return { captured: [], watermarks: {} };
   }
 }
 async function writeState2(state, env) {
@@ -9143,7 +9194,27 @@ async function markSessionCaptured(sessionId, env = process.env) {
   if (state.captured.includes(sessionId)) return;
   const captured = [...state.captured, sessionId];
   if (captured.length > MAX_REMEMBERED2) captured.splice(0, captured.length - MAX_REMEMBERED2);
-  await writeState2({ captured }, env);
+  const { [sessionId]: _dropped, ...watermarks } = state.watermarks;
+  await writeState2({ captured, watermarks }, env);
+}
+async function captureWatermark(sessionId, env = process.env) {
+  if (!sessionId || sessionId.trim().length === 0) return 0;
+  const state = await readState2(env);
+  return state.watermarks[sessionId] ?? 0;
+}
+async function setCaptureWatermark(sessionId, turnCount, env = process.env) {
+  if (!sessionId || sessionId.trim().length === 0) return;
+  if (typeof turnCount !== "number" || !Number.isFinite(turnCount) || turnCount < 0) return;
+  const state = await readState2(env);
+  const prev = state.watermarks[sessionId] ?? 0;
+  if (turnCount <= prev) return;
+  const { [sessionId]: _old, ...rest } = state.watermarks;
+  const watermarks = { ...rest, [sessionId]: turnCount };
+  const keys = Object.keys(watermarks);
+  if (keys.length > MAX_REMEMBERED2) {
+    for (const k of keys.slice(0, keys.length - MAX_REMEMBERED2)) delete watermarks[k];
+  }
+  await writeState2({ captured: state.captured, watermarks }, env);
 }
 function spawnDetached(rawPayload, agent, deps = {}) {
   const doSpawn = deps.spawnImpl ?? spawn2;
@@ -9210,12 +9281,22 @@ async function runFromHook(deps = {}) {
         stdout: codexStdout(agent, "duplicate-session")
       };
     }
+    const readWatermark = deps.watermarkImpl ?? captureWatermark;
+    const fromTurnIndex = await readWatermark(input.session_id, env).catch(() => 0);
     const run = deps.runCaptureImpl ?? runCapture;
-    const outcome = await run(input, deps.captureDeps);
+    const outcome = await run(input, { ...deps.captureDeps, fromTurnIndex });
     if (!isTransient(outcome)) {
-      const mark = deps.markCapturedImpl ?? markSessionCaptured;
-      await mark(input.session_id, env).catch(() => {
-      });
+      if (outcome.status === "no-auth") {
+        await (deps.markCapturedImpl ?? markSessionCaptured)(input.session_id, env).catch(() => {
+        });
+      } else if (typeof outcome.turnCount === "number") {
+        await (deps.setWatermarkImpl ?? setCaptureWatermark)(
+          input.session_id,
+          outcome.turnCount,
+          env
+        ).catch(() => {
+        });
+      }
       if (isTerminallyProcessed(outcome)) {
         await (deps.markSweepProcessedImpl ?? markSweepProcessed)(input.session_id, env).catch(() => {
         });
