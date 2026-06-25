@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRepoFromRemote, resolveRepo } from './repo.js';
+import { parseRepoFromRemote, resolveRepo, resolveGitContext, type GitRunner } from './repo.js';
 
 test('parseRepoFromRemote handles scp-style SSH', () => {
   assert.deepEqual(parseRepoFromRemote('git@github.com:backthread/marola-platform.git'), {
@@ -50,4 +50,36 @@ test('resolveRepo maps a read remote through the parser', () => {
     resolveRepo('/tmp/x', () => 'git@github.com:acme/app.git\n'),
     { owner: 'acme', name: 'app' },
   );
+});
+
+// --- ARP-696: resolveGitContext ----------------------------------------------
+
+// A runner that answers the two git rev-parse calls from a fixture map.
+function gitRunner(map: { branch?: string | null; sha?: string | null }): GitRunner {
+  return (_cwd, args) => {
+    if (args.includes('--abbrev-ref')) return map.branch ?? null;
+    if (args[0] === 'rev-parse') return map.sha ?? null;
+    return null;
+  };
+}
+
+test('resolveGitContext returns the trimmed branch + sha', () => {
+  assert.deepEqual(resolveGitContext('/tmp/x', gitRunner({ branch: 'feat/x\n', sha: 'abc123\n' })), {
+    branch: 'feat/x',
+    headSha: 'abc123',
+  });
+});
+
+test('resolveGitContext maps a detached HEAD (branch "HEAD") to null branch, keeps the sha', () => {
+  assert.deepEqual(resolveGitContext('/tmp/x', gitRunner({ branch: 'HEAD\n', sha: 'abc123\n' })), {
+    branch: null,
+    headSha: 'abc123',
+  });
+});
+
+test('resolveGitContext returns nulls for a non-git cwd (runner returns null)', () => {
+  assert.deepEqual(resolveGitContext('/tmp/x', gitRunner({ branch: null, sha: null })), {
+    branch: null,
+    headSha: null,
+  });
 });

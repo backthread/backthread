@@ -52,6 +52,8 @@ function deps(over: Partial<CaptureDeps> = {}): CaptureDeps {
     readConfigImpl: async () => CONFIG,
     readFileImpl: async () => TRANSCRIPT_JSONL,
     readRemoteImpl: () => 'git@github.com:acme/app.git',
+    // ARP-696 — deterministic git context (never shell out to real git in tests).
+    readGitImpl: (_cwd, args) => (args.includes('--abbrev-ref') ? 'feat/test\n' : 'sha-test\n'),
     ensureAuthImpl: () => {},
     // stub the trust gate + first-capture confirmation to NO-OPS by
     // default so these tests never touch the real ~/.backthread/first-run.json. The
@@ -224,6 +226,49 @@ test('derive-only (server did not persist) → POST derived decisions to ingest-
   assert.match(calls[1].url, /\/ingest-decisions$/);
   // sanity: ingest body never carries raw source
   assert.doesNotMatch(JSON.stringify(calls[1].body), /const secret/);
+});
+
+// --- ARP-696: the capture hook reports git context to BOTH persist paths -----
+
+test('ARP-696 — git context rides the connected /infer-decisions persist body', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'a' }] } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.equal(out.status, 'persisted-by-server');
+  const inferBody = calls[0].body as Record<string, unknown>;
+  assert.equal(inferBody.capturedBranch, 'feat/test');
+  assert.equal(inferBody.capturedHeadSha, 'sha-test');
+  // `at` is the session timestamp (decidedAt) harvested from the transcript.
+  assert.equal(inferBody.capturedAt, '2026-06-03T09:00:00Z');
+});
+
+test('ARP-696 — git context rides the repo-less /ingest-decisions body too', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({
+      status: 200,
+      body: { ok: true, persisted: false, decisions: [{ title: 'Use a queue', provenance: 'inferred' }] },
+    }),
+    ingest: () => ({ status: 200, body: { ok: true, count: 1, repoConnected: false, claimedRepo: 'acme/app' } }),
+  });
+  await runCapture(HOOK, deps({ fetchImpl }));
+  const ingestBody = calls[1].body as Record<string, unknown>;
+  assert.equal(ingestBody.capturedBranch, 'feat/test');
+  assert.equal(ingestBody.capturedHeadSha, 'sha-test');
+  assert.equal(ingestBody.capturedAt, '2026-06-03T09:00:00Z');
+});
+
+test('ARP-696 — a non-git cwd (runner returns null) sends NO captured fields', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'a' }] } }),
+  });
+  // readGitImpl returns null for both rev-parse calls → no branch, no sha.
+  await runCapture(HOOK, deps({ fetchImpl, readGitImpl: () => null }));
+  const inferBody = calls[0].body as Record<string, unknown>;
+  assert.ok(!('capturedBranch' in inferBody));
+  assert.ok(!('capturedHeadSha' in inferBody));
+  // `at` still rides (it's the session timestamp), but with no branch/sha the server
+  // keeps the decision merged (held ⟺ releasable).
 });
 
 test('repo-less landing → reports not-yet-connected from ingest response', async () => {

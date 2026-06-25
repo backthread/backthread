@@ -123,6 +123,67 @@ test('serverInfer forwards filePaths on the persist leg (the module anchor)', as
   assert.deepEqual(sent.filePaths, ['src/auth/login.ts', 'src/auth/session.ts']);
 });
 
+test('serverInfer forwards the capture context on the persist leg (ARP-696)', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch(() => ({
+    status: 200,
+    body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'a' }] },
+  }));
+
+  await serverInfer(TRANSCRIPT, CONFIG, {
+    fetchImpl,
+    env: {} as NodeJS.ProcessEnv,
+    persist: true,
+    repo: { owner: 'backthread', name: 'marola-platform' },
+    captured: { branch: 'feat/x', headSha: 'abc123', at: '2026-06-25T09:00:00Z' },
+  });
+
+  const sent = JSON.parse(String(calls[0].init.body));
+  assert.equal(sent.capturedBranch, 'feat/x');
+  assert.equal(sent.capturedHeadSha, 'abc123');
+  assert.equal(sent.capturedAt, '2026-06-25T09:00:00Z');
+});
+
+test('serverInfer omits null capture fields but keeps present ones (ARP-696)', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch(() => ({
+    status: 200,
+    body: { ok: true, persisted: true, decisions: [] },
+  }));
+
+  // Detached HEAD: no branch, but a sha → still held by the server.
+  await serverInfer(TRANSCRIPT, CONFIG, {
+    fetchImpl,
+    env: {} as NodeJS.ProcessEnv,
+    persist: true,
+    repo: { owner: 'backthread', name: 'marola-platform' },
+    captured: { branch: null, headSha: 'abc123', at: null },
+  });
+
+  const sent = JSON.parse(String(calls[0].init.body));
+  assert.ok(!('capturedBranch' in sent)); // null → omitted
+  assert.equal(sent.capturedHeadSha, 'abc123'); // present → kept
+  assert.ok(!('capturedAt' in sent)); // null → omitted
+});
+
+test('serverInfer does NOT send the capture context on the derive-only leg (ARP-696)', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch(() => ({
+    status: 200,
+    body: { ok: true, persisted: false, decisions: [{ title: 'a' }] },
+  }));
+
+  // No persist target → derive-only. The held-state context only matters when the
+  // server persists, so it must not ride the derive-only body.
+  await serverInfer(TRANSCRIPT, CONFIG, {
+    fetchImpl,
+    env: {} as NodeJS.ProcessEnv,
+    captured: { branch: 'feat/x', headSha: 'abc123', at: '2026-06-25T09:00:00Z' },
+  });
+
+  const sent = JSON.parse(String(calls[0].init.body));
+  assert.ok(!('capturedBranch' in sent));
+  assert.ok(!('capturedHeadSha' in sent));
+  assert.ok(!('capturedAt' in sent));
+});
+
 test('serverInfer omits filePaths from the body when empty', async () => {
   const { fetch: fetchImpl, calls } = stubFetch(() => ({
     status: 200,
