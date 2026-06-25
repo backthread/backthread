@@ -6885,6 +6885,10 @@ var require_dist = __commonJS({
   }
 });
 
+// src/bin/backthread.ts
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { realpathSync } from "node:fs";
+
 // src/login.ts
 import { hostname } from "node:os";
 
@@ -8555,6 +8559,33 @@ Backthread is set up for ${targetAgent}. New sessions are captured automatically
   return { exitCode, authed, hookRegistered, backfill, agentResult: null };
 }
 
+// src/entry.ts
+var PLUGIN_MARKETPLACE = "backthread/backthread";
+var PLUGIN_INSTALL = "backthread@backthread";
+function detectEntry(input = {}) {
+  if (input.claim && input.claim.trim().length > 0) return "web";
+  return "terminal";
+}
+function isInsideClaudeCode(env = process.env) {
+  return env.CLAUDECODE === "1";
+}
+function captureGuidance(env = process.env) {
+  if (isInsideClaudeCode(env)) {
+    return [
+      `Capture (the "why"): you're in Claude Code \u2014 install the plugin so every`,
+      "  session is captured automatically (it wires the hook + MCP across all your",
+      "  repos and worktrees):",
+      `    /plugin marketplace add ${PLUGIN_MARKETPLACE}`,
+      `    /plugin install ${PLUGIN_INSTALL}`
+    ].join("\n");
+  }
+  return [
+    'Capture (the "why"): run `npx backthread install` here to wire the capture hook',
+    "  so each Claude Code session is captured automatically when it ends.",
+    "  Using Codex / Cursor / Gemini? `npx backthread install --agent <codex|cursor|gemini>`."
+  ].join("\n");
+}
+
 // src/onboardingState.ts
 function parseSlug(slug) {
   const parts = slug.trim().replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
@@ -8734,6 +8765,7 @@ async function runStart(opts = {}, deps = {}) {
   const env = opts.env ?? process.env;
   const log = opts.log ?? ((m) => console.error(m));
   const cwd = opts.cwd ?? process.cwd();
+  const entry = opts.entry ?? detectEntry({ claim: opts.claim, env });
   const readState3 = deps.readStateImpl ?? readFirstRunState;
   const existingState = await readState3(env).catch(() => ({}));
   if (existingState.onboarded === true) {
@@ -8742,6 +8774,10 @@ async function runStart(opts = {}, deps = {}) {
     if (cfg.device_token) {
       log("Backthread is already set up on this machine \u2014 you're good to go.");
       log("  New sessions are captured automatically when they end.");
+      const repo = resolveOnboardingRepo({ cwd }, cfg, deps.onboardingDeps?.readRemoteImpl);
+      if (repo) {
+        log(`  View your "How it works" diagram: ${buildRepoDeepLink(repo.owner, repo.name, env)}`);
+      }
       log("  Run `/backthread:capture` to capture the current session now.");
       return { exitCode: 0, status: "already-onboarded", authed: true };
     }
@@ -8771,6 +8807,9 @@ async function runStart(opts = {}, deps = {}) {
   if (!authed) {
     log("      Run `/backthread:start` again to retry authorizing this device.");
     return { exitCode: 1, status: "auth-failed", authed: false };
+  }
+  if (entry === "terminal") {
+    log("\n" + captureGuidance(env));
   }
   const fetchState = deps.fetchStateImpl ?? fetchOnboardingState;
   const stateOut = await fetchState({ cwd }, { env, ...deps.onboardingDeps }).catch(
@@ -33531,6 +33570,9 @@ async function startMcpServer(deps = {}) {
 var USAGE = `backthread \u2014 capture the "why" of your AI-coded changes
 
 Usage:
+  backthread                    Set up Backthread (the unified front door \u2014 same as
+                          \`backthread start\`): trust copy + one-tap auth + your next
+                          step. Idempotent. [--claim <code>]
   backthread start              First-run setup (backs the /backthread:start slash command):
                           trust copy + one-tap auth + your next step. Idempotent.
                           [--claim <code>]
@@ -33574,8 +33616,18 @@ function flagValue(rest, flag) {
   if (!value || value.startsWith("--")) return void 0;
   return value;
 }
-async function main(argv) {
+async function runOnboarding(rest) {
+  const claim = parseClaimFlag(rest);
+  const result = await runStart({
+    claim,
+    device: rest.includes("--device"),
+    entry: detectEntry({ claim })
+  });
+  return result.exitCode;
+}
+async function main(argv, deps = {}) {
   const [command, ...rest] = argv;
+  const onboarding = deps.runOnboardingImpl ?? runOnboarding;
   switch (command) {
     case "login": {
       const device = rest.includes("--device");
@@ -33629,11 +33681,7 @@ async function main(argv) {
       return null;
     }
     case "start": {
-      const result = await runStart({
-        claim: parseClaimFlag(rest),
-        device: rest.includes("--device")
-      });
-      return result.exitCode;
+      return onboarding(rest);
     }
     case "install": {
       const agentFlag = flagValue(rest, "--agent");
@@ -33651,23 +33699,48 @@ async function main(argv) {
       });
       return result.exitCode;
     }
+    case void 0:
+      return onboarding(rest);
     case "help":
     case "--help":
     case "-h":
-    case void 0:
       console.log(USAGE);
       return 0;
     default:
+      if (command.startsWith("-")) return onboarding(argv);
       console.error(`Unknown command: ${command}
 
 ${USAGE}`);
       return 1;
   }
 }
-main(process.argv.slice(2)).then((code) => {
-  if (code === null) return;
-  process.exit(code);
-}).catch((err) => {
-  console.error(`backthread: ${err.message ?? err}`);
-  process.exit(1);
-});
+function isEntryPoint() {
+  try {
+    const entry = process.argv[1];
+    if (!entry) return false;
+    const self = fileURLToPath2(import.meta.url);
+    const resolve = (p) => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return p;
+      }
+    };
+    return resolve(self) === resolve(entry);
+  } catch {
+    return true;
+  }
+}
+if (isEntryPoint()) {
+  main(process.argv.slice(2)).then((code) => {
+    if (code === null) return;
+    process.exit(code);
+  }).catch((err) => {
+    console.error(`backthread: ${err.message ?? err}`);
+    process.exit(1);
+  });
+}
+export {
+  main,
+  runOnboarding
+};

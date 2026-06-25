@@ -78,8 +78,10 @@ import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { configDir, readConfig, CONFIG_MODE, DIR_MODE, type BackthreadConfig } from './config.js';
 import { ensureAuth, deviceLogin, type LoginOptions } from './login.js';
 import { TRUST_COPY } from './install.js';
+import { captureGuidance, detectEntry, type EntryPoint } from './entry.js';
 import {
   fetchOnboardingState,
+  resolveOnboardingRepo,
   type OnboardingInput,
   type OnboardingDeps,
   type OnboardingOutcome,
@@ -233,6 +235,13 @@ export interface StartOptions {
    */
   claim?: string;
   /**
+   * The entry point that arrived here. Drives the step ORDER (terminal-first leads
+   * with capture, then nudges connect-repo; web-initiated skips the re-nudge — the
+   * repo was almost certainly connected in the web wizard). When omitted we derive
+   * it: a claim code ⇒ 'web', otherwise 'terminal' (see entry.detectEntry).
+   */
+  entry?: EntryPoint;
+  /**
    * Headless/SSH device-code login. OUT OF SCOPE: we
    * refuse with the existing loud stub guidance rather than silently fall back to the
    * loopback (which would HANG a headless box).
@@ -284,6 +293,10 @@ export async function runStart(opts: StartOptions = {}, deps: StartDeps = {}): P
   const env = opts.env ?? process.env;
   const log = opts.log ?? ((m: string) => console.error(m));
   const cwd = opts.cwd ?? process.cwd();
+  // Entry point drives the step order. Explicit wins; otherwise derive it (a claim
+  // code ⇒ web-initiated). 'terminal' leads with capture then nudges connect; 'web'
+  // skips the connect re-nudge (the repo was connected in the web wizard).
+  const entry: EntryPoint = opts.entry ?? detectEntry({ claim: opts.claim, env });
 
   // (1) IDEMPOTENCE GATE — a returning user is never re-onboarded.
   const readState = deps.readStateImpl ?? readFirstRunState;
@@ -300,6 +313,14 @@ export async function runStart(opts: StartOptions = {}, deps: StartDeps = {}): P
     if (cfg.device_token) {
       log("Backthread is already set up on this machine — you're good to go.");
       log('  New sessions are captured automatically when they end.');
+      // Surface the diagram deep-link so a returning user's short message is
+      // actionable ("view your diagram at <link>", the AC). Resolved LOCALLY
+      // (config.repo → cwd git remote) — no network, never throws; omitted cleanly
+      // when no repo resolves (e.g. run outside a connected repo).
+      const repo = resolveOnboardingRepo({ cwd }, cfg, deps.onboardingDeps?.readRemoteImpl);
+      if (repo) {
+        log(`  View your "How it works" diagram: ${buildRepoDeepLink(repo.owner, repo.name, env)}`);
+      }
       log('  Run `/backthread:capture` to capture the current session now.');
       return { exitCode: 0, status: 'already-onboarded', authed: true };
     }
@@ -352,10 +373,22 @@ export async function runStart(opts: StartOptions = {}, deps: StartDeps = {}): P
     return { exitCode: 1, status: 'auth-failed', authed: false };
   }
 
-  // (4) STATE-DRIVEN NEXT STEP — read the SAME unified state the web wizard reads and
+  // (4a) CAPTURE STEP (the "why") — entry-aware. On the TERMINAL door we lead with
+  // capture: it's the thing only this machine can do, and inside Claude Code the
+  // RIGHT wiring is the PLUGIN (never the stale npx settings.json hook) — captureGuidance
+  // routes that. On the WEB door (claim handoff) the user just came from the wizard;
+  // auth already armed capture for this session, so we keep it terse and skip the
+  // full install nudge.
+  if (entry === 'terminal') {
+    log('\n' + captureGuidance(env));
+  }
+
+  // (4b) STATE-DRIVEN NEXT STEP — read the SAME unified state the web wizard reads and
   // render its canonical next step (the cell→next-step decision lives once
   // server-side). A repo-not-connected state surfaces the connect nudge copy; a terminal
   // state renders cleanly. Best-effort: a failed state fetch degrades to a plain hint.
+  // On the WEB door we still fetch + render (the deep-link to the diagram is the payoff),
+  // but the connect nudge will be absent because the wizard already connected the repo.
   const fetchState = deps.fetchStateImpl ?? fetchOnboardingState;
   // fetchOnboardingState reads the on-disk device token itself (the one auth just wrote)
   // and resolves the repo from cwd; onboardingDeps lets tests inject a fake config/fetch/

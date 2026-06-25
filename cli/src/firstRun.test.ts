@@ -196,6 +196,88 @@ test('runStart: onboarded but no device token → signed-out guidance, exit 0, a
   });
 });
 
+test('runStart already-onboarded surfaces the diagram deep-link (the "view your diagram at <link>" AC)', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, BACKTHREAD_APP_URL: 'http://localhost:5173' } as NodeJS.ProcessEnv;
+    await updateFirstRunState({ onboarded: true }, env);
+    const lines: string[] = [];
+    const res = await runStart(
+      { env, log: (m) => lines.push(m) },
+      startDeps({
+        // Authed + a configured repo → the deep-link is built locally (no network).
+        readConfigImpl: async () => ({ account: 'acc', repo: 'acme/app', device_token: 'backthread_pat_x' }),
+      }),
+    );
+    assert.equal(res.status, 'already-onboarded');
+    assert.equal(res.exitCode, 0);
+    const text = lines.join('\n');
+    assert.match(text, /good to go/i);
+    assert.match(text, /How it works/);
+    assert.match(text, /http:\/\/localhost:5173\/acme\/app/, 'returning user gets the diagram link');
+  });
+});
+
+// --- runStart: entry-point-aware capture step (ARP-703) ----------------------
+
+test('runStart TERMINAL entry leads with the capture step; inside CC it recommends the PLUGIN', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, CLAUDECODE: '1' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    const res = await runStart(
+      { env, entry: 'terminal', cwd: '/tmp/repo', log: (m) => lines.push(m) },
+      startDeps(),
+    );
+    assert.equal(res.status, 'onboarded');
+    const text = lines.join('\n');
+    // Inside CC the capture step routes to the plugin, NOT the stale npx settings.json hook.
+    assert.match(text, /\/plugin install backthread@backthread/);
+    assert.doesNotMatch(text, /npx backthread install/);
+    assert.doesNotMatch(text, /settings\.json/);
+  });
+});
+
+test('runStart TERMINAL entry outside CC points the capture step at `npx backthread install`', async () => {
+  await withTempEnv(async (envBase) => {
+    // Force "not inside Claude Code" — the test runner itself may run under CC
+    // (CLAUDECODE=1 leaks via withTempEnv's process.env spread), so unset it here.
+    const env = { ...envBase, CLAUDECODE: '' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    await runStart({ env, entry: 'terminal', log: (m) => lines.push(m) }, startDeps());
+    const text = lines.join('\n');
+    assert.match(text, /npx backthread install/);
+    assert.doesNotMatch(text, /\/plugin install/);
+  });
+});
+
+test('runStart WEB entry (claim handoff) does NOT lead with the install capture step (repo already connected)', async () => {
+  await withTempEnv(async (env) => {
+    const lines: string[] = [];
+    const res = await runStart(
+      { env, entry: 'web', claim: 'backthread_claim_abc', log: (m) => lines.push(m) },
+      startDeps(),
+    );
+    assert.equal(res.status, 'onboarded');
+    const text = lines.join('\n');
+    // The web door just adds capture for this session — it must not re-push install.
+    assert.doesNotMatch(text, /npx backthread install/);
+    assert.doesNotMatch(text, /\/plugin install/);
+    // It still authed via the claim (one-tap) and rendered the next step.
+    assert.match(text, /claim code accepted — no browser/);
+  });
+});
+
+test('runStart derives WEB entry from a claim code when entry is omitted', async () => {
+  await withTempEnv(async (env) => {
+    const lines: string[] = [];
+    // No explicit `entry`; a claim is present → web-initiated → no install capture step.
+    await runStart(
+      { env, claim: 'backthread_claim_abc', log: (m) => lines.push(m) },
+      startDeps(),
+    );
+    assert.doesNotMatch(lines.join('\n'), /npx backthread install/);
+  });
+});
+
 // --- runStart: the happy first run -------------------------------------------
 
 test('runStart first run: trust copy BEFORE auth, then state-driven next step, marks onboarded', async () => {
