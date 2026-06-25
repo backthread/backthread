@@ -5,14 +5,27 @@
 
 **Keep the thread on what your AI agent actually shipped.**
 
+```bash
+npx backthread
+```
+
+One command, the whole setup: signs you in (one browser click), connects this
+repo, wires up automatic capture, and hands you the link to your live **"How it
+works"** diagram. Re-run it any time — it's idempotent, so a returning user just
+gets told they're good to go.
+
+> **In Claude Code?** `/plugin marketplace add backthread/backthread` →
+> `/plugin install backthread@backthread` → `/backthread:start`. The plugin
+> bundles the CLI, so there's no separate npm step.
+
 When you hand code to AI agents (Claude Code, Codex, Cursor), you stop reading
 every change — and a few weeks later you own a codebase you never internalized.
-Debugging slows down, refactors get scary.
-
-Backthread captures the **why** behind each change straight from your agent
-sessions, so you can ask *"how does X work?"* and stay oriented without
-spelunking through PRs. The decisions become a live **"How it works"** diagram
-and changelog at [backthread.dev](https://backthread.dev).
+Debugging slows down, refactors get scary. Backthread captures the **why** behind
+each change straight from your agent sessions, so you can ask *"how does X work?"*
+and stay oriented without spelunking through PRs. The decisions become a live
+**"How it works"** diagram and changelog at
+[app.backthread.dev](https://app.backthread.dev) — see the
+[live demo](https://app.backthread.dev/demo).
 
 ## Your source code never leaves your machine
 
@@ -36,11 +49,26 @@ rather say so than paper over it. The redaction fence is open source
 ([`@backthread/redact`](https://www.npmjs.com/package/@backthread/redact)) so you
 can verify it — read more at [backthread.dev/security](https://backthread.dev/security).
 
-## Quick start
+## What `npx backthread` does
 
-### Claude Code → install the plugin (one click, recommended)
+The bare command is the unified front door. Under the hood it:
 
-In Claude Code:
+1. **Signs you in** — opens your browser for one click (you'll need a free
+   [Backthread](https://backthread.dev) account; the CLI never sees a password,
+   and your device token is never printed or copied to the clipboard).
+2. **Wires up capture** — registers a hook so each Claude Code session is
+   captured automatically when it ends.
+3. **Backfills history** — replays your recent Claude Code sessions in this repo
+   so your "How it works" log isn't empty on day one.
+
+Then keep coding. At the end of every Claude Code session, Backthread captures
+the decisions automatically — nothing to remember. Ask *"how does X work?"* right
+inside Claude Code (the `backthread` MCP server exposes a `query` tool), or open
+the live diagram at [app.backthread.dev](https://app.backthread.dev).
+
+### Claude Code plugin (alternative)
+
+Prefer the marketplace? In Claude Code:
 
 ```
 /plugin marketplace add backthread/backthread
@@ -52,30 +80,9 @@ Installing the plugin bundles the CLI — no separate npm step — and registers
 **user/global scope** (so it works across every repo and git worktree), the
 SessionEnd **capture hook**, the `/backthread:capture` & `/backthread:start`
 commands, and the **backthread MCP server** (capture + `query`). `/backthread:start`
-just signs you in. That's the whole setup.
+just signs you in.
 
-### Any agent (or bare terminal) → `npx backthread install`
-
-In your project:
-
-```bash
-npx backthread install
-```
-
-That's the whole setup. `install`:
-
-1. **Signs you in** — opens your browser for one click (you'll need a free
-   [Backthread](https://backthread.dev) account; the CLI never sees a password,
-   and your device token is never printed or copied to the clipboard).
-2. **Wires up capture** — registers a hook so each Claude Code session is
-   captured automatically when it ends.
-3. **Backfills history** — replays your recent Claude Code sessions in this repo
-   so your "How it works" log isn't empty on day one.
-
-Already added Backthread as a Claude Code plugin? The hook is wired for you —
-run `/backthread:start` (or `npx backthread start`) just to sign in.
-
-### Codex / Cursor / Gemini CLI → `npx backthread install --agent <agent>`
+### Codex / Cursor / Gemini CLI
 
 Use another coding agent? One command wires up its **MCP server** (the `query`
 tool) **and** an automatic capture hook — written to that agent's **user-global**
@@ -92,19 +99,10 @@ clobbers your other config). Then `npx backthread login` once to authorize. Gemi
 users can also install the [one-command extension](https://github.com/backthread/backthread/tree/main/extensions/gemini)
 instead, and Codex users the [plugin](https://github.com/backthread/backthread/tree/main/extensions/codex).
 
-## Onboard yourself in 3 steps
-
-1. **Install** — `npx backthread install` in your repo. One browser click to authorize.
-2. **Keep coding** — at the end of every Claude Code session, Backthread captures
-   the decisions automatically. Nothing to remember.
-3. **Ask "how does X work?"** — query your decision log right inside Claude Code
-   (the `backthread` MCP server exposes a `query` tool), or open the live diagram
-   at [app.backthread.dev](https://app.backthread.dev).
-
 ## Commands
 
 ```
-backthread           Set up Backthread — the unified front door (same as `start`).
+backthread           Set up Backthread — the unified front door (sign in + connect + capture).
                      Idempotent: a returning user is told they're good to go.
 backthread install   Set up capture for this repo (sign in + hook + backfill)
 backthread start     First-run for the Claude Code plugin (sign in + your next step)
@@ -121,7 +119,8 @@ backthread help      Show usage
 
 ## Learn more
 
-- **Live app** — [backthread.dev](https://backthread.dev)
+- **Live app & demo** — [app.backthread.dev](https://app.backthread.dev) · [app.backthread.dev/demo](https://app.backthread.dev/demo)
+- **Marketing site** — [backthread.dev](https://backthread.dev)
 - **How your data is handled** — [backthread.dev/security](https://backthread.dev/security)
 - **Source & internals** — [github.com/backthread/backthread](https://github.com/backthread/backthread)
 
