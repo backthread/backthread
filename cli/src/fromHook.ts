@@ -168,22 +168,45 @@ export function captureStatePath(env: NodeJS.ProcessEnv = process.env): string {
 const MAX_REMEMBERED = 200;
 
 interface CaptureState {
-  /** Session ids already captured by a --from-hook run (most-recent last). */
+  /**
+   * Session ids FULLY SKIPPED for live capture (most-recent last). Today this is the
+   * no-auth set: once a session hits no-auth we ring it so a later per-turn fire
+   * doesn't re-pop the browser login (backfill recovers it). A ringed session is
+   * never re-run live — distinct from `watermarks` (incremental, still capturing).
+   */
   captured: string[];
+  /**
+   * ARP-693 — per-conversation incremental WATERMARK: conversationId → the count of
+   * redacted turns already captured. Cursor/Codex `stop` fire per turn, so each fire
+   * infers only the turns ADDED since this count, then advances it. A conversation
+   * that's actively capturing lives here (NOT in `captured`), so it keeps growing —
+   * which is how endless conversations stay captured completely.
+   */
+  watermarks: Record<string, number>;
 }
 
 /** Parse the throttle blob defensively → empty state on anything unexpected. */
 function parseState(raw: string): CaptureState {
   try {
     const obj = JSON.parse(raw) as unknown;
-    if (obj && typeof obj === 'object' && Array.isArray((obj as CaptureState).captured)) {
-      const captured = (obj as CaptureState).captured.filter((s): s is string => typeof s === 'string');
-      return { captured };
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      const o = obj as Partial<CaptureState>;
+      const captured = Array.isArray(o.captured)
+        ? o.captured.filter((s): s is string => typeof s === 'string')
+        : [];
+      // watermarks is ADDITIVE (older state files have only `captured`) — default {}.
+      const watermarks: Record<string, number> = {};
+      if (o.watermarks && typeof o.watermarks === 'object' && !Array.isArray(o.watermarks)) {
+        for (const [k, v] of Object.entries(o.watermarks)) {
+          if (typeof v === 'number' && Number.isFinite(v) && v >= 0) watermarks[k] = v;
+        }
+      }
+      return { captured, watermarks };
     }
   } catch {
     // fall through to empty (fail open — re-capture rather than silently drop)
   }
-  return { captured: [] };
+  return { captured: [], watermarks: {} };
 }
 
 async function readState(env: NodeJS.ProcessEnv): Promise<CaptureState> {
@@ -191,7 +214,7 @@ async function readState(env: NodeJS.ProcessEnv): Promise<CaptureState> {
     return parseState(await readFile(captureStatePath(env), 'utf8'));
   } catch {
     // Missing file (first run) or unreadable → empty state. Never throw.
-    return { captured: [] };
+    return { captured: [], watermarks: {} };
   }
 }
 
@@ -229,7 +252,57 @@ export async function markSessionCaptured(
   if (state.captured.includes(sessionId)) return; // already recorded
   const captured = [...state.captured, sessionId];
   if (captured.length > MAX_REMEMBERED) captured.splice(0, captured.length - MAX_REMEMBERED);
-  await writeState({ captured }, env);
+  // ARP-693 — once a session is fully skipped (no-auth), drop any incremental
+  // watermark for it (it won't be re-run live anyway) AND preserve the rest.
+  const { [sessionId]: _dropped, ...watermarks } = state.watermarks;
+  await writeState({ captured, watermarks }, env);
+}
+
+// ---------------------------------------------------------------------------------
+// ARP-693 — per-conversation incremental watermark.
+//
+// The boolean ring above answers "skip this session entirely?" (no-auth). The
+// watermark answers "how many turns of this conversation have we already captured?"
+// — so the next per-turn `stop` infers only the NEW turns. A session is in EITHER
+// the ring (fully skipped) OR the watermark map (actively capturing), never both
+// for live capture: the dup-check rings-out first; otherwise the watermark drives.
+// ---------------------------------------------------------------------------------
+
+/** The count of redacted turns already captured for this conversation (0 if new). */
+export async function captureWatermark(
+  sessionId: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<number> {
+  if (!sessionId || sessionId.trim().length === 0) return 0; // no key → start from 0
+  const state = await readState(env);
+  return state.watermarks[sessionId] ?? 0;
+}
+
+/**
+ * Advance this conversation's watermark to `turnCount` (monotonic — never regresses).
+ * Bounded like the ring: the oldest conversations fall off so the file stays tiny.
+ * Best-effort: a write failure just means the next turn-fire re-infers a turn or two
+ * (server dedupe collapses it). Never throws.
+ */
+export async function setCaptureWatermark(
+  sessionId: string | null | undefined,
+  turnCount: number,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  if (!sessionId || sessionId.trim().length === 0) return; // nothing to key on
+  if (typeof turnCount !== 'number' || !Number.isFinite(turnCount) || turnCount < 0) return;
+  const state = await readState(env);
+  const prev = state.watermarks[sessionId] ?? 0;
+  if (turnCount <= prev) return; // monotonic — a stale/equal fire never rewinds it
+  // Re-key to most-recent (delete then re-add so insertion order = recency), then
+  // trim the oldest conversations beyond the cap.
+  const { [sessionId]: _old, ...rest } = state.watermarks;
+  const watermarks: Record<string, number> = { ...rest, [sessionId]: turnCount };
+  const keys = Object.keys(watermarks);
+  if (keys.length > MAX_REMEMBERED) {
+    for (const k of keys.slice(0, keys.length - MAX_REMEMBERED)) delete watermarks[k];
+  }
+  await writeState({ captured: state.captured, watermarks }, env);
 }
 
 // ---------------------------------------------------------------------------------
@@ -357,6 +430,14 @@ export interface FromHookDeps {
   wasCapturedImpl?: (sessionId: string | null | undefined, env: NodeJS.ProcessEnv) => Promise<boolean>;
   /** Test seam: the idempotence recorder. Defaults to markSessionCaptured. */
   markCapturedImpl?: (sessionId: string | null | undefined, env: NodeJS.ProcessEnv) => Promise<void>;
+  /** Test seam: the ARP-693 watermark reader. Defaults to captureWatermark. */
+  watermarkImpl?: (sessionId: string | null | undefined, env: NodeJS.ProcessEnv) => Promise<number>;
+  /** Test seam: the ARP-693 watermark advancer. Defaults to setCaptureWatermark. */
+  setWatermarkImpl?: (
+    sessionId: string | null | undefined,
+    turnCount: number,
+    env: NodeJS.ProcessEnv,
+  ) => Promise<void>;
   /** Test seam: the DURABLE sweep-ledger recorder. Defaults to markSweepProcessed. */
   markSweepProcessedImpl?: (sessionId: string | null | undefined, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Test seam: the gap-recovery sweep. Defaults to runGapRecoverySweep. */
@@ -435,30 +516,40 @@ export async function runFromHook(deps: FromHookDeps = {}): Promise<FromHookResu
     }
 
     // (5) Run the SHARED fence (reused verbatim — redaction + trust boundary intact).
+    // ARP-693 — INCREMENTAL: pass this conversation's watermark so runCapture infers
+    // only the turns added since the last `stop` (Cursor/Codex fire per turn). Default
+    // 0 (whole transcript) for a new conversation / Claude Code's single SessionEnd.
+    // FAIL OPEN: a throwing watermark read degrades to 0 (re-infer; server dedupe
+    // collapses the overlap) rather than silently dropping the capture.
+    const readWatermark = deps.watermarkImpl ?? captureWatermark;
+    const fromTurnIndex = await readWatermark(input.session_id, env).catch(() => 0);
     const run = deps.runCaptureImpl ?? runCapture;
-    const outcome = await run(input, deps.captureDeps);
+    const outcome = await run(input, { ...deps.captureDeps, fromTurnIndex });
 
-    // (6) Record the session as captured so later turn-fires of the SAME session are
-    // idempotent — but ONLY when we actually got a terminal result for this session.
-    // We mark on every NON-transient outcome, including 'nothing-to-capture' AND
-    // 'no-auth'. We do NOT mark on a transient failure ('infer-failed' /
-    // 'persist-failed' / 'error' / 'no-transcript') so a later turn-fire (or the next
-    // session-end) can retry. session_id may be null when the transcript carried its
-    // own id — prefer the outcome-independent input id, which is what the per-turn hook
-    // re-sends.
+    // (6) Idempotence bookkeeping — ONLY on a NON-transient outcome (a transient
+    // 'infer-failed' / 'persist-failed' / 'error' / 'no-transcript' leaves both the
+    // ring AND the watermark untouched so a later turn-fire retries). Two cases:
     //
-    // WHY mark 'no-auth' (this is load-bearing — do NOT "fix" it to leave no-auth
-    // unmarked): auth state CAN change mid-session — runCapture's no-auth path
-    // fire-and-forgets ensureAuth (which opens a browser login), so a later turn could
-    // succeed once the user signs in. Marking it anyway is deliberate POPUP-STORM
-    // PREVENTION: leaving no-auth unmarked would re-fire ensureAuth on EVERY turn-fire
-    // of an unauthenticated per-turn session, opening a browser tab each turn. The cost
-    // of marking is that this one session is permanently skipped for LIVE capture even
-    // if the user authenticates mid-session — but BACKFILL recovers it at install (it
-    // mines history regardless of the live ring), so nothing is actually lost.
+    //   • no-auth → RING the session (popup-storm prevention). auth state CAN change
+    //     mid-session (the no-auth path fire-and-forgets ensureAuth, opening a browser
+    //     login), so leaving it unmarked would re-pop a browser tab on EVERY per-turn
+    //     fire. We accept that this session is then skipped for LIVE capture even after
+    //     a mid-session sign-in — BACKFILL recovers it. (Load-bearing; do NOT "fix".)
+    //
+    //   • otherwise (captured / nothing-new) → ADVANCE the per-conversation WATERMARK
+    //     to the run's turnCount, so the next per-turn fire infers only NEWER turns.
+    //     This is what keeps a multi-turn (even endless) Cursor/Codex conversation
+    //     captured COMPLETELY at ~O(N) total cost instead of stopping at turn 1.
     if (!isTransient(outcome)) {
-      const mark = deps.markCapturedImpl ?? markSessionCaptured;
-      await mark(input.session_id, env).catch(() => {});
+      if (outcome.status === 'no-auth') {
+        await (deps.markCapturedImpl ?? markSessionCaptured)(input.session_id, env).catch(() => {});
+      } else if (typeof outcome.turnCount === 'number') {
+        await (deps.setWatermarkImpl ?? setCaptureWatermark)(
+          input.session_id,
+          outcome.turnCount,
+          env,
+        ).catch(() => {});
+      }
       // ARP-688: ALSO record in the DURABLE sweep ledger — but ONLY when the session was
       // genuinely captured/decided (NOT no-auth, which the ring marks for popup-storm
       // prevention but which a later sweep must still recover once authed). This makes

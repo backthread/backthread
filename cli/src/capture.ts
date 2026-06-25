@@ -88,6 +88,14 @@ export interface CaptureOutcome {
   count?: number;
   /** Whether the capture landed against a connected repo (vs repo-less / unknown). */
   repoConnected?: boolean;
+  /**
+   * ARP-693 — the total redacted-turn count of the transcript this run saw (set on
+   * every post-redaction outcome). The shared `--from-hook` entrypoint advances its
+   * per-conversation WATERMARK to this so the NEXT per-turn `stop` infers only the
+   * turns added since (Cursor/Codex fire per turn; a multi-turn conversation must be
+   * captured completely without re-inferring old turns — ~O(N) total, not O(N²)).
+   */
+  turnCount?: number;
 }
 
 export interface CaptureDeps {
@@ -103,6 +111,14 @@ export interface CaptureDeps {
   readRemoteImpl?: RemoteReader;
   /** Test seam: the git-command runner threaded into resolveGitContext (ARP-696). */
   readGitImpl?: GitRunner;
+  /**
+   * ARP-693 — incremental capture watermark: infer ONLY the redacted turns at/after
+   * this index, skipping turns already captured on an earlier `stop` of the same
+   * conversation. Default 0 (whole transcript — Claude Code's single SessionEnd, and
+   * every first capture). The shared entrypoint passes its stored per-conversation
+   * watermark here and advances it to the returned `turnCount`.
+   */
+  fromTurnIndex?: number;
   /** Test seam: the auto-login trigger. Defaults to fire-and-forget ensureAuth. */
   ensureAuthImpl?: (env: NodeJS.ProcessEnv) => void;
   /**
@@ -258,17 +274,31 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // Prefer the transcript's own session id; fall back to the hook's session_id.
     const sessionId = redacted.sessionId ?? input.session_id ?? null;
 
-    if (redacted.turns.length === 0) {
+    // ARP-693 — INCREMENTAL capture. We redact the FULL transcript (cheap, local) so
+    // the session id + decidedAt + the touched-path union stay session-level, but we
+    // only INFER the turns added since the last `stop` (the expensive LLM leg). The
+    // transcript is append-only, so redacted.turns is a stable growing prefix:
+    // turns[0..watermark) were already captured on earlier turn-fires. turnCount is
+    // returned on every outcome below so the entrypoint can advance its watermark.
+    const turnCount = redacted.turns.length;
+    const fromTurn = deps.fromTurnIndex ?? 0;
+    const newTurns = fromTurn > 0 ? redacted.turns.slice(fromTurn) : redacted.turns;
+
+    if (newTurns.length === 0) {
       return {
         status: 'nothing-to-capture',
-        detail: 'redaction left no natural-language turns (session was all code / tool I/O).',
+        detail:
+          turnCount === 0
+            ? 'redaction left no natural-language turns (session was all code / tool I/O).'
+            : `no new turns since the last capture (watermark ${fromTurn} of ${turnCount}).`,
         count: 0,
+        turnCount,
       };
     }
 
     const transcript: RedactedTranscriptInput = {
       sessionId,
-      turns: redacted.turns,
+      turns: newTurns,
       stats: redacted.stats,
     };
 
@@ -316,6 +346,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         detail: `inference router persisted ${result.decisions.length} decision(s) server-side.`,
         count: result.decisions.length,
         repoConnected: true,
+        turnCount,
       };
     }
 
@@ -325,6 +356,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         status: 'nothing-to-capture',
         detail: 'inference returned no decisions for this session.',
         count: 0,
+        turnCount,
       };
     }
 
@@ -340,10 +372,13 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         detail:
           'derived decisions but could not resolve a repo from cwd (no git remote) — nothing to claim them under; skipped.',
         count: 0,
+        turnCount,
       };
     }
 
-    return persistDerived(result.decisions, repo, config, decidedAt, {
+    // Carry the run's turnCount onto whatever persistDerived returns so the
+    // entrypoint advances its watermark on a successful (or empty) capture.
+    const out = await persistDerived(result.decisions, repo, config, decidedAt, {
       env,
       fetchImpl: deps.fetchImpl,
       log,
@@ -355,6 +390,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       // first-capture confirmation seam (threaded so tests can stub it).
       firstCaptureConfirmImpl: deps.firstCaptureConfirmImpl,
     });
+    return { ...out, turnCount };
   } catch (e) {
     // The ultimate backstop — a hook must never throw into the user's session.
     return { status: 'error', detail: `capture failed (swallowed): ${(e as Error).message}` };

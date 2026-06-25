@@ -691,3 +691,40 @@ test('a throwing first-capture confirm never breaks capture (swallowed, still pe
   );
   assert.equal(out.status, 'persisted-by-server', 'capture is unharmed by a confirm failure');
 });
+
+// --- ARP-693: incremental capture (infer only turns after the watermark) -----
+
+test('ARP-693 — default (no watermark) infers ALL turns and returns turnCount', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'a' }] } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.equal(out.status, 'persisted-by-server');
+  // TRANSCRIPT_JSONL → 2 redacted turns (1 user + 1 assistant).
+  assert.equal(out.turnCount, 2);
+  const turns = (calls[0].body as { transcript: { turns: unknown[] } }).transcript.turns;
+  assert.equal(turns.length, 2);
+});
+
+test('ARP-693 — fromTurnIndex slices to only the new turns', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'a' }] } }),
+  });
+  // Watermark at 1 → infer only the 2nd turn (the assistant turn).
+  const out = await runCapture(HOOK, deps({ fetchImpl, fromTurnIndex: 1 }));
+  assert.equal(out.status, 'persisted-by-server');
+  assert.equal(out.turnCount, 2, 'turnCount is the FULL count (the entrypoint advances the watermark to it)');
+  const turns = (calls[0].body as { transcript: { turns: Array<{ role: string }> } }).transcript.turns;
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].role, 'assistant');
+});
+
+test('ARP-693 — fromTurnIndex at/after the end → nothing-to-capture, no inference', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, decisions: [] } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl, fromTurnIndex: 2 }));
+  assert.equal(out.status, 'nothing-to-capture');
+  assert.equal(out.turnCount, 2);
+  assert.equal(calls.length, 0, 'no new turns → the expensive inference leg never runs');
+});

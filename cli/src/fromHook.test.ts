@@ -8,13 +8,15 @@ import {
   normalizeHookInput,
   wasSessionCaptured,
   markSessionCaptured,
+  captureWatermark,
+  setCaptureWatermark,
   spawnDetached,
   runFromHook,
   captureStatePath,
   type Agent,
   type FromHookDeps,
 } from './fromHook.js';
-import type { CaptureOutcome, HookInput } from './capture.js';
+import type { CaptureDeps, CaptureOutcome, HookInput } from './capture.js';
 
 // Isolate the idempotence state file under a temp BACKTHREAD_CONFIG_DIR so no real
 // ~/.backthread is touched (mirrors connectNudge.test.ts / config.test.ts).
@@ -30,17 +32,26 @@ async function withTempEnv(fn: (env: NodeJS.ProcessEnv) => Promise<void>) {
   }
 }
 
-// A capture stub that records the HookInput it received and returns a fixed outcome.
+// A capture stub that records the HookInput + the ARP-693 fromTurnIndex it received
+// (the per-conversation watermark the orchestrator passes), returning a fixed outcome.
 function captureStub(outcome: CaptureOutcome) {
   const calls: HookInput[] = [];
-  const impl = async (input: HookInput): Promise<CaptureOutcome> => {
+  const fromTurnIndexes: Array<number | undefined> = [];
+  const impl = async (input: HookInput, deps?: CaptureDeps): Promise<CaptureOutcome> => {
     calls.push(input);
+    fromTurnIndexes.push(deps?.fromTurnIndex);
     return outcome;
   };
-  return { impl, calls };
+  return { impl, calls, fromTurnIndexes };
 }
 
-const OK_OUTCOME: CaptureOutcome = { status: 'persisted', detail: 'captured 1 decision(s).', count: 1 };
+// `turnCount` rides so the orchestrator advances the watermark (ARP-693).
+const OK_OUTCOME: CaptureOutcome = {
+  status: 'persisted',
+  detail: 'captured 1 decision(s).',
+  count: 1,
+  turnCount: 3,
+};
 
 // =====================================================================================
 // parseAgent
@@ -225,6 +236,78 @@ test('the ring is bounded — old session ids fall off the front', async () => {
 });
 
 // =====================================================================================
+// ARP-693 — captureWatermark / setCaptureWatermark
+// =====================================================================================
+
+test('captureWatermark is 0 for a new/unknown conversation', async () => {
+  await withTempEnv(async (env) => {
+    assert.equal(await captureWatermark('conv-1', env), 0);
+    assert.equal(await captureWatermark(null, env), 0);
+    assert.equal(await captureWatermark('', env), 0);
+  });
+});
+
+test('setCaptureWatermark advances and persists; it is MONOTONIC (never rewinds)', async () => {
+  await withTempEnv(async (env) => {
+    await setCaptureWatermark('conv-1', 3, env);
+    assert.equal(await captureWatermark('conv-1', env), 3);
+    await setCaptureWatermark('conv-1', 7, env);
+    assert.equal(await captureWatermark('conv-1', env), 7);
+    // A stale/equal fire must not move it backwards.
+    await setCaptureWatermark('conv-1', 2, env);
+    assert.equal(await captureWatermark('conv-1', env), 7);
+    await setCaptureWatermark('conv-1', 7, env);
+    assert.equal(await captureWatermark('conv-1', env), 7);
+  });
+});
+
+test('setCaptureWatermark ignores junk values + null ids', async () => {
+  await withTempEnv(async (env) => {
+    await setCaptureWatermark(null, 5, env);
+    await setCaptureWatermark('conv-1', -1, env);
+    await setCaptureWatermark('conv-1', Number.NaN, env);
+    assert.equal(await captureWatermark('conv-1', env), 0);
+  });
+});
+
+test('the watermark map and the no-auth ring coexist in one state file', async () => {
+  await withTempEnv(async (env) => {
+    await markSessionCaptured('ringed', env);
+    await setCaptureWatermark('conv-1', 4, env);
+    const state = JSON.parse(await readFile(captureStatePath(env), 'utf8'));
+    assert.deepEqual(state.captured, ['ringed']);
+    assert.equal(state.watermarks['conv-1'], 4);
+    // Ringing a session drops any incremental watermark it had (it won't re-run live).
+    await setCaptureWatermark('conv-2', 9, env);
+    await markSessionCaptured('conv-2', env);
+    assert.equal(await captureWatermark('conv-2', env), 0);
+  });
+});
+
+test('older state files (no watermarks key) read back as an empty map (back-compat)', async () => {
+  await withTempEnv(async (env) => {
+    await mkdir(join(env.BACKTHREAD_CONFIG_DIR!), { recursive: true });
+    await writeFile(captureStatePath(env), JSON.stringify({ captured: ['s-1'] }) + '\n', 'utf8');
+    assert.equal(await captureWatermark('conv-1', env), 0); // absent → 0
+    assert.equal(await wasSessionCaptured('s-1', env), true); // ring still read
+    // A new watermark write preserves the legacy ring entry.
+    await setCaptureWatermark('conv-1', 2, env);
+    assert.equal(await wasSessionCaptured('s-1', env), true);
+    assert.equal(await captureWatermark('conv-1', env), 2);
+  });
+});
+
+test('the watermark map is bounded — oldest conversations fall off', async () => {
+  await withTempEnv(async (env) => {
+    for (let i = 0; i < 250; i++) await setCaptureWatermark(`conv-${i}`, i + 1, env);
+    assert.equal(await captureWatermark('conv-0', env), 0); // evicted
+    assert.equal(await captureWatermark('conv-249', env), 250); // most recent kept
+    const state = JSON.parse(await readFile(captureStatePath(env), 'utf8'));
+    assert.equal(Object.keys(state.watermarks).length, 200);
+  });
+});
+
+// =====================================================================================
 // spawnDetached — the fire-and-forget seam (Gemini)
 // =====================================================================================
 
@@ -298,16 +381,21 @@ test('runFromHook runs the shared fence with the normalized input and ALWAYS exi
   });
 });
 
-test('runFromHook is IDEMPOTENT per session id — a second turn-fire skips the pipeline', async () => {
+test('ARP-693 INCREMENTAL: a second turn-fire re-runs but resumes from the watermark', async () => {
   await withTempEnv(async (env) => {
+    // OK_OUTCOME carries turnCount: 3 → after the first fire the watermark is 3, so
+    // the second fire passes fromTurnIndex: 3 (infer only turns added since).
     const cap = captureStub(OK_OUTCOME);
     const payload = JSON.stringify({ session_id: 'dup-1', transcript_path: '/t.jsonl', cwd: '/w' });
     const first = await runFromHook({ env, agent: 'codex', rawPayload: payload, runCaptureImpl: cap.impl });
     const second = await runFromHook({ env, agent: 'codex', rawPayload: payload, runCaptureImpl: cap.impl });
     assert.equal(first.status, 'captured');
-    assert.equal(second.status, 'duplicate-session');
-    assert.equal(cap.calls.length, 1, 'one session = one capture across turn-fires');
-    assert.equal(second.exitCode, 0);
+    // Per-turn agents keep capturing — NOT a hard 'duplicate-session' skip (that's
+    // reserved for ringed/no-auth sessions). The watermark prevents RE-INFERENCE.
+    assert.equal(second.status, 'captured');
+    assert.equal(cap.calls.length, 2, 'each turn-fire runs the fence (cheap read; inference is what the watermark gates)');
+    assert.deepEqual(cap.fromTurnIndexes, [0, 3], 'first from 0; second resumes from the stored watermark');
+    assert.equal(await captureWatermark('dup-1', env), 3);
   });
 });
 
@@ -327,14 +415,33 @@ test('a TRANSIENT failure is NOT marked captured → a retry can run', async () 
   });
 });
 
-test('a STABLE non-capture outcome (nothing-to-capture) IS marked → not retried', async () => {
+test('ARP-693: nothing-to-capture still advances the watermark (turns seen, none new)', async () => {
   await withTempEnv(async (env) => {
-    const nothing = captureStub({ status: 'nothing-to-capture', detail: 'no prose', count: 0 });
+    // A redaction that yielded prose but no decisions still SAW turns — advancing the
+    // watermark to turnCount means the next fire won't re-infer those same turns.
+    const nothing = captureStub({ status: 'nothing-to-capture', detail: 'no decisions', count: 0, turnCount: 2 });
     const payload = JSON.stringify({ session_id: 'noop-1', transcript_path: '/t.jsonl', cwd: '/w' });
     await runFromHook({ env, agent: 'codex', rawPayload: payload, runCaptureImpl: nothing.impl });
     const second = await runFromHook({ env, agent: 'codex', rawPayload: payload, runCaptureImpl: nothing.impl });
+    assert.equal(second.status, 'captured'); // re-runs (no hard skip), but resumes from the watermark
+    assert.deepEqual(nothing.fromTurnIndexes, [0, 2]);
+    assert.equal(await captureWatermark('noop-1', env), 2);
+  });
+});
+
+test('ARP-693: no-auth RINGS the session (popup-storm prevention) → a re-fire hard-skips', async () => {
+  await withTempEnv(async (env) => {
+    // no-auth returns before the transcript is read → no turnCount → ring it, don't
+    // advance a watermark. A later per-turn fire then hard-skips (no ensureAuth re-pop).
+    const noAuth = captureStub({ status: 'no-auth', detail: 'no token' });
+    const payload = JSON.stringify({ session_id: 'auth-1', transcript_path: '/t.jsonl', cwd: '/w' });
+    const first = await runFromHook({ env, agent: 'cursor', rawPayload: payload, runCaptureImpl: noAuth.impl });
+    const second = await runFromHook({ env, agent: 'cursor', rawPayload: payload, runCaptureImpl: noAuth.impl });
+    assert.equal(first.outcome?.status, 'no-auth');
     assert.equal(second.status, 'duplicate-session');
-    assert.equal(nothing.calls.length, 1);
+    assert.equal(noAuth.calls.length, 1, 'ringed → the second fire never re-runs the pipeline');
+    assert.equal(await wasSessionCaptured('auth-1', env), true);
+    assert.equal(await captureWatermark('auth-1', env), 0, 'no watermark for a ringed session');
   });
 });
 
