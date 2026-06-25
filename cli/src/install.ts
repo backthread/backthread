@@ -150,6 +150,8 @@ export interface InstallResult {
   backfill: BackfillSummary | null;
   /** The per-agent writer result (codex/cursor/gemini path), or null for the Claude Code path. */
   agentResult?: AgentInstallResult | null;
+  /** CC path only: true when a stale PROJECT-scope hook was stripped during migration (ARP-689). */
+  projectHookMigrated?: boolean;
 }
 
 /**
@@ -302,6 +304,100 @@ function rewriteLegacyCommand(group: unknown): unknown {
 }
 
 /**
+ * Pure removal of OUR SessionEnd hook from a settings object — the inverse of
+ * {@link mergeSessionEndHook}, for the project→user migration (ARP-689). Strips every
+ * command hook whose command is one of {@link OUR_HOOK_COMMANDS} (current or retired),
+ * drops a group that becomes empty, and prunes an emptied `SessionEnd` / `hooks` for
+ * tidiness. Preserves every FOREIGN hook + every other key. Returns a NEW settings
+ * object, or `null` when nothing of ours was present (so the caller can skip the write).
+ * Never mutates `settings`. Exported for unit testing.
+ */
+export function stripSessionEndHook(
+  settings: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const hooksVal = settings.hooks;
+  if (!hooksVal || typeof hooksVal !== 'object' || Array.isArray(hooksVal)) return null;
+  const seVal = (hooksVal as Record<string, unknown>).SessionEnd;
+  if (!Array.isArray(seVal)) return null;
+
+  let changed = false;
+  const nextSessionEnd: unknown[] = [];
+  for (const group of seVal) {
+    const inner = (group as { hooks?: unknown })?.hooks;
+    if (!group || typeof group !== 'object' || !Array.isArray(inner)) {
+      nextSessionEnd.push(group); // malformed / foreign-shaped → preserve as-is
+      continue;
+    }
+    const keptInner = inner.filter((h) => {
+      const cmd = (h as { command?: unknown })?.command;
+      const isOurs = typeof cmd === 'string' && OUR_HOOK_COMMANDS.has(cmd);
+      if (isOurs) changed = true;
+      return !isOurs;
+    });
+    if (keptInner.length === 0) continue; // the whole group was ours → drop it
+    if (keptInner.length !== inner.length) {
+      nextSessionEnd.push({ ...(group as Record<string, unknown>), hooks: keptInner });
+    } else {
+      nextSessionEnd.push(group); // no change in this group → keep the original
+    }
+  }
+
+  if (!changed) return null;
+
+  const hooks: Record<string, unknown> = { ...(hooksVal as Record<string, unknown>) };
+  if (nextSessionEnd.length === 0) delete hooks.SessionEnd;
+  else hooks.SessionEnd = nextSessionEnd;
+  const next: Record<string, unknown> = { ...settings, hooks };
+  if (Object.keys(hooks).length === 0) delete next.hooks; // an emptied hooks{} → prune it too
+  return next;
+}
+
+/**
+ * Migrate a pre-ARP-503 PROJECT-scope hook to user scope (ARP-689): strip OUR SessionEnd
+ * hook from `<cwd>/.claude/settings.json`, idempotently, after the user-global hook is
+ * registered. WHY: CC fires hooks from BOTH user + project scope, so a repo that still
+ * carries the old project hook would DOUBLE-capture every session (the server `dedupeKey`
+ * collapses it — wasted inference, not corruption). A missing project file is a no-op; a
+ * corrupt one is REFUSED (never clobbered — same discipline as {@link registerHook}).
+ * Returns whether a strip-write happened.
+ */
+export async function unregisterProjectHook(
+  cwd: string,
+  deps: InstallDeps = {},
+): Promise<{ stripped: boolean; path: string }> {
+  const doReadFile = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
+  const doWriteFile = deps.writeFileImpl ?? ((p: string, d: string) => writeFile(p, d));
+  const settingsPath = join(cwd, '.claude', 'settings.json');
+
+  let raw: string;
+  try {
+    raw = await doReadFile(settingsPath);
+  } catch (e) {
+    if (isNotFound(e)) return { stripped: false, path: settingsPath }; // no project file → nothing to migrate
+    throw e; // a real read error (perms, etc.) → surface it
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `${settingsPath} exists but is not valid JSON — refusing to modify it. ` +
+        'Remove the stale SessionEnd hook manually if present.',
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${settingsPath} is not a JSON object — refusing to modify it.`);
+  }
+
+  const stripped = stripSessionEndHook(parsed as Record<string, unknown>);
+  if (stripped === null) return { stripped: false, path: settingsPath }; // nothing of ours → no-op
+  // We only ever WRITE a file that already existed (read succeeded), so no mkdir needed.
+  await doWriteFile(settingsPath, JSON.stringify(stripped, null, 2) + '\n');
+  return { stripped: true, path: settingsPath };
+}
+
+/**
  * Run `backthread install` end to end: auth handshake → register hook → chain backfill.
  * Reports each step. Best-effort on the backfill (never fails the install); a real
  * auth failure exits non-zero so the user knows capture won't run yet.
@@ -375,6 +471,7 @@ export async function runInstall(
 
   // (2) REGISTER THE HOOK (settings.json fallback; the plugin path skips this).
   let hookRegistered = false;
+  let projectHookMigrated = false;
   if (opts.skipHook) {
     log('[2/3] Hook: skipped (registered by the plugin manifest).');
   } else {
@@ -391,6 +488,29 @@ export async function runInstall(
       // report it and move on; the install does NOT fail on a hook-write problem.
       log(`[2/3] Hook: not registered — ${(e as Error).message}`);
       log('      You can add it manually (see the README › Registering the hook).');
+    }
+
+    // (2b) MIGRATE the old PROJECT-scope hook to user scope (ARP-689). A pre-ARP-503
+    // install wrote the SessionEnd hook into <cwd>/.claude/settings.json; now that we
+    // register at USER scope, that repo would DOUBLE-capture (CC fires both scopes).
+    // Strip our hook from the project file, idempotently, preserving foreign hooks/keys.
+    // Best-effort: a missing project file is a no-op; a corrupt one is reported + left
+    // intact; never fails the install.
+    //
+    // GATE on hookRegistered: only remove the old project fallback once the user-global
+    // replacement is confirmed in place. If registerHook just THREW (a corrupt user
+    // settings.json), stripping the still-working project hook would leave the repo with
+    // ZERO capture — worse than the double-capture we're fixing.
+    if (hookRegistered) {
+      try {
+        const { stripped, path } = await unregisterProjectHook(cwd, deps);
+        if (stripped) {
+          projectHookMigrated = true;
+          log(`      Migrated: removed the stale project-scope SessionEnd hook from ${path} (it now lives at user scope).`);
+        }
+      } catch (e) {
+        log(`      Note: left the project-scope settings.json untouched — ${(e as Error).message}`);
+      }
     }
   }
 
@@ -418,5 +538,5 @@ export async function runInstall(
   // Exit non-zero ONLY when we ended up unauthorized AND didn't skip auth — that's
   // the one state where capture genuinely won't work and the user must act.
   const exitCode = !authed && !opts.skipAuth ? 1 : 0;
-  return { exitCode, authed, hookRegistered, backfill, agentResult: null };
+  return { exitCode, authed, hookRegistered, backfill, agentResult: null, projectHookMigrated };
 }

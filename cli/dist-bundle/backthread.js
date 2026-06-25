@@ -8571,6 +8571,67 @@ function rewriteLegacyCommand(group) {
   });
   return changed ? { ...group, hooks: nextInner } : group;
 }
+function stripSessionEndHook(settings) {
+  const hooksVal = settings.hooks;
+  if (!hooksVal || typeof hooksVal !== "object" || Array.isArray(hooksVal)) return null;
+  const seVal = hooksVal.SessionEnd;
+  if (!Array.isArray(seVal)) return null;
+  let changed = false;
+  const nextSessionEnd = [];
+  for (const group of seVal) {
+    const inner = group?.hooks;
+    if (!group || typeof group !== "object" || !Array.isArray(inner)) {
+      nextSessionEnd.push(group);
+      continue;
+    }
+    const keptInner = inner.filter((h) => {
+      const cmd = h?.command;
+      const isOurs = typeof cmd === "string" && OUR_HOOK_COMMANDS.has(cmd);
+      if (isOurs) changed = true;
+      return !isOurs;
+    });
+    if (keptInner.length === 0) continue;
+    if (keptInner.length !== inner.length) {
+      nextSessionEnd.push({ ...group, hooks: keptInner });
+    } else {
+      nextSessionEnd.push(group);
+    }
+  }
+  if (!changed) return null;
+  const hooks = { ...hooksVal };
+  if (nextSessionEnd.length === 0) delete hooks.SessionEnd;
+  else hooks.SessionEnd = nextSessionEnd;
+  const next = { ...settings, hooks };
+  if (Object.keys(hooks).length === 0) delete next.hooks;
+  return next;
+}
+async function unregisterProjectHook(cwd, deps = {}) {
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
+  const settingsPath = join8(cwd, ".claude", "settings.json");
+  let raw;
+  try {
+    raw = await doReadFile(settingsPath);
+  } catch (e) {
+    if (isNotFound3(e)) return { stripped: false, path: settingsPath };
+    throw e;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `${settingsPath} exists but is not valid JSON \u2014 refusing to modify it. Remove the stale SessionEnd hook manually if present.`
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${settingsPath} is not a JSON object \u2014 refusing to modify it.`);
+  }
+  const stripped = stripSessionEndHook(parsed);
+  if (stripped === null) return { stripped: false, path: settingsPath };
+  await doWriteFile(settingsPath, JSON.stringify(stripped, null, 2) + "\n");
+  return { stripped: true, path: settingsPath };
+}
 async function runInstall(opts = {}, deps = {}) {
   const env = opts.env ?? process.env;
   const log = opts.log ?? ((m) => console.error(m));
@@ -8620,6 +8681,7 @@ Backthread is set up for ${targetAgent}. New sessions are captured automatically
     return { exitCode: exitCode2, authed, hookRegistered: agentResult !== null, backfill: null, agentResult };
   }
   let hookRegistered = false;
+  let projectHookMigrated = false;
   if (opts.skipHook) {
     log("[2/3] Hook: skipped (registered by the plugin manifest).");
   } else {
@@ -8632,6 +8694,17 @@ Backthread is set up for ${targetAgent}. New sessions are captured automatically
     } catch (e) {
       log(`[2/3] Hook: not registered \u2014 ${e.message}`);
       log("      You can add it manually (see the README \u203A Registering the hook).");
+    }
+    if (hookRegistered) {
+      try {
+        const { stripped, path } = await unregisterProjectHook(cwd, deps);
+        if (stripped) {
+          projectHookMigrated = true;
+          log(`      Migrated: removed the stale project-scope SessionEnd hook from ${path} (it now lives at user scope).`);
+        }
+      } catch (e) {
+        log(`      Note: left the project-scope settings.json untouched \u2014 ${e.message}`);
+      }
     }
   }
   let backfill = null;
@@ -8649,7 +8722,7 @@ Backthread is set up for ${targetAgent}. New sessions are captured automatically
   }
   log("\nBackthread is set up. New sessions are captured automatically when they end.");
   const exitCode = !authed && !opts.skipAuth ? 1 : 0;
-  return { exitCode, authed, hookRegistered, backfill, agentResult: null };
+  return { exitCode, authed, hookRegistered, backfill, agentResult: null, projectHookMigrated };
 }
 
 // src/entry.ts
