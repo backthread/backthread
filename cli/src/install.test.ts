@@ -114,6 +114,24 @@ test('mergeSessionEndHook MIGRATES a retired (bare) command in place — never d
   assert.equal((existing.hooks as any).SessionEnd[0].hooks[0].command, 'npx backthread capture');
 });
 
+test('mergeSessionEndHook MIGRATES the pre-@latest from-hook command to @latest in place (ARP-733)', () => {
+  // The upgrade path THIS task enables: a user who installed between ARP-682 and ARP-733
+  // has the completion-safe command WITHOUT the `@latest` pin. Re-running install must
+  // rewrite it to the self-updating HOOK_COMMAND in place — not append a duplicate.
+  const PRE_LATEST = 'npx backthread capture --from-hook --agent claude-code --detach';
+  assert.notEqual(HOOK_COMMAND, PRE_LATEST); // guard: the test must be meaningful
+  assert.match(HOOK_COMMAND, /^npx backthread@latest /); // and the target is the @latest form
+  const existing = {
+    hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: PRE_LATEST }] }] },
+  };
+  const out = mergeSessionEndHook(existing)!;
+  const se = (out.hooks as any).SessionEnd;
+  assert.equal(se.length, 1); // upgraded in place, NOT appended (no double-capture)
+  assert.equal(se[0].hooks[0].command, HOOK_COMMAND);
+  // Already on @latest → idempotent no-op.
+  assert.equal(mergeSessionEndHook(out), null);
+});
+
 test('mergeSessionEndHook keeps a foreign hook while migrating the retired command', () => {
   const existing = {
     hooks: {

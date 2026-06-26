@@ -73,16 +73,34 @@ export const TRUST_COPY = [
  * SessionEnd hook timeout (or reaped on session exit) — completion-safe, never blocks
  * or delays the session, still always exits 0 (ARP-682). `--agent claude-code` selects
  * the CC payload shape; the detached child re-runs with `--no-detach` so it can't recurse.
+ *
+ * SELF-UPDATING (ARP-733): pinned to `backthread@latest` so npx RE-RESOLVES from the
+ * registry each session instead of reusing a stale cached/global copy — turning the
+ * bare-npx channel genuinely self-updating. It's already `--detach`ed, so the extra
+ * resolve is invisible. NOTE: this is the `~/.claude/settings.json` FALLBACK only. The
+ * PLUGIN manifest hook (cli/hooks/hooks.json) deliberately stays on the shipped self-
+ * contained bundle (`${CLAUDE_PLUGIN_ROOT}/dist-bundle/backthread.js`), NOT `@latest` —
+ * it updates via the marketplace, which keeps the plugin offline-safe + free of npm/
+ * version-skew (the ARP-680/ARP-474 dogfood-freeze fix; founder-confirmed 2026-06-26).
  */
-export const HOOK_COMMAND = 'npx backthread capture --from-hook --agent claude-code --detach';
+export const HOOK_COMMAND = 'npx backthread@latest capture --from-hook --agent claude-code --detach';
 
 /**
  * Earlier hook commands we still recognize, so re-running `backthread install` after an
  * upgrade MIGRATES an existing registration to {@link HOOK_COMMAND} in place rather than
  * leaving the stale command or appending a duplicate (which would double-capture). Append
  * any future retired command strings here.
+ *
+ * Order doesn't matter (any match rewrites to HOOK_COMMAND). The two we've shipped:
+ *   1. the pre-ARP-682 bare command (no `--from-hook`/`--detach`);
+ *   2. the ARP-682 completion-safe form WITHOUT the `@latest` pin (ARP-733 adds it) —
+ *      so a user who installed between ARP-682 and ARP-733 gets migrated to the self-
+ *      updating form in place on their next `backthread install`.
  */
-const LEGACY_HOOK_COMMANDS: readonly string[] = ['npx backthread capture'];
+const LEGACY_HOOK_COMMANDS: readonly string[] = [
+  'npx backthread capture',
+  'npx backthread capture --from-hook --agent claude-code --detach',
+];
 
 /** Every command string that is "ours" — the current one plus any retired ones. */
 const OUR_HOOK_COMMANDS: ReadonlySet<string> = new Set([HOOK_COMMAND, ...LEGACY_HOOK_COMMANDS]);
