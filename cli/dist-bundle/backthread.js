@@ -7745,7 +7745,8 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
 }
 
 // src/firstRun.ts
-import { join as join9 } from "node:path";
+import { homedir as homedir6 } from "node:os";
+import { join as join10 } from "node:path";
 import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir6, chmod as chmod5 } from "node:fs/promises";
 
 // src/install.ts
@@ -8213,6 +8214,7 @@ import { homedir as homedir4 } from "node:os";
 import { join as join7, dirname as dirname3 } from "node:path";
 import { readFile as readFile5, writeFile as writeFile4, mkdir as mkdir4, chmod as chmod4 } from "node:fs/promises";
 var execFileP = promisify(execFile);
+var INSTALL_AGENTS = ["codex", "cursor", "gemini"];
 var MCP_COMMAND = "npx";
 var MCP_ARGS = ["-y", "backthread", "mcp"];
 function hookCommand(agent) {
@@ -8752,6 +8754,42 @@ function captureGuidance(env = process.env) {
   ].join("\n");
 }
 
+// src/detectAgents.ts
+import { existsSync } from "node:fs";
+import { join as join9 } from "node:path";
+var AGENT_CONFIG_DIR = {
+  codex: ".codex",
+  cursor: ".cursor",
+  gemini: ".gemini"
+};
+function detectInstalledAgents(home) {
+  return INSTALL_AGENTS.filter((agent) => {
+    try {
+      return existsSync(join9(home, AGENT_CONFIG_DIR[agent]));
+    } catch {
+      return false;
+    }
+  });
+}
+
+// src/prompt.ts
+import { createInterface } from "node:readline";
+async function promptYesNo(question, opts = {}) {
+  const input = opts.input ?? process.stdin;
+  const output = opts.output ?? process.stdout;
+  const defaultAnswer = opts.defaultAnswer ?? false;
+  if (!input.isTTY || !output.isTTY) return defaultAnswer;
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await new Promise((resolve) => rl.question(question, resolve));
+    const a = answer.trim().toLowerCase();
+    if (a === "") return defaultAnswer;
+    return a === "y" || a === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
 // src/onboardingState.ts
 function parseSlug(slug) {
   const parts = slug.trim().replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
@@ -8873,7 +8911,7 @@ function normalizeState(raw) {
 
 // src/firstRun.ts
 function firstRunStatePath(env = process.env) {
-  return join9(configDir(env), "first-run.json");
+  return join10(configDir(env), "first-run.json");
 }
 function parseFirstRunState(raw) {
   try {
@@ -8975,7 +9013,11 @@ async function runStart(opts = {}, deps = {}) {
     return { exitCode: 1, status: "auth-failed", authed: false };
   }
   if (entry === "terminal") {
-    log("\n" + captureGuidance(env));
+    if (isInsideClaudeCode(env)) {
+      log("\n" + captureGuidance(env));
+    } else {
+      await offerCaptureInstall(env, log, deps);
+    }
   }
   const fetchState = deps.fetchStateImpl ?? fetchOnboardingState;
   const stateOut = await fetchState({ cwd }, { env, ...deps.onboardingDeps }).catch(
@@ -8985,6 +9027,42 @@ async function runStart(opts = {}, deps = {}) {
   const writeState3 = deps.writeStateImpl ?? updateFirstRunState;
   await writeState3({ onboarded: true, trustShown: true }, env);
   return { exitCode: 0, status: "onboarded", authed: true };
+}
+var AGENT_LABEL = {
+  codex: "Codex",
+  cursor: "Cursor",
+  gemini: "Gemini"
+};
+async function offerCaptureInstall(env, log, deps) {
+  const home = deps.home ?? homedir6();
+  const detect = deps.detectAgentsImpl ?? detectInstalledAgents;
+  let detected;
+  try {
+    detected = detect(home);
+  } catch {
+    detected = [];
+  }
+  if (detected.length !== 1) {
+    log("\n" + captureGuidance(env));
+    return;
+  }
+  const agent = detected[0];
+  const label = AGENT_LABEL[agent];
+  const prompt = deps.promptYesNoImpl ?? ((q) => promptYesNo(q, { defaultAnswer: true }));
+  const yes = await prompt(`Detected ${label} \u2014 wire capture for it now? [Y/n] `).catch(() => false);
+  if (!yes) {
+    log("\n" + captureGuidance(env));
+    return;
+  }
+  const doInstall = deps.installAgentImpl ?? runInstallAgent;
+  try {
+    const result = await doInstall(agent, { home });
+    if (result.versionWarning) log(`  \u26A0 ${result.versionWarning}`);
+    log(`Capture wired for ${label} \u2014 new sessions are captured automatically when they end.`);
+  } catch (e) {
+    log(`Couldn't wire capture for ${label} automatically \u2014 ${e.message}`);
+    log("\n" + captureGuidance(env));
+  }
 }
 function renderNextStep(out, env = process.env) {
   if (out.status !== "ok" || !out.state) {
@@ -9242,7 +9320,7 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
 
 // src/fromHook.ts
 import { spawn as spawn2 } from "node:child_process";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 import { readFile as readFile9, writeFile as writeFile7, mkdir as mkdir7, chmod as chmod6 } from "node:fs/promises";
 var KNOWN_AGENTS = /* @__PURE__ */ new Set([
   "claude-code",
@@ -9284,7 +9362,7 @@ function normalizeHookInput(payload, _agent) {
   return out;
 }
 function captureStatePath(env = process.env) {
-  return join10(configDir(env), "capture-sessions.json");
+  return join11(configDir(env), "capture-sessions.json");
 }
 var MAX_REMEMBERED2 = 200;
 function parseState2(raw) {
@@ -33789,6 +33867,26 @@ async function startMcpServer(deps = {}) {
   return server;
 }
 
+// src/setupCheck.ts
+var SETUP_NUDGE = "Backthread is installed but not set up on this machine yet. Let the user know they can run /backthread:start to finish setup (authorize this device and connect a repo) so Backthread can capture the why behind each coding session.";
+async function runSetupCheck(deps = {}) {
+  try {
+    const env = deps.env ?? process.env;
+    const readState3 = deps.readStateImpl ?? readFirstRunState;
+    const readCfg = deps.readConfigImpl ?? readConfig;
+    const [state, cfg] = await Promise.all([readState3(env), readCfg(env)]);
+    if (state.onboarded === true && !!cfg.device_token) return null;
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: SETUP_NUDGE
+      }
+    });
+  } catch {
+    return null;
+  }
+}
+
 // src/bin/backthread.ts
 var USAGE = `backthread \u2014 capture the "why" of your AI-coded changes
 
@@ -33921,6 +34019,11 @@ async function main(argv, deps = {}) {
         skipBackfill: rest.includes("--skip-backfill")
       });
       return result.exitCode;
+    }
+    case "setup-check": {
+      const out = await runSetupCheck();
+      if (out) console.log(out);
+      return 0;
     }
     case void 0:
       return onboarding(rest);

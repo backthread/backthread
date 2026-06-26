@@ -73,12 +73,16 @@
 // user must act on — mirrors install.ts). The trust-gate helper (used on the silent
 // hook path) is best-effort + NEVER throws (it must not break always-exit-0 capture).
 
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { configDir, readConfig, CONFIG_MODE, DIR_MODE, type BackthreadConfig } from './config.js';
 import { ensureAuth, deviceLogin, type LoginOptions } from './login.js';
 import { TRUST_COPY } from './install.js';
-import { captureGuidance, detectEntry, type EntryPoint } from './entry.js';
+import { captureGuidance, detectEntry, isInsideClaudeCode, type EntryPoint } from './entry.js';
+import { detectInstalledAgents } from './detectAgents.js';
+import { promptYesNo } from './prompt.js';
+import { runInstallAgent, type InstallAgent } from './installAgent.js';
 import {
   fetchOnboardingState,
   resolveOnboardingRepo,
@@ -265,6 +269,19 @@ export interface StartDeps {
   writeStateImpl?: (patch: Partial<FirstRunState>, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Test seam: the on-disk config reader (used by the already-onboarded short-circuit). Defaults to readConfig. */
   readConfigImpl?: (env: NodeJS.ProcessEnv) => Promise<BackthreadConfig>;
+  // --- bare-terminal capture-install offer (step 4a) ------------------------------
+  /** Test seam: detect which non-CC agents are installed (by config-dir presence). Defaults to detectInstalledAgents. */
+  detectAgentsImpl?: (home: string) => InstallAgent[];
+  /**
+   * Test seam: the interactive yes/no prompt for the capture-install offer. Defaults to a
+   * TTY-guarded readline (defaultAnswer = Yes for the `[Y/n]` offer; a non-TTY resolves
+   * false WITHOUT prompting, so a non-interactive run never hangs and falls back to guidance).
+   */
+  promptYesNoImpl?: (question: string) => Promise<boolean>;
+  /** Test seam: the per-agent install writer used when the user accepts the offer. Defaults to runInstallAgent. */
+  installAgentImpl?: typeof runInstallAgent;
+  /** Home dir override (tests) for agent detection + install. Defaults to os.homedir(). */
+  home?: string;
 }
 
 export interface StartResult {
@@ -374,13 +391,20 @@ export async function runStart(opts: StartOptions = {}, deps: StartDeps = {}): P
   }
 
   // (4a) CAPTURE STEP (the "why") — entry-aware. On the TERMINAL door we lead with
-  // capture: it's the thing only this machine can do, and inside Claude Code the
-  // RIGHT wiring is the PLUGIN (never the stale npx settings.json hook) — captureGuidance
-  // routes that. On the WEB door (claim handoff) the user just came from the wizard;
-  // auth already armed capture for this session, so we keep it terse and skip the
-  // full install nudge.
+  // capture: it's the thing only this machine can do. INSIDE Claude Code the RIGHT
+  // wiring is the PLUGIN — we only RECOMMEND it (captureGuidance routes that copy) and
+  // NEVER auto-install: the CLI can't install a CC plugin, and must not hand-write the
+  // fragile npx settings.json hook (the ARP-680 worktree-freeze path). In a BARE
+  // terminal we go one better — DETECT the user's agent and OFFER to wire its capture
+  // inline (prompted, never silent; see offerCaptureInstall). On the WEB door (claim
+  // handoff) the user just came from the wizard; auth already armed capture for this
+  // session, so we keep it terse and skip the capture step entirely.
   if (entry === 'terminal') {
-    log('\n' + captureGuidance(env));
+    if (isInsideClaudeCode(env)) {
+      log('\n' + captureGuidance(env));
+    } else {
+      await offerCaptureInstall(env, log, deps);
+    }
   }
 
   // (4b) STATE-DRIVEN NEXT STEP — read the SAME unified state the web wizard reads and
@@ -404,6 +428,74 @@ export async function runStart(opts: StartOptions = {}, deps: StartDeps = {}): P
   await writeState({ onboarded: true, trustShown: true }, env);
 
   return { exitCode: 0, status: 'onboarded', authed: true };
+}
+
+/** Display labels for the offer copy + success line (Title-cased, not the lowercase enum). */
+const AGENT_LABEL: Record<InstallAgent, string> = {
+  codex: 'Codex',
+  cursor: 'Cursor',
+  gemini: 'Gemini',
+};
+
+/**
+ * BARE-TERMINAL (not-inside-CC) capture wiring offer — detect → offer → install.
+ *
+ * Detect which non-CC agents are installed (by config-dir presence under $HOME). The
+ * offer fires ONLY when we can name EXACTLY ONE agent: zero leaves us nothing to wire,
+ * and MULTIPLE would force us to guess between them — both fall back to PRINTING the
+ * explicit `captureGuidance` (the command for later). For a single agent we PROMPT
+ * (consent-gated, never silent); the prompt's TTY guard means a non-interactive run
+ * (CI, pipe, hook) resolves "no" WITHOUT hanging on stdin, so it too falls back to
+ * printed guidance. On YES we run the SAME per-agent writer `backthread install --agent
+ * <x>` runs — auth already happened in step 3, so (matching that path's per-agent leg)
+ * we do NOT re-auth and do NOT backfill. A corrupt existing config throws inside the
+ * writer; we report it and fall back to guidance rather than fail the wizard.
+ */
+async function offerCaptureInstall(
+  env: NodeJS.ProcessEnv,
+  log: (msg: string) => void,
+  deps: StartDeps,
+): Promise<void> {
+  const home = deps.home ?? homedir();
+  const detect = deps.detectAgentsImpl ?? detectInstalledAgents;
+  let detected: InstallAgent[];
+  try {
+    detected = detect(home);
+  } catch {
+    detected = [];
+  }
+
+  // 0 detected → nothing to wire; >1 → we won't guess between agents. Either way, print
+  // the explicit command so the user can wire capture themselves whenever they like.
+  if (detected.length !== 1) {
+    log('\n' + captureGuidance(env));
+    return;
+  }
+
+  const agent = detected[0];
+  const label = AGENT_LABEL[agent];
+  // The prompt owns the TTY decision (its default resolves Yes on empty input, false on
+  // a non-TTY without prompting) — so a non-interactive run lands in the `!yes` branch
+  // and gets printed guidance instead of a hang.
+  const prompt = deps.promptYesNoImpl ?? ((q: string) => promptYesNo(q, { defaultAnswer: true }));
+  const yes = await prompt(`Detected ${label} — wire capture for it now? [Y/n] `).catch(() => false);
+  if (!yes) {
+    // Declined (or non-interactive) — leave them the explicit command for later.
+    log('\n' + captureGuidance(env));
+    return;
+  }
+
+  // YES → run the same USER-GLOBAL per-agent writer as `backthread install --agent <x>`.
+  // No re-auth (step 3 did it), no backfill (matches that path's per-agent leg).
+  const doInstall = deps.installAgentImpl ?? runInstallAgent;
+  try {
+    const result = await doInstall(agent, { home });
+    if (result.versionWarning) log(`  ⚠ ${result.versionWarning}`);
+    log(`Capture wired for ${label} — new sessions are captured automatically when they end.`);
+  } catch (e) {
+    log(`Couldn't wire capture for ${label} automatically — ${(e as Error).message}`);
+    log('\n' + captureGuidance(env));
+  }
 }
 
 /**

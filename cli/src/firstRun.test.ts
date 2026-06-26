@@ -17,6 +17,12 @@ import {
 import { TRUST_COPY } from './install.js';
 import type { OnboardingOutcome } from './onboardingState.js';
 import type { BackthreadConfig } from './config.js';
+import type { AgentInstallResult, InstallAgent } from './installAgent.js';
+
+/** A minimal AgentInstallResult for the offer-path tests (no real fs writer runs). */
+function fakeAgentResult(agent: InstallAgent, versionWarning: string | null = null): AgentInstallResult {
+  return { agent, writes: [{ path: `/home/dev/.${agent}/config`, wrote: true }], versionWarning, deeplink: null };
+}
 
 // GUARDRAIL: every test isolates the state under a temp BACKTHREAD_CONFIG_DIR and
 // injects auth + state-fetch seams, so NOTHING here touches real ~/.backthread, real
@@ -52,6 +58,10 @@ function startDeps(over: Partial<StartDeps> = {}): StartDeps {
           repo: { owner: 'acme', name: 'app' },
         },
       }) as OnboardingOutcome,
+    // Default to "no agent detected" so the bare-terminal capture-install offer never
+    // prompts (which would block on real stdin) or touches the real $HOME in tests that
+    // don't explicitly drive the offer. Offer-path tests override this seam.
+    detectAgentsImpl: () => [],
     ...over,
   };
 }
@@ -275,6 +285,173 @@ test('runStart derives WEB entry from a claim code when entry is omitted', async
       startDeps(),
     );
     assert.doesNotMatch(lines.join('\n'), /npx backthread install/);
+  });
+});
+
+// --- runStart bare-terminal capture-install OFFER (detect → offer → install) --
+
+test('bare-terminal: a single detected agent + YES wires capture (installAgentImpl called)', async () => {
+  await withTempEnv(async (envBase) => {
+    // Force "not inside Claude Code" so we take the OFFER path, not the plugin recommendation.
+    const env = { ...envBase, CLAUDECODE: '' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    let installed: InstallAgent | null = null;
+    const res = await runStart(
+      { env, entry: 'terminal', log: (m) => lines.push(m) },
+      startDeps({
+        detectAgentsImpl: () => ['cursor'],
+        promptYesNoImpl: async () => true,
+        installAgentImpl: async (agent) => {
+          installed = agent;
+          return fakeAgentResult(agent);
+        },
+      }),
+    );
+    assert.equal(res.status, 'onboarded');
+    assert.equal(installed, 'cursor', 'the single detected agent was wired');
+    const text = lines.join('\n');
+    assert.match(text, /Capture wired for Cursor/);
+    // It installed inline — it did NOT fall back to printed guidance.
+    assert.doesNotMatch(text, /npx backthread install/);
+    assert.doesNotMatch(text, /architectural memory/i);
+  });
+});
+
+test('bare-terminal: a single detected agent + NO falls back to printed guidance (no install)', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, CLAUDECODE: '' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    let installCalled = false;
+    await runStart(
+      { env, entry: 'terminal', log: (m) => lines.push(m) },
+      startDeps({
+        detectAgentsImpl: () => ['codex'],
+        promptYesNoImpl: async () => false,
+        installAgentImpl: async (agent) => {
+          installCalled = true;
+          return fakeAgentResult(agent);
+        },
+      }),
+    );
+    assert.equal(installCalled, false, 'declining the offer does not install');
+    const text = lines.join('\n');
+    assert.match(text, /npx backthread install/);
+    assert.doesNotMatch(text, /Capture wired for/);
+  });
+});
+
+test('bare-terminal: ZERO agents detected → printed guidance (never prompts, never installs)', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, CLAUDECODE: '' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    let promptCalled = false;
+    let installCalled = false;
+    await runStart(
+      { env, entry: 'terminal', log: (m) => lines.push(m) },
+      startDeps({
+        detectAgentsImpl: () => [],
+        promptYesNoImpl: async () => {
+          promptCalled = true;
+          return true;
+        },
+        installAgentImpl: async (agent) => {
+          installCalled = true;
+          return fakeAgentResult(agent);
+        },
+      }),
+    );
+    assert.equal(promptCalled, false, 'no agent → never prompts (never blocks on stdin)');
+    assert.equal(installCalled, false);
+    assert.match(lines.join('\n'), /npx backthread install/);
+  });
+});
+
+test('bare-terminal: MULTIPLE agents detected → printed guidance (never guesses, never prompts)', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, CLAUDECODE: '' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    let promptCalled = false;
+    await runStart(
+      { env, entry: 'terminal', log: (m) => lines.push(m) },
+      startDeps({
+        detectAgentsImpl: () => ['codex', 'cursor'],
+        promptYesNoImpl: async () => {
+          promptCalled = true;
+          return true;
+        },
+      }),
+    );
+    assert.equal(promptCalled, false, 'ambiguous (>1) → never prompts');
+    assert.match(lines.join('\n'), /npx backthread install/);
+  });
+});
+
+test('INSIDE Claude Code: never detects/auto-installs — recommends the PLUGIN', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, CLAUDECODE: '1' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    let detectCalled = false;
+    let installCalled = false;
+    const res = await runStart(
+      { env, entry: 'terminal', log: (m) => lines.push(m) },
+      startDeps({
+        detectAgentsImpl: () => {
+          detectCalled = true;
+          return ['cursor'];
+        },
+        promptYesNoImpl: async () => true,
+        installAgentImpl: async (agent) => {
+          installCalled = true;
+          return fakeAgentResult(agent);
+        },
+      }),
+    );
+    assert.equal(res.status, 'onboarded');
+    assert.equal(detectCalled, false, 'inside CC: no agent detection');
+    assert.equal(installCalled, false, 'inside CC: never auto-installs (the CLI cannot install a CC plugin)');
+    const text = lines.join('\n');
+    assert.match(text, /\/plugin install backthread@backthread/);
+    assert.doesNotMatch(text, /Capture wired for/);
+  });
+});
+
+test('bare-terminal: a version warning from the writer is surfaced alongside success', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, CLAUDECODE: '' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    await runStart(
+      { env, entry: 'terminal', log: (m) => lines.push(m) },
+      startDeps({
+        detectAgentsImpl: () => ['gemini'],
+        promptYesNoImpl: async () => true,
+        installAgentImpl: async (agent) =>
+          fakeAgentResult(agent, 'Detected gemini 0.10.0, but the capture hook needs 0.26.0+.'),
+      }),
+    );
+    const text = lines.join('\n');
+    assert.match(text, /0\.26\.0\+/, 'version warning surfaced');
+    assert.match(text, /Capture wired for Gemini/);
+  });
+});
+
+test('bare-terminal: a corrupt-config throw in the writer degrades to guidance (wizard still onboards)', async () => {
+  await withTempEnv(async (envBase) => {
+    const env = { ...envBase, CLAUDECODE: '' } as NodeJS.ProcessEnv;
+    const lines: string[] = [];
+    const res = await runStart(
+      { env, entry: 'terminal', log: (m) => lines.push(m) },
+      startDeps({
+        detectAgentsImpl: () => ['codex'],
+        promptYesNoImpl: async () => true,
+        installAgentImpl: async () => {
+          throw new Error('config.toml is not valid JSON — refusing to overwrite it.');
+        },
+      }),
+    );
+    assert.equal(res.status, 'onboarded', 'a failed capture-wire never fails the wizard');
+    const text = lines.join('\n');
+    assert.match(text, /Couldn't wire capture for Codex/);
+    assert.match(text, /npx backthread install/);
   });
 });
 

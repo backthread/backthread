@@ -44,6 +44,7 @@ import { startMcpServer } from '../mcp.js';
 import { runInstall } from '../install.js';
 import { parseInstallAgent } from '../installAgent.js';
 import { runStart } from '../firstRun.js';
+import { runSetupCheck } from '../setupCheck.js';
 import { detectEntry } from '../entry.js';
 
 const USAGE = `backthread — capture the "why" of your AI-coded changes
@@ -269,6 +270,17 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
         skipBackfill: rest.includes('--skip-backfill'),
       });
       return result.exitCode;
+    }
+    case 'setup-check': {
+      // INTERNAL (intentionally NOT in USAGE — like `capture --from-hook`). The plugin's
+      // SessionStart hook: nudge an installed-but-not-set-up user to run
+      // `/backthread:start`; stay SILENT once set up. Non-blocking by construction — it
+      // prints the SessionStart `additionalContext` JSON to STDOUT and exits 0 (NEVER
+      // exit 2), so it can't block/disrupt session startup. runSetupCheck never throws
+      // (any read hiccup → null → silence); we just print its line when there is one.
+      const out = await runSetupCheck();
+      if (out) console.log(out);
+      return 0;
     }
     case undefined:
       // BARE `npx backthread` (no subcommand) IS the canonical unified front door
