@@ -103,6 +103,46 @@ test('handleQueryTool: renders flows/decisions + deep-link', async () => {
   assert.notEqual(r.isError, true);
 });
 
+test('handleQueryTool: ARP-734 — appends the throttled upgrade nudge to the query response', async () => {
+  let nudgeArg: string | null | undefined = 'unset';
+  const outcome: QueryOutcome = {
+    status: 'ok',
+    detail: '1 flow(s), 0 decision(s) for acme/app.',
+    repo: { owner: 'acme', name: 'app' },
+    flows: [],
+    decisions: [],
+    deepLink: 'https://app.backthread.dev/acme/app',
+    upgrade: 'A newer `backthread` is available — npm i -g backthread@latest',
+  };
+  const r = await handleQueryTool(
+    {},
+    {
+      queryDecisionsImpl: async () => outcome,
+      upgradeNudgeImpl: async (u) => { nudgeArg = u; return 'A newer `backthread` is available — npm i -g backthread@latest'; },
+    },
+  );
+  const text = textOf(r);
+  // The presenter passed the outcome's upgrade to the throttle, and surfaced it.
+  assert.equal(nudgeArg, 'A newer `backthread` is available — npm i -g backthread@latest');
+  assert.match(text, /A newer `backthread` is available/);
+});
+
+test('handleQueryTool: ARP-734 — a suppressed (throttled) nudge is NOT appended', async () => {
+  const outcome: QueryOutcome = {
+    status: 'ok',
+    detail: 'x',
+    repo: { owner: 'acme', name: 'app' },
+    flows: [],
+    decisions: [],
+    upgrade: 'should be hidden',
+  };
+  const r = await handleQueryTool(
+    {},
+    { queryDecisionsImpl: async () => outcome, upgradeNudgeImpl: async () => null },
+  );
+  assert.doesNotMatch(textOf(r), /should be hidden/);
+});
+
 test('handleQueryTool: non-ok status flagged as error', async () => {
   const r = await handleQueryTool(
     {},

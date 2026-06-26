@@ -63,6 +63,13 @@ export interface QueryOutcome {
   decisions?: QueryDecision[];
   /** Deep-link into the web-app diagram for the repo (when resolved). */
   deepLink?: string;
+  /**
+   * ARP-734 — the server's non-fatal `upgrade` nudge string, when the response carried
+   * one. Kept SEPARATE from `detail` (not baked in) so the interactive presenter (the
+   * MCP query tool) can surface it THROTTLED (once/day per machine), while non-
+   * interactive callers can ignore it. Absent when the server sent no nudge.
+   */
+  upgrade?: string;
 }
 
 export interface QueryInput {
@@ -218,16 +225,19 @@ export async function queryDecisions(
     const flows = normalizeFlows(rec.flows);
     const decisions = normalizeDecisions(rec.decisions);
 
-    // Non-fatal upgrade nudge for an outdated-but-supported client.
-    const upgrade = typeof rec.upgrade === 'string' && rec.upgrade.length > 0 ? rec.upgrade : null;
+    // Non-fatal upgrade nudge for an outdated-but-supported client. Carried as a
+    // SEPARATE field (not baked into `detail`) so the MCP query presenter surfaces it
+    // THROTTLED (ARP-734) and the detached hook never does.
+    const upgrade = typeof rec.upgrade === 'string' && rec.upgrade.length > 0 ? rec.upgrade : undefined;
     const base = `${flows.length} flow(s), ${decisions.length} decision(s) for ${repo.owner}/${repo.name}.`;
     return {
       status: 'ok',
-      detail: upgrade ? `${base} ${upgrade}` : base,
+      detail: base,
       repo,
       flows,
       decisions,
       deepLink,
+      ...(upgrade ? { upgrade } : {}),
     };
   } catch (e) {
     return { status: 'error', detail: `query failed (swallowed): ${(e as Error).message}` };

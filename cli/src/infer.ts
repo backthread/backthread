@@ -124,6 +124,12 @@ export interface InferResult {
   sessionId: string | null;
   /** Tokens spent by the inference run, when the path reports it (Model 2 does). */
   tokensSpent?: number;
+  /**
+   * ARP-734 — the server's non-fatal `upgrade` nudge string, when the infer response
+   * carried one (the server-persist path returns it here; the ingest path returns its
+   * own). Propagated so the interactive capture presenter can surface it THROTTLED.
+   */
+  upgrade?: string;
   /** A human-readable error when `ok` is false. Never contains the device token. */
   error?: string;
 }
@@ -288,6 +294,9 @@ export async function serverInfer(
   const sessionId =
     typeof rec.sessionId === 'string' ? rec.sessionId : (transcript.sessionId ?? null);
   const tokensSpent = typeof rec.tokensSpent === 'number' ? rec.tokensSpent : undefined;
+  // ARP-734 — propagate the server's non-fatal upgrade nudge (when present) so the
+  // server-persist capture path can surface it (throttled) on the interactive surface.
+  const upgrade = typeof rec.upgrade === 'string' && rec.upgrade.length > 0 ? rec.upgrade : undefined;
 
   return {
     ok: true,
@@ -296,6 +305,7 @@ export async function serverInfer(
     persisted,
     sessionId,
     ...(tokensSpent !== undefined ? { tokensSpent } : {}),
+    ...(upgrade ? { upgrade } : {}),
   };
 }
 

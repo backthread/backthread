@@ -92,6 +92,35 @@ test('runManualCapture: no resolvable transcript → actionable hint, exit 1, ne
   assert.match(result.text, /--transcript/);
 });
 
+test('runManualCapture: ARP-734 — appends the throttled upgrade nudge to the summary (interactive)', async () => {
+  let nudgeArg: string | null | undefined = 'unset';
+  const result = await runManualCapture(
+    { transcriptPath: '/t.jsonl', cwd: '/x' },
+    {
+      ...DERIVE_DEPS,
+      runCaptureImpl: async () => fakeOutcome({ status: 'persisted', count: 2, upgrade: 'Update backthread: npm i -g backthread@latest' }),
+      // Stub the throttle so the test is deterministic (no fs / clock).
+      upgradeNudgeImpl: async (u) => { nudgeArg = u; return 'Update backthread: npm i -g backthread@latest'; },
+    },
+  );
+  // The presenter passed the outcome's upgrade string to the throttle, and the
+  // (un-suppressed) nudge is appended to the printed summary.
+  assert.equal(nudgeArg, 'Update backthread: npm i -g backthread@latest');
+  assert.match(result.text, /Update backthread: npm i -g backthread@latest/);
+});
+
+test('runManualCapture: ARP-734 — a throttled (suppressed) nudge is NOT appended', async () => {
+  const result = await runManualCapture(
+    { transcriptPath: '/t.jsonl', cwd: '/x' },
+    {
+      ...DERIVE_DEPS,
+      runCaptureImpl: async () => fakeOutcome({ status: 'persisted', count: 1, upgrade: 'a nudge' }),
+      upgradeNudgeImpl: async () => null, // within the 24h window → suppressed
+    },
+  );
+  assert.doesNotMatch(result.text, /a nudge/);
+});
+
 test('runManualCapture: resolves the path and feeds it to runCapture as transcript_path', async () => {
   let seen: HookInput | undefined;
   const result = await runManualCapture(
