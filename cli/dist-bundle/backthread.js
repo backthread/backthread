@@ -8540,8 +8540,11 @@ var TRUST_COPY = [
   "    code blocks replaced with [code redacted] \u2014 to Backthread's Worker, never source.",
   "  Full details: https://app.backthread.dev/security"
 ].join("\n");
-var HOOK_COMMAND = "npx backthread capture --from-hook --agent claude-code --detach";
-var LEGACY_HOOK_COMMANDS = ["npx backthread capture"];
+var HOOK_COMMAND = "npx backthread@latest capture --from-hook --agent claude-code --detach";
+var LEGACY_HOOK_COMMANDS = [
+  "npx backthread capture",
+  "npx backthread capture --from-hook --agent claude-code --detach"
+];
 var OUR_HOOK_COMMANDS = /* @__PURE__ */ new Set([HOOK_COMMAND, ...LEGACY_HOOK_COMMANDS]);
 async function registerHook(deps = {}) {
   const doReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
