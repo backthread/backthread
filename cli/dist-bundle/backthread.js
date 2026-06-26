@@ -7139,8 +7139,13 @@ function isNotFound(err) {
 // src/version.ts
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { dirname, join as join2 } from "node:path";
 var VERSION_HEADER = "x-backthread-version";
+var AGENT_HEADER = "x-backthread-agent";
+var REDACT_VERSION_HEADER = "x-backthread-redact-version";
+var PLATFORM_HEADER = "x-backthread-platform";
+var NODE_HEADER = "x-backthread-node";
 var cached = null;
 function cliVersion() {
   if (cached !== null) return cached;
@@ -7155,8 +7160,58 @@ function cliVersion() {
   }
   return cached;
 }
+var cachedRedact = null;
+function redactVersion() {
+  if (cachedRedact !== null) return cachedRedact;
+  if ("0.1.3".length > 0) {
+    cachedRedact = "0.1.3";
+    return cachedRedact;
+  }
+  cachedRedact = readRedactVersionFromDisk();
+  return cachedRedact;
+}
+function readRedactVersionFromDisk() {
+  try {
+    const req = createRequire(import.meta.url);
+    let dir = dirname(req.resolve("@backthread/redact"));
+    for (let i = 0; i < 8; i++) {
+      try {
+        const pkg = JSON.parse(readFileSync(join2(dir, "package.json"), "utf8"));
+        if (pkg.name === "@backthread/redact" && typeof pkg.version === "string" && pkg.version.length > 0) {
+          return pkg.version;
+        }
+      } catch {
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+  }
+  return "0.0.0";
+}
+function platformTag() {
+  return process.platform;
+}
+var cachedNodeMajor = null;
+function nodeMajor() {
+  if (cachedNodeMajor !== null) return cachedNodeMajor;
+  const m = /^(\d+)/.exec(process.versions.node ?? "");
+  cachedNodeMajor = m ? m[1] : "";
+  return cachedNodeMajor;
+}
+var requestAgent = "unknown";
+function setRequestAgent(agent) {
+  if (typeof agent === "string" && agent.trim().length > 0) requestAgent = agent.trim();
+}
 function versionHeaders() {
-  return { [VERSION_HEADER]: cliVersion() };
+  return {
+    [VERSION_HEADER]: cliVersion(),
+    [AGENT_HEADER]: requestAgent,
+    [REDACT_VERSION_HEADER]: redactVersion(),
+    [PLATFORM_HEADER]: platformTag(),
+    [NODE_HEADER]: nodeMajor()
+  };
 }
 
 // src/claim.ts
@@ -33872,9 +33927,11 @@ async function main(argv, deps = {}) {
       if (rest.includes("--from-hook")) {
         const raw = await readRawHookInput();
         const detach = rest.includes("--detach") && !rest.includes("--no-detach");
+        const agent = parseAgent(flagValue(rest, "--agent"));
+        setRequestAgent(agent);
         const result = await runFromHook({
           rawPayload: raw,
-          agent: parseAgent(flagValue(rest, "--agent")),
+          agent,
           detach
         });
         if (result.stdout) console.log(JSON.stringify(result.stdout));
@@ -33891,6 +33948,7 @@ async function main(argv, deps = {}) {
         return result.exitCode;
       }
       try {
+        setRequestAgent("claude-code");
         const hookInput = await readHookInput();
         const outcome = await runCapture(hookInput);
         console.error(`backthread capture: ${outcome.status} \u2014 ${outcome.detail}`);
