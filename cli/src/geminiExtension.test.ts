@@ -46,7 +46,7 @@ test('the SessionEnd hook captures via the shared --from-hook entrypoint, detach
   const entry = hooks.hooks.SessionEnd[0].hooks[0];
   assert.equal(entry.type, 'command');
   const cmd: string = entry.command;
-  assert.ok(cmd.includes('backthread capture --from-hook'), 'routes through the shared --from-hook entrypoint');
+  assert.ok(cmd.includes('backthread@latest capture --from-hook'), 'routes through the shared --from-hook entrypoint, self-updating (ARP-739)');
   assert.ok(cmd.includes('--agent gemini-cli'), 'selects the gemini-cli payload shape');
   // Gemini SessionEnd is best-effort (CLI does not await the hook) → must detach.
   assert.ok(cmd.includes('--detach'), 'detaches so the capture survives the CLI exiting');

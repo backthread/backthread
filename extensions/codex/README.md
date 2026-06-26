@@ -35,7 +35,7 @@ and each session is captured automatically.
 
 - `plugins/backthread/.mcp.json` → the `backthread` MCP server (`npx -y backthread mcp`).
 - `plugins/backthread/hooks/hooks.json` → a `Stop` hook running
-  `npx -y backthread capture --from-hook --agent codex --detach`. Codex's `Stop`
+  `npx -y backthread@latest capture --from-hook --agent codex --detach`. Codex's `Stop`
   fires at **turn scope** and is **awaited** (it expects a JSON ack on stdout), so the
   capture **detaches** a worker — it prints the `{ "continue": true }` ack and returns
   instantly so it never adds latency to a turn, while the redact → derive → persist

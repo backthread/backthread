@@ -11,6 +11,7 @@ import {
   runInstallAgent,
   parseInstallAgent,
   hookCommand,
+  legacyHookCommand,
   cursorDeeplink,
   type AgentInstallDeps,
 } from './installAgent.js';
@@ -51,9 +52,11 @@ test('parseInstallAgent maps aliases + rejects unknown', () => {
   assert.equal(parseInstallAgent(undefined), null);
 });
 
-test('hookCommand routes through the shared --from-hook entrypoint, detached', () => {
-  assert.equal(hookCommand('codex'), 'npx -y backthread capture --from-hook --agent codex --detach');
-  assert.equal(hookCommand('gemini-cli'), 'npx -y backthread capture --from-hook --agent gemini-cli --detach');
+test('hookCommand routes through the shared --from-hook entrypoint, detached + self-updating (@latest)', () => {
+  assert.equal(hookCommand('codex'), 'npx -y backthread@latest capture --from-hook --agent codex --detach');
+  assert.equal(hookCommand('gemini-cli'), 'npx -y backthread@latest capture --from-hook --agent gemini-cli --detach');
+  // legacyHookCommand is the pre-@latest form we migrate FROM (never @latest).
+  assert.equal(legacyHookCommand('codex'), 'npx -y backthread capture --from-hook --agent codex --detach');
 });
 
 test('cursorDeeplink encodes the MCP server config', () => {
@@ -101,6 +104,27 @@ test('gemini: preserves the user’s existing settings + foreign hooks', async (
   assert.equal(s.hooks.SessionEnd[0].hooks[0].command, 'their-tool');
 });
 
+test('gemini: MIGRATES the pre-@latest hook command to @latest IN PLACE (no duplicate) — ARP-739', async () => {
+  const path = '/home/dev/.gemini/settings.json';
+  const fs1 = fakeFs({
+    [path]: JSON.stringify({
+      mcpServers: { backthread: { command: 'npx', args: ['-y', 'backthread', 'mcp'] } },
+      hooks: {
+        SessionEnd: [
+          { hooks: [{ type: 'command', name: 'backthread-capture', command: legacyHookCommand('gemini-cli') }] },
+        ],
+      },
+    }),
+  });
+  const r = await runInstallAgent('gemini', { home: HOME, ...fs1.deps, probeVersionImpl: noProbe });
+  assert.equal(r.writes[0].wrote, true); // the stale hook was migrated
+  const s = JSON.parse(fs1.files[path]);
+  assert.equal(s.hooks.SessionEnd.length, 1); // migrated in place, NOT a second group (double-capture)
+  assert.equal(s.hooks.SessionEnd[0].hooks.length, 1);
+  assert.equal(s.hooks.SessionEnd[0].hooks[0].command, hookCommand('gemini-cli')); // now @latest
+  assert.equal(s.hooks.SessionEnd[0].hooks[0].name, 'backthread-capture'); // existing field preserved
+});
+
 // --- Codex -------------------------------------------------------------------
 
 test('codex: appends [mcp_servers.backthread] to config.toml + writes the Stop hook; idempotent', async () => {
@@ -131,6 +155,22 @@ test('codex: preserves existing config.toml content when appending the MCP table
   assert.ok(fs1.files[toml].indexOf('[some.other]') < fs1.files[toml].indexOf('[mcp_servers.backthread]'));
 });
 
+test('codex: MIGRATES the pre-@latest Stop hook to @latest IN PLACE (no duplicate, timeout preserved) — ARP-739', async () => {
+  const hooks = '/home/dev/.codex/hooks.json';
+  const fs1 = fakeFs({
+    [hooks]: JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: legacyHookCommand('codex'), timeout: 60 }] }] },
+    }),
+  });
+  const r = await runInstallAgent('codex', { home: HOME, ...fs1.deps, probeVersionImpl: noProbe });
+  const hookWrite = r.writes.find((w) => w.path === hooks)!;
+  assert.equal(hookWrite.wrote, true); // migrated
+  const hj = JSON.parse(fs1.files[hooks]);
+  assert.equal(hj.hooks.Stop.length, 1); // migrated in place, NOT duplicated
+  assert.equal(hj.hooks.Stop[0].hooks[0].command, hookCommand('codex')); // now @latest
+  assert.equal(hj.hooks.Stop[0].hooks[0].timeout, 60); // existing field preserved
+});
+
 // --- Cursor ------------------------------------------------------------------
 
 const CAPTURE_SCRIPT = '/home/dev/.cursor/hooks/backthread-capture.sh';
@@ -145,10 +185,11 @@ test('cursor: writes node-resolving wrapper scripts + points mcp.json/hooks.json
   assert.match(capture, /^#!\/bin\/sh/);
   assert.match(capture, /PATH="\$NODE_BIN_DIR:\$PATH"/);
   assert.match(capture, /NODE_BIN_DIR='\/opt\/node22\/bin'/);
-  assert.match(capture, /exec npx -y backthread capture --from-hook --agent cursor --detach/);
+  assert.match(capture, /exec npx -y backthread@latest capture --from-hook --agent cursor --detach/); // hook self-updates
   assert.equal(fs1.modes[CAPTURE_SCRIPT], 0o755);
   const mcpScript = fs1.files[MCP_SCRIPT];
-  assert.match(mcpScript, /exec npx -y backthread mcp/);
+  assert.match(mcpScript, /exec npx -y backthread mcp/); // MCP server stays bare (not @latest)
+  assert.doesNotMatch(mcpScript, /backthread@latest/);
   assert.equal(fs1.modes[MCP_SCRIPT], 0o755);
 
   // (2) mcp.json points at the absolute MCP wrapper, not a bare `npx`.
@@ -168,7 +209,7 @@ test('cursor: writes node-resolving wrapper scripts + points mcp.json/hooks.json
 test('cursor: migrates the pre-ARP-692 inline hook command to the wrapper script (no duplicate)', async () => {
   const path = '/home/dev/.cursor/hooks.json';
   const fs1 = fakeFs({
-    [path]: JSON.stringify({ version: 1, hooks: { stop: [{ command: hookCommand('cursor') }] } }),
+    [path]: JSON.stringify({ version: 1, hooks: { stop: [{ command: legacyHookCommand('cursor') }] } }),
   });
   const r = await runInstallAgent('cursor', { home: HOME, nodeBinDir: NODE_BIN, ...fs1.deps, probeVersionImpl: noProbe });
   const hookWrite = r.writes.find((w) => w.path.endsWith('hooks.json'))!;

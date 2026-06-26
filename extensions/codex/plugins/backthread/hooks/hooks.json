@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y backthread capture --from-hook --agent codex --detach",
+            "command": "npx -y backthread@latest capture --from-hook --agent codex --detach",
             "timeout": 60
           }
         ]

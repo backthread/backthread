@@ -35,7 +35,7 @@ and each session is captured automatically when it ends.
 
 - `gemini-extension.json` → the `backthread` MCP server (`npx -y backthread mcp`).
 - `hooks/hooks.json` → a `SessionEnd` hook that runs
-  `npx -y backthread capture --from-hook --agent gemini-cli --detach`. Gemini's
+  `npx -y backthread@latest capture --from-hook --agent gemini-cli --detach`. Gemini's
   SessionEnd is best-effort (the CLI does not wait for the hook), so the capture
   **detaches** a worker that finishes the redact → derive → persist round-trip after
   the CLI exits. It always exits 0 and never delays your session.

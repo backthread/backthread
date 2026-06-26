@@ -39,8 +39,22 @@ export const INSTALL_AGENTS: readonly InstallAgent[] = ['codex', 'cursor', 'gemi
 const MCP_COMMAND = 'npx';
 const MCP_ARGS: readonly string[] = ['-y', 'backthread', 'mcp'];
 
-/** The session-end/stop hook command for an agent (routes through the shared entrypoint). */
+/**
+ * The session-end/stop hook command for an agent (routes through the shared entrypoint).
+ * Pinned to `backthread@latest` (ARP-739) so npx RE-RESOLVES from the registry each
+ * session instead of reusing a stale cached/global copy — self-updating, like the CC
+ * hook (ARP-733). Detached, so the extra resolve is invisible.
+ */
 export function hookCommand(agent: string): string {
+  return `npx -y backthread@latest capture --from-hook --agent ${agent} --detach`;
+}
+
+/**
+ * The PRE-`@latest` hook command (ARP-739) — the form earlier installs wrote. Recognized
+ * so a re-install MIGRATES it to {@link hookCommand} in place (no duplicate, no double-
+ * capture), and so the Cursor stop-hook migration still strips the retired inline command.
+ */
+export function legacyHookCommand(agent: string): string {
   return `npx -y backthread capture --from-hook --agent ${agent} --detach`;
 }
 
@@ -154,10 +168,44 @@ function withMcpServer(settings: Record<string, unknown>): { next: Record<string
   return { next: { ...settings, mcpServers }, changed: true };
 }
 
+/** Does a CC/Gemini/Codex-shaped group contain a command hook running exactly `command`? */
+function groupRunsCommand(group: unknown, command: string): boolean {
+  const inner = (group as { hooks?: unknown })?.hooks;
+  return Array.isArray(inner) && inner.some((h) => (h as { command?: unknown })?.command === command);
+}
+
+/**
+ * Return a NEW group with any hook running a `legacyCommands` command rewritten to
+ * `command` IN PLACE (preserving the hook's other fields — type/timeout/name); returns
+ * the SAME group reference when nothing changed (so the caller detects a migration by
+ * identity). Never mutates the input.
+ */
+function rewriteLegacyInGroup(
+  group: unknown,
+  legacyCommands: readonly string[],
+  command: string,
+): unknown {
+  const inner = (group as { hooks?: unknown })?.hooks;
+  if (!Array.isArray(inner)) return group;
+  let changed = false;
+  const nextInner = inner.map((h) => {
+    const cmd = (h as { command?: unknown })?.command;
+    if (typeof cmd === 'string' && cmd !== command && legacyCommands.includes(cmd)) {
+      changed = true;
+      return { ...(h as Record<string, unknown>), command };
+    }
+    return h;
+  });
+  return changed ? { ...(group as Record<string, unknown>), hooks: nextInner } : group;
+}
+
 /**
  * Ensure `obj.hooks[event]` contains a CC/Gemini/Codex-shaped command group running
- * `command` (`[{ hooks: [{ type:'command', command, ...extra }] }]`). Appends a fresh
- * group only if no existing group already runs `command` (preserving foreign hooks).
+ * `command` (`[{ hooks: [{ type:'command', command, ...extra }] }]`). Idempotent: a
+ * group already running `command` is a no-op. Otherwise, if a group runs one of
+ * `legacyCommands` (a retired form), MIGRATE it to `command` IN PLACE — rather than
+ * append a duplicate, which would double-capture (mirrors ARP-733's mergeSessionEndHook).
+ * Only when neither is present do we append a fresh group, preserving any foreign hooks.
  * Returns a NEW settings object + whether it changed.
  */
 function withNestedHook(
@@ -165,16 +213,20 @@ function withNestedHook(
   event: string,
   command: string,
   extra: Record<string, unknown> = {},
+  legacyCommands: readonly string[] = [],
 ): { next: Record<string, unknown>; changed: boolean } {
   const hooks = asObject(settings.hooks);
   const list: unknown[] = Array.isArray(hooks[event]) ? [...(hooks[event] as unknown[])] : [];
-  const present = list.some((g) => {
-    const inner = (g as { hooks?: unknown })?.hooks;
-    return Array.isArray(inner) && inner.some((h) => (h as { command?: unknown })?.command === command);
+  if (list.some((g) => groupRunsCommand(g, command))) return { next: settings, changed: false };
+
+  let migrated = false;
+  const nextList = list.map((g) => {
+    const rewritten = rewriteLegacyInGroup(g, legacyCommands, command);
+    if (rewritten !== g) migrated = true;
+    return rewritten;
   });
-  if (present) return { next: settings, changed: false };
-  list.push({ hooks: [{ type: 'command', command, ...extra }] });
-  hooks[event] = list;
+  if (!migrated) nextList.push({ hooks: [{ type: 'command', command, ...extra }] });
+  hooks[event] = nextList;
   return { next: { ...settings, hooks }, changed: true };
 }
 
@@ -197,7 +249,9 @@ async function installGemini(home: string, deps: AgentInstallDeps): Promise<Agen
   const path = join(home, '.gemini', 'settings.json');
   const current = await loadJsonObject(doRead, path);
   const a = withMcpServer(current);
-  const b = withNestedHook(a.next, 'SessionEnd', hookCommand('gemini-cli'), { name: 'backthread-capture' });
+  const b = withNestedHook(a.next, 'SessionEnd', hookCommand('gemini-cli'), { name: 'backthread-capture' }, [
+    legacyHookCommand('gemini-cli'),
+  ]);
   if (a.changed || b.changed) await writeJson(deps, path, b.next);
   return [{ path, wrote: a.changed || b.changed }];
 }
@@ -232,7 +286,7 @@ async function installCodex(home: string, deps: AgentInstallDeps): Promise<Agent
   // Hook — ~/.codex/hooks.json, Stop event (turn-scope; --detach + dedupe handle it).
   const hooksPath = join(home, '.codex', 'hooks.json');
   const current = await loadJsonObject(doRead, hooksPath);
-  const h = withNestedHook(current, 'Stop', hookCommand('codex'), { timeout: 60 });
+  const h = withNestedHook(current, 'Stop', hookCommand('codex'), { timeout: 60 }, [legacyHookCommand('codex')]);
   if (h.changed) await writeJson(deps, hooksPath, h.next);
   writes.push({ path: hooksPath, wrote: h.changed });
   return writes;
@@ -266,9 +320,11 @@ async function installCursor(home: string, deps: AgentInstallDeps): Promise<Agen
     await writeCursorScript(
       deps,
       captureScriptPath,
-      cursorWrapperScript(nodeBinDir, 'capture --from-hook --agent cursor --detach'),
+      // capture hook → self-updating (@latest), like the other agents' hooks (ARP-739).
+      cursorWrapperScript(nodeBinDir, 'capture --from-hook --agent cursor --detach', true),
     ),
   );
+  // MCP server → bare (long-running interactive surface; nudge handles staleness).
   writes.push(await writeCursorScript(deps, mcpScriptPath, cursorWrapperScript(nodeBinDir, 'mcp')));
 
   // (2) MCP — ~/.cursor/mcp.json: { mcpServers: { backthread: { command: <mcpScript>, args: [] } } }.
@@ -293,8 +349,14 @@ function shSingleQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/** The POSIX wrapper-script body: pin a ≥22 Node on PATH, then exec `npx -y backthread <args>`. */
-function cursorWrapperScript(nodeBinDir: string, backthreadArgs: string): string {
+/**
+ * The POSIX wrapper-script body: pin a ≥22 Node on PATH, then exec `npx -y backthread <args>`.
+ * `latest` pins `backthread@latest` (ARP-739) so the CAPTURE wrapper self-updates like the
+ * other agents' hooks; the MCP-server wrapper stays bare (a long-running interactive
+ * surface — staleness is handled by the upgrade nudge, ARP-734, not a per-start re-resolve).
+ */
+function cursorWrapperScript(nodeBinDir: string, backthreadArgs: string, latest = false): string {
+  const pkg = latest ? 'backthread@latest' : 'backthread';
   return (
     [
       '#!/bin/sh',
@@ -314,7 +376,7 @@ function cursorWrapperScript(nodeBinDir: string, backthreadArgs: string): string
       '  PATH="$NODE_BIN_DIR:$PATH"',
       '  export PATH',
       'fi',
-      `exec npx -y backthread ${backthreadArgs}`,
+      `exec npx -y ${pkg} ${backthreadArgs}`,
     ].join('\n') + '\n'
   );
 }
@@ -382,7 +444,7 @@ function withCursorStopHook(
   settings: Record<string, unknown>,
   captureScriptPath: string,
 ): { next: Record<string, unknown>; changed: boolean } {
-  const legacyInline = hookCommand('cursor'); // the retired pre-ARP-692 inline `npx …` command
+  const legacyInline = legacyHookCommand('cursor'); // the retired pre-ARP-692 inline `npx …` command (never @latest)
   const hooks = asObject(settings.hooks);
   const stop: unknown[] = Array.isArray(hooks.stop) ? [...(hooks.stop as unknown[])] : [];
   const hadDesired = stop.some((h) => (h as { command?: unknown })?.command === captureScriptPath);
