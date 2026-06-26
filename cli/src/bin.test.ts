@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { main, runOnboarding } from './bin/backthread.js';
 
 // GUARDRAIL: these tests cover the COMMAND DISPATCH only — which subcommand routes
@@ -105,6 +108,35 @@ test('an unknown subcommand errors with usage and exits 1 (no onboarding)', asyn
   assert.match(err, /Unknown command: frobnicate/);
   assert.match(err, /Usage:/);
   assert.equal(spy.calls.length, 0, 'an unknown command must not silently onboard');
+});
+
+// --- `setup-check` is the INTERNAL plugin SessionStart nudge -----------------
+
+test('`backthread setup-check` prints the SessionStart nudge when not set up, and never onboards', async () => {
+  const spy = onboardingSpy(0);
+  const dir = await mkdtemp(join(tmpdir(), 'backthread-bin-setupcheck-'));
+  const prev = process.env.BACKTHREAD_CONFIG_DIR;
+  // An empty config dir → not onboarded + no token → the nudge fires.
+  process.env.BACKTHREAD_CONFIG_DIR = join(dir, '.backthread');
+  try {
+    const { out, result } = await captureConsole(() =>
+      main(['setup-check'], { runOnboardingImpl: spy.impl }),
+    );
+    assert.equal(result, 0, 'always exits 0 (non-blocking)');
+    assert.equal(spy.calls.length, 0, 'setup-check must not route to onboarding');
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.hookSpecificOutput.hookEventName, 'SessionStart');
+    assert.match(parsed.hookSpecificOutput.additionalContext, /\/backthread:start/);
+  } finally {
+    if (prev === undefined) delete process.env.BACKTHREAD_CONFIG_DIR;
+    else process.env.BACKTHREAD_CONFIG_DIR = prev;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('`setup-check` is internal — not documented in usage', async () => {
+  const { out } = await captureConsole(() => main(['help'], { runOnboardingImpl: async () => 0 }));
+  assert.doesNotMatch(out, /setup-check/);
 });
 
 // --- the default runOnboarding is wired (smoke: it is a function) ------------

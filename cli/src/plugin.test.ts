@@ -57,9 +57,19 @@ test('the SessionEnd hook runs the bundled bin, not npx, and detaches', () => {
   assert.ok(cmd.includes('--detach'), 'hook detaches so a slow capture is not SIGTERMd (ARP-682)');
 });
 
-test('only SessionEnd is registered (Stop fires per-turn — intentionally absent)', () => {
+test('SessionEnd (capture) + SessionStart (setup nudge) are registered (Stop fires per-turn — intentionally absent)', () => {
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
-  assert.deepEqual(Object.keys(hooks.hooks), ['SessionEnd']);
+  assert.deepEqual(Object.keys(hooks.hooks), ['SessionEnd', 'SessionStart']);
+});
+
+test('the SessionStart hook nudges setup via the bundled bin (startup matcher, non-blocking)', () => {
+  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
+  const group = hooks.hooks.SessionStart[0];
+  assert.equal(group.matcher, 'startup', 'startup matcher — nudges at session start, never on resume');
+  const cmd: string = group.hooks[0].command;
+  assert.ok(cmd.includes(BUNDLE_REF), 'SessionStart hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
+  assert.ok(!/\bnpx\b/.test(cmd), 'SessionStart hook must NOT use npx (stale-resolution bug ARP-680)');
+  assert.ok(cmd.includes('setup-check'), 'routes through the internal setup-check entrypoint');
 });
 
 test('slash commands prefer the bundled bin (npx only as a fallback)', () => {
