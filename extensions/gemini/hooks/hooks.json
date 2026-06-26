@@ -6,7 +6,7 @@
           {
             "type": "command",
             "name": "backthread-capture",
-            "command": "npx -y backthread capture --from-hook --agent gemini-cli --detach"
+            "command": "npx -y backthread@latest capture --from-hook --agent gemini-cli --detach"
           }
         ]
       }

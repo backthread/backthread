@@ -47,7 +47,7 @@ test('the Stop hook captures via --from-hook --agent codex, detached', () => {
   const entry = hooks.hooks.Stop[0].hooks[0];
   assert.equal(entry.type, 'command');
   const cmd: string = entry.command;
-  assert.ok(cmd.includes('backthread capture --from-hook'), 'routes through the shared entrypoint');
+  assert.ok(cmd.includes('backthread@latest capture --from-hook'), 'routes through the shared entrypoint, self-updating (ARP-739)');
   // --agent codex is load-bearing: it emits the JSON-on-stdout ack Codex requires.
   assert.ok(cmd.includes('--agent codex'), 'selects the codex payload shape + stdout ack');
   // --detach prints the ack + returns instantly so the per-turn Stop never adds latency.
