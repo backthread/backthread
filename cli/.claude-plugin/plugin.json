@@ -7,7 +7,6 @@
     "name": "Backthread"
   },
   "homepage": "https://backthread.dev",
-  "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "backthread": {
       "command": "node",
