@@ -30,7 +30,12 @@ const BUNDLE_REF = '${CLAUDE_PLUGIN_ROOT}/dist-bundle/backthread.js';
 test('plugin.json registers the MCP server from the bundled bin via ${CLAUDE_PLUGIN_ROOT}', () => {
   const plugin = readJson(join(cliRoot, '.claude-plugin', 'plugin.json'));
   assert.equal(plugin.name, 'backthread');
-  assert.equal(plugin.hooks, './hooks/hooks.json');
+  // The manifest must NOT reference hooks/hooks.json: CC auto-loads the standard
+  // hooks/hooks.json, so an explicit `hooks` key double-registers it and the loader
+  // rejects the whole block ("Duplicate hooks file detected") — which silently kills
+  // the SessionEnd capture hook. The hook content itself is validated against
+  // hooks/hooks.json by the dedicated test below.
+  assert.ok(!('hooks' in plugin), 'manifest must omit `hooks` — CC auto-loads hooks/hooks.json; an explicit ref is a duplicate-load error');
   const server = plugin.mcpServers?.backthread;
   assert.ok(server, 'plugin.json declares the backthread MCP server inline');
   assert.equal(server.command, 'node');
