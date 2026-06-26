@@ -40,6 +40,7 @@ import { readConfig } from '../config.js';
 import { readHookInput, readRawHookInput, runCapture } from '../capture.js';
 import { parseManualArgs, runManualCapture } from '../captureCommand.js';
 import { parseAgent, runFromHook } from '../fromHook.js';
+import { setRequestAgent } from '../version.js';
 import { startMcpServer } from '../mcp.js';
 import { runInstall } from '../install.js';
 import { parseInstallAgent } from '../installAgent.js';
@@ -191,9 +192,14 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
         // forces a real run so it can't recurse. Default = run inline (Codex/Cursor/CC).
         const raw = await readRawHookInput();
         const detach = rest.includes('--detach') && !rest.includes('--no-detach');
+        const agent = parseAgent(flagValue(rest, '--agent'));
+        // ARP-732 — stamp the real provider on the operational-metadata headers. The
+        // detached re-spawn re-runs `capture --from-hook --no-detach --agent <agent>`,
+        // so this propagates through the whole chain (hook → detached worker → POST).
+        setRequestAgent(agent);
         const result = await runFromHook({
           rawPayload: raw,
-          agent: parseAgent(flagValue(rest, '--agent')),
+          agent,
           detach,
         });
         // STDOUT is the hook channel ONLY for Codex (result.stdout is null otherwise),
@@ -217,6 +223,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
         return result.exitCode;
       }
       try {
+        // The bare `backthread capture` default IS the legacy Claude Code SessionEnd
+        // hook (reads CC-shaped stdin) — stamp the provider accordingly (ARP-732).
+        setRequestAgent('claude-code');
         const hookInput = await readHookInput();
         const outcome = await runCapture(hookInput);
         console.error(`backthread capture: ${outcome.status} — ${outcome.detail}`);
