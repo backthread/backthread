@@ -1,6 +1,6 @@
 {
   "name": "backthread",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Backthread helps you understand your codebase while AI ships features. The CLI captures the why behind every AI session and lets you ask how your codebase works, right from the terminal.",
   "license": "MIT",
   "author": "Backthread",
