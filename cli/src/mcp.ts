@@ -26,6 +26,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { runCapture, type CaptureDeps, type CaptureOutcome, type HookInput } from './capture.js';
 import { queryDecisions, type QueryDeps, type QueryInput, type QueryOutcome } from './query.js';
+import { maybeUpgradeNudge, type UpgradeNudgeDeps } from './upgradeNudge.js';
 import { cliVersion } from './version.js';
 
 // The MCP content block shape we return (text-only). Structural so we don't depend
@@ -118,6 +119,8 @@ export interface QueryToolDeps {
   queryDecisionsImpl?: (input: QueryInput, deps?: QueryDeps) => Promise<QueryOutcome>;
   /** QueryDeps threaded into the read (env, fetch, readers). */
   queryDeps?: QueryDeps;
+  /** Test seam: the throttled upgrade-nudge. Defaults to maybeUpgradeNudge. */
+  upgradeNudgeImpl?: (upgrade: string | null | undefined, deps?: UpgradeNudgeDeps) => Promise<string | null>;
 }
 
 /**
@@ -132,7 +135,14 @@ export async function handleQueryTool(
   const run = deps.queryDecisionsImpl ?? queryDecisions;
   try {
     const outcome = await run({ repo: args.repo, cwd: args.cwd }, deps.queryDeps);
-    return textResult(formatQueryOutcome(outcome, args.question), outcome.status !== 'ok');
+    let text = formatQueryOutcome(outcome, args.question);
+    // ARP-734 — the MCP query tool is an INTERACTIVE surface, so surface the server's
+    // upgrade nudge here, throttled to once/day per machine (shared with manual
+    // capture). Best-effort: maybeUpgradeNudge never throws and returns null when
+    // there's nothing to show or we're inside the throttle window.
+    const nudge = await (deps.upgradeNudgeImpl ?? maybeUpgradeNudge)(outcome.upgrade);
+    if (nudge) text += `\n\n${nudge}`;
+    return textResult(text, outcome.status !== 'ok');
   } catch (e) {
     return textResult(`query: error — ${(e as Error).message}`, true);
   }

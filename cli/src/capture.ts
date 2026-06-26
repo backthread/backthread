@@ -89,6 +89,14 @@ export interface CaptureOutcome {
   /** Whether the capture landed against a connected repo (vs repo-less / unknown). */
   repoConnected?: boolean;
   /**
+   * ARP-734 — the server's non-fatal `upgrade` nudge string, when a response carried
+   * one (from the infer OR the ingest leg). Kept SEPARATE from `detail` so only the
+   * INTERACTIVE presenter (manual `backthread capture`) surfaces it — THROTTLED, once/
+   * day — while the detached SessionEnd hook (which discards stdout anyway) stays
+   * silent. Absent when the server sent no nudge.
+   */
+  upgrade?: string;
+  /**
    * ARP-693 — the total redacted-turn count of the transcript this run saw (set on
    * every post-redaction outcome). The shared `--from-hook` entrypoint advances its
    * per-conversation WATERMARK to this so the NEXT per-turn `stop` infers only the
@@ -333,6 +341,12 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       return { status: 'infer-failed', detail: result.error ?? 'inference failed (no detail).' };
     }
 
+    // ARP-734 — the server's non-fatal upgrade nudge off the infer response (the
+    // server-persist + no-decision paths report it here; the ingest path reports its
+    // own below). Carried onto the outcome as a SEPARATE field; only the interactive
+    // presenter surfaces it (throttled), never the detached hook.
+    const inferUpgrade = result.upgrade;
+
     // (5a) Server already wrote them — DONE. Re-POSTing would double-write.
     if (result.persisted) {
       // once-only aha confirmation: the server persisted against a CONNECTED repo
@@ -347,6 +361,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         count: result.decisions.length,
         repoConnected: true,
         turnCount,
+        ...(inferUpgrade ? { upgrade: inferUpgrade } : {}),
       };
     }
 
@@ -357,6 +372,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         detail: 'inference returned no decisions for this session.',
         count: 0,
         turnCount,
+        ...(inferUpgrade ? { upgrade: inferUpgrade } : {}),
       };
     }
 
@@ -373,6 +389,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           'derived decisions but could not resolve a repo from cwd (no git remote) — nothing to claim them under; skipped.',
         count: 0,
         turnCount,
+        ...(inferUpgrade ? { upgrade: inferUpgrade } : {}),
       };
     }
 
@@ -495,9 +512,11 @@ async function persistDerived(
   const count = typeof rec.count === 'number' ? rec.count : decisions.length;
   const repoConnected = rec.repoConnected === true;
   // Non-fatal upgrade nudge: the server lets an outdated-but-supported client through
-  // and returns an `upgrade` string (mirrors the x-backthread-upgrade header). Append it to
-  // the detail so it's visible without failing the (best-effort) capture.
-  const upgrade = typeof rec.upgrade === 'string' && rec.upgrade.length > 0 ? rec.upgrade : null;
+  // and returns an `upgrade` string (mirrors the x-backthread-upgrade header). Carried
+  // as a SEPARATE outcome field (ARP-734) — NOT baked into detail — so only the
+  // interactive `backthread capture` presenter surfaces it (throttled once/day), while
+  // the detached SessionEnd hook (which discards stdout) stays silent.
+  const upgrade = typeof rec.upgrade === 'string' && rec.upgrade.length > 0 ? rec.upgrade : undefined;
   const base = repoConnected
     ? `captured ${count} decision(s) to ${repo.owner}/${repo.name}.`
     : `captured ${count} decision(s) (repo not yet connected — held as pending).`;
@@ -527,8 +546,9 @@ async function persistDerived(
 
   return {
     status: 'persisted',
-    detail: upgrade ? `${base} ${upgrade}` : base,
+    detail: base,
     count,
     repoConnected,
+    ...(upgrade ? { upgrade } : {}),
   };
 }

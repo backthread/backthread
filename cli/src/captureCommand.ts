@@ -36,6 +36,7 @@ import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { runCapture, type CaptureDeps, type CaptureOutcome, type HookInput } from './capture.js';
+import { maybeUpgradeNudge, type UpgradeNudgeDeps } from './upgradeNudge.js';
 
 /** Inputs to a manual capture, as parsed from the bin args / slash-command env. */
 export interface ManualCaptureInput {
@@ -57,6 +58,8 @@ export interface ManualCaptureDeps {
   homedirImpl?: () => string;
   /** Test seam: existence check for a derived path. Defaults to fs.stat → boolean. */
   statImpl?: (path: string) => Promise<boolean>;
+  /** Test seam: the throttled upgrade-nudge. Defaults to maybeUpgradeNudge. */
+  upgradeNudgeImpl?: (upgrade: string | null | undefined, deps?: UpgradeNudgeDeps) => Promise<string | null>;
 }
 
 /** The result of a manual capture: a human summary + a process exit code + the raw outcome. */
@@ -173,7 +176,16 @@ export async function runManualCapture(
     return { text: `backthread capture: error — ${(e as Error).message}`, exitCode: 1, outcome: null };
   }
 
-  return { text: formatManualSummary(outcome), exitCode: exitCodeFor(outcome), outcome };
+  let text = formatManualSummary(outcome);
+  // ARP-734 — manual capture is an INTERACTIVE surface, so surface the server's
+  // upgrade nudge here (throttled once/day per machine). The detached SessionEnd hook
+  // goes through runCapture too but NEVER calls this, so it stays silent. Best-effort:
+  // maybeUpgradeNudge never throws and returns null when there's nothing to show or
+  // we're inside the throttle window.
+  const nudge = await (deps.upgradeNudgeImpl ?? maybeUpgradeNudge)(outcome.upgrade);
+  if (nudge) text += `\n  ${nudge}`;
+
+  return { text, exitCode: exitCodeFor(outcome), outcome };
 }
 
 /** A genuine failure (infer/persist/error) exits 1; everything else (incl. nothing-to-capture, no-auth) exits 0... */

@@ -120,14 +120,16 @@ test('queryDecisions: happy path returns ranked flows/decisions + deep-link', as
   assert.match(calls[0].version ?? '', /^\d+\.\d+\.\d+/);
 });
 
-test('queryDecisions: surfaces a non-fatal server upgrade nudge in the detail', async () => {
+test('queryDecisions: carries a non-fatal server upgrade nudge in the SEPARATE upgrade field (ARP-734)', async () => {
   const { fetch } = stubFetch({
     status: 200,
     body: { ...OK_BODY, upgrade: 'A newer `backthread` is available — run `npm i -g backthread@latest`.' },
   });
   const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'ok');
-  assert.match(out.detail, /newer `backthread` is available/);
+  // The nudge rides a SEPARATE field now (so the presenter can throttle it) — NOT detail.
+  assert.match(out.upgrade ?? '', /newer `backthread` is available/);
+  assert.doesNotMatch(out.detail, /newer `backthread` is available/);
 });
 
 test('queryDecisions: a 426 too-old soft-block prefers the friendly message', async () => {

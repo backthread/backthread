@@ -228,6 +228,45 @@ test('derive-only (server did not persist) → POST derived decisions to ingest-
   assert.doesNotMatch(JSON.stringify(calls[1].body), /const secret/);
 });
 
+test('ARP-734 — a server upgrade nudge rides the SEPARATE outcome.upgrade field, NOT detail', async () => {
+  // The detached-hook-silence invariant: runCapture carries the nudge as data, but
+  // `detail` (what the hook logs to stderr / discards) must NOT contain it. Only the
+  // interactive presenters (manual capture / MCP query) surface it, throttled.
+  const NUDGE = 'A newer `backthread` is available — npm i -g backthread@latest';
+  const { fetch: fetchImpl } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'Use a queue' }] } }),
+    ingest: () => ({ status: 200, body: { ok: true, count: 1, repoConnected: true, upgrade: NUDGE } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.equal(out.status, 'persisted');
+  assert.equal(out.upgrade, NUDGE); // carried as a field
+  assert.doesNotMatch(out.detail, /newer `backthread`/); // NOT in detail (hook stays silent)
+});
+
+test('ARP-734 — server-persist path propagates the infer upgrade onto the outcome', async () => {
+  const NUDGE = 'please update backthread';
+  const { fetch: fetchImpl } = stubFetch({
+    // Server persisted (connected repo) AND returned a non-fatal upgrade nudge.
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }], upgrade: NUDGE } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.equal(out.status, 'persisted-by-server');
+  assert.equal(out.upgrade, NUDGE);
+  assert.doesNotMatch(out.detail, /please update/);
+});
+
+test('ARP-734 — the no-git-remote (no-repo) path still carries the infer upgrade', async () => {
+  const NUDGE = 'newer backthread available';
+  const { fetch: fetchImpl } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }], upgrade: NUDGE } }),
+  });
+  // No git remote → repo unresolved → the "nothing to claim" path, which must STILL
+  // surface the nudge so an interactive manual capture in a non-git dir shows it.
+  const out = await runCapture(HOOK, deps({ fetchImpl, readRemoteImpl: () => null }));
+  assert.equal(out.status, 'nothing-to-capture');
+  assert.equal(out.upgrade, NUDGE);
+});
+
 // --- ARP-696: the capture hook reports git context to BOTH persist paths -----
 
 test('ARP-696 — git context rides the connected /infer-decisions persist body', async () => {

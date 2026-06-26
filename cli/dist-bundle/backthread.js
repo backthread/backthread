@@ -7348,7 +7348,7 @@ async function ensureAuth(opts = {}) {
 }
 
 // src/capture.ts
-import { readFile as readFile8 } from "node:fs/promises";
+import { readFile as readFile9 } from "node:fs/promises";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -7688,13 +7688,15 @@ async function serverInfer(transcript, config2, opts = {}) {
   const persisted = rec.persisted === true;
   const sessionId = typeof rec.sessionId === "string" ? rec.sessionId : transcript.sessionId ?? null;
   const tokensSpent = typeof rec.tokensSpent === "number" ? rec.tokensSpent : void 0;
+  const upgrade = typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
   return {
     ok: true,
     model: "server",
     decisions,
     persisted,
     sessionId,
-    ...tokensSpent !== void 0 ? { tokensSpent } : {}
+    ...tokensSpent !== void 0 ? { tokensSpent } : {},
+    ...upgrade ? { upgrade } : {}
   };
 }
 async function inferDecisions(transcript, config2, opts = {}) {
@@ -7800,24 +7802,80 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
 }
 
 // src/firstRun.ts
-import { join as join9 } from "node:path";
-import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir6, chmod as chmod5 } from "node:fs/promises";
+import { join as join10 } from "node:path";
+import { readFile as readFile8, writeFile as writeFile7, mkdir as mkdir7, chmod as chmod6 } from "node:fs/promises";
 
 // src/install.ts
-import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5 } from "node:fs/promises";
+import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir6 } from "node:fs/promises";
 import { homedir as homedir5 } from "node:os";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 
 // src/captureCommand.ts
 import { stat } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
+import { join as join5 } from "node:path";
+
+// src/upgradeNudge.ts
 import { join as join4 } from "node:path";
+import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
+function upgradeNudgeStatePath(env = process.env) {
+  return join4(configDir(env), "upgrade-nudge.json");
+}
+var UPGRADE_NUDGE_THROTTLE_MS = 24 * 60 * 60 * 1e3;
+function parseState2(raw) {
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      const at = obj.lastUpgradeNudgeAt;
+      if (typeof at === "number" && Number.isFinite(at)) return { lastUpgradeNudgeAt: at };
+    }
+  } catch {
+  }
+  return {};
+}
+async function readState2(env) {
+  try {
+    return parseState2(await readFile3(upgradeNudgeStatePath(env), "utf8"));
+  } catch {
+    return {};
+  }
+}
+async function writeState2(state, env) {
+  try {
+    const dir = configDir(env);
+    await mkdir3(dir, { recursive: true, mode: DIR_MODE });
+    await chmod3(dir, DIR_MODE).catch(() => {
+    });
+    const path = upgradeNudgeStatePath(env);
+    await writeFile3(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
+    await chmod3(path, CONFIG_MODE).catch(() => {
+    });
+  } catch {
+  }
+}
+async function maybeUpgradeNudge(upgrade, deps = {}) {
+  try {
+    if (typeof upgrade !== "string" || upgrade.trim().length === 0) return null;
+    const env = deps.env ?? process.env;
+    const now = deps.now ? deps.now() : Date.now();
+    const state = await readState2(env);
+    if (typeof state.lastUpgradeNudgeAt === "number" && now - state.lastUpgradeNudgeAt < UPGRADE_NUDGE_THROTTLE_MS) {
+      return null;
+    }
+    await writeState2({ lastUpgradeNudgeAt: now }, env);
+    return upgrade.trim();
+  } catch {
+    return null;
+  }
+}
+
+// src/captureCommand.ts
 function slugifyCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function deriveTranscriptPath(sessionId, cwd, home) {
   if (!sessionId || sessionId.trim().length === 0) return null;
-  return join4(home, ".claude", "projects", slugifyCwd(cwd), `${sessionId}.jsonl`);
+  return join5(home, ".claude", "projects", slugifyCwd(cwd), `${sessionId}.jsonl`);
 }
 async function defaultStat(path) {
   try {
@@ -7860,7 +7918,11 @@ async function runManualCapture(input, deps = {}) {
   } catch (e) {
     return { text: `backthread capture: error \u2014 ${e.message}`, exitCode: 1, outcome: null };
   }
-  return { text: formatManualSummary(outcome), exitCode: exitCodeFor(outcome), outcome };
+  let text = formatManualSummary(outcome);
+  const nudge = await (deps.upgradeNudgeImpl ?? maybeUpgradeNudge)(outcome.upgrade);
+  if (nudge) text += `
+  ${nudge}`;
+  return { text, exitCode: exitCodeFor(outcome), outcome };
 }
 function exitCodeFor(o) {
   if (o.status === "infer-failed" || o.status === "persist-failed" || o.status === "error") return 1;
@@ -7917,17 +7979,17 @@ function parseManualArgs(argv) {
 }
 
 // src/sweep.ts
-import { readFile as readFile4, stat as stat2, readdir } from "node:fs/promises";
+import { readFile as readFile5, stat as stat2, readdir } from "node:fs/promises";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join6 } from "node:path";
+import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join7 } from "node:path";
 
 // src/sweepLedger.ts
-import { join as join5 } from "node:path";
-import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
+import { join as join6 } from "node:path";
+import { readFile as readFile4, writeFile as writeFile4, mkdir as mkdir4, chmod as chmod4 } from "node:fs/promises";
 var MAX_PROCESSED = 2e4;
 function sweepStatePath(env = process.env) {
-  return join5(configDir(env), "sweep-state.json");
+  return join6(configDir(env), "sweep-state.json");
 }
 function parseSweepState(raw) {
   try {
@@ -7952,7 +8014,7 @@ function serializeSweepState(state) {
 }
 async function readSweepState(env = process.env) {
   try {
-    return parseSweepState(await readFile3(sweepStatePath(env), "utf8"));
+    return parseSweepState(await readFile4(sweepStatePath(env), "utf8"));
   } catch {
     return { processed: [], lastSweptAt: {} };
   }
@@ -7960,12 +8022,12 @@ async function readSweepState(env = process.env) {
 async function writeSweepState(state, env = process.env) {
   try {
     const dir = configDir(env);
-    await mkdir3(dir, { recursive: true, mode: DIR_MODE });
-    await chmod3(dir, DIR_MODE).catch(() => {
+    await mkdir4(dir, { recursive: true, mode: DIR_MODE });
+    await chmod4(dir, DIR_MODE).catch(() => {
     });
     const path = sweepStatePath(env);
-    await writeFile3(path, serializeSweepState(state), { mode: CONFIG_MODE });
-    await chmod3(path, CONFIG_MODE).catch(() => {
+    await writeFile4(path, serializeSweepState(state), { mode: CONFIG_MODE });
+    await chmod4(path, CONFIG_MODE).catch(() => {
     });
   } catch {
   }
@@ -8069,7 +8131,7 @@ function defaultMainRoot(cwd) {
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
     if (!out) return null;
-    const abs = isAbsolute2(out) ? out : join6(cwd, out);
+    const abs = isAbsolute2(out) ? out : join7(cwd, out);
     return dirname2(abs.replace(/\/+$/, ""));
   } catch {
     return null;
@@ -8087,7 +8149,7 @@ async function runSweep(input = {}, deps = {}) {
       return [];
     }
   };
-  const baseReadFile = deps.readFileImpl ?? ((p) => readFile4(p, "utf8"));
+  const baseReadFile = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
   const doReadFile = async (p) => {
     try {
       return await baseReadFile(p);
@@ -8144,7 +8206,7 @@ async function runSweep(input = {}, deps = {}) {
     }
     const mainRoot = doMainRoot(cwd) ?? cwd;
     const mainSlug = slugifyCwd(mainRoot);
-    const projectsRoot = join6(home, ".claude", "projects");
+    const projectsRoot = join7(home, ".claude", "projects");
     const entries = await doReadDir(projectsRoot);
     const candidates = entries.filter((n) => n === mainSlug || n.startsWith(mainSlug + "-")).sort();
     const skip = new Set(state.processed);
@@ -8157,12 +8219,12 @@ async function runSweep(input = {}, deps = {}) {
     let captured = 0;
     let decisions = 0;
     for (const dirName of candidates) {
-      const dir = join6(projectsRoot, dirName);
+      const dir = join7(projectsRoot, dirName);
       const files = (await doReadDir(dir)).filter((n) => n.endsWith(".jsonl")).sort();
       if (files.length === 0) continue;
       let embeddedCwd = null;
       for (const file2 of files) {
-        embeddedCwd = extractCwdFromRaw(await doReadFile(join6(dir, file2)));
+        embeddedCwd = extractCwdFromRaw(await doReadFile(join7(dir, file2)));
         if (embeddedCwd) break;
       }
       const cwdExists = embeddedCwd ? await doPathExists(embeddedCwd) : false;
@@ -8201,7 +8263,7 @@ async function runSweep(input = {}, deps = {}) {
         try {
           outcome = await run(
             {
-              transcript_path: join6(dir, file2),
+              transcript_path: join7(dir, file2),
               cwd: cls.cwd ?? mainRoot,
               session_id: sid,
               hook_event_name: "SessionEnd"
@@ -8265,8 +8327,8 @@ async function runBackfill(input = {}, deps = {}) {
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir as homedir4 } from "node:os";
-import { join as join7, dirname as dirname3 } from "node:path";
-import { readFile as readFile5, writeFile as writeFile4, mkdir as mkdir4, chmod as chmod4 } from "node:fs/promises";
+import { join as join8, dirname as dirname3 } from "node:path";
+import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod5 } from "node:fs/promises";
 var execFileP = promisify(execFile);
 var MCP_COMMAND = "npx";
 var MCP_ARGS = ["-y", "backthread", "mcp"];
@@ -8333,14 +8395,14 @@ function withNestedHook(settings, event, command, extra = {}) {
   return { next: { ...settings, hooks }, changed: true };
 }
 async function writeJson(deps, path, obj) {
-  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
-  const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
+  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
+  const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
   await doMkdir(dirname3(path));
   await doWrite(path, JSON.stringify(obj, null, 2) + "\n");
 }
 async function installGemini(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
-  const path = join7(home, ".gemini", "settings.json");
+  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const path = join8(home, ".gemini", "settings.json");
   const current = await loadJsonObject(doRead, path);
   const a = withMcpServer(current);
   const b = withNestedHook(a.next, "SessionEnd", hookCommand("gemini-cli"), { name: "backthread-capture" });
@@ -8348,9 +8410,9 @@ async function installGemini(home, deps) {
   return [{ path, wrote: a.changed || b.changed }];
 }
 async function installCodex(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
+  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
   const writes = [];
-  const tomlPath = join7(home, ".codex", "config.toml");
+  const tomlPath = join8(home, ".codex", "config.toml");
   let toml = "";
   try {
     toml = await doRead(tomlPath);
@@ -8365,13 +8427,13 @@ command = "${MCP_COMMAND}"
 args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
 `;
     const sep = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
-    const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
-    const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
+    const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
+    const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
     await doMkdir(dirname3(tomlPath));
     await doWrite(tomlPath, toml + sep + block);
     writes.push({ path: tomlPath, wrote: true });
   }
-  const hooksPath = join7(home, ".codex", "hooks.json");
+  const hooksPath = join8(home, ".codex", "hooks.json");
   const current = await loadJsonObject(doRead, hooksPath);
   const h = withNestedHook(current, "Stop", hookCommand("codex"), { timeout: 60 });
   if (h.changed) await writeJson(deps, hooksPath, h.next);
@@ -8379,12 +8441,12 @@ args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
   return writes;
 }
 async function installCursor(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
+  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
   const nodeBinDir = deps.nodeBinDir ?? dirname3(process.execPath);
   const writes = [];
-  const scriptDir = join7(home, ".cursor", "hooks");
-  const captureScriptPath = join7(scriptDir, "backthread-capture.sh");
-  const mcpScriptPath = join7(scriptDir, "backthread-mcp.sh");
+  const scriptDir = join8(home, ".cursor", "hooks");
+  const captureScriptPath = join8(scriptDir, "backthread-capture.sh");
+  const mcpScriptPath = join8(scriptDir, "backthread-mcp.sh");
   writes.push(
     await writeCursorScript(
       deps,
@@ -8393,12 +8455,12 @@ async function installCursor(home, deps) {
     )
   );
   writes.push(await writeCursorScript(deps, mcpScriptPath, cursorWrapperScript(nodeBinDir, "mcp")));
-  const mcpPath = join7(home, ".cursor", "mcp.json");
+  const mcpPath = join8(home, ".cursor", "mcp.json");
   const mcpCurrent = await loadJsonObject(doRead, mcpPath);
   const m = withCursorMcpServer(mcpCurrent, mcpScriptPath);
   if (m.changed) await writeJson(deps, mcpPath, m.next);
   writes.push({ path: mcpPath, wrote: m.changed });
-  const hooksPath = join7(home, ".cursor", "hooks.json");
+  const hooksPath = join8(home, ".cursor", "hooks.json");
   const hooksCurrent = await loadJsonObject(doRead, hooksPath);
   const c = withCursorStopHook(hooksCurrent, captureScriptPath);
   if (c.changed) await writeJson(deps, hooksPath, c.next);
@@ -8431,8 +8493,8 @@ function cursorWrapperScript(nodeBinDir, backthreadArgs) {
   ].join("\n") + "\n";
 }
 async function writeCursorScript(deps, path, content) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
-  const doChmod = deps.chmodImpl ?? ((p, mode) => chmod4(p, mode));
+  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const doChmod = deps.chmodImpl ?? ((p, mode) => chmod5(p, mode));
   let existing = null;
   try {
     existing = await doRead(path);
@@ -8444,8 +8506,8 @@ async function writeCursorScript(deps, path, content) {
     });
     return { path, wrote: false };
   }
-  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir4(d, { recursive: true }));
-  const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile4(p, d));
+  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
+  const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
   await doMkdir(dirname3(path));
   await doWrite(path, content);
   await doChmod(path, 493);
@@ -8547,12 +8609,12 @@ var LEGACY_HOOK_COMMANDS = [
 ];
 var OUR_HOOK_COMMANDS = /* @__PURE__ */ new Set([HOOK_COMMAND, ...LEGACY_HOOK_COMMANDS]);
 async function registerHook(deps = {}) {
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
-  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
-  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
+  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile6(p, d));
+  const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir6(d, { recursive: true }));
   const home = deps.home ?? homedir5();
-  const settingsDir = join8(home, ".claude");
-  const settingsPath = join8(settingsDir, "settings.json");
+  const settingsDir = join9(home, ".claude");
+  const settingsPath = join9(settingsDir, "settings.json");
   let settings = {};
   let raw = null;
   try {
@@ -8664,9 +8726,9 @@ function stripSessionEndHook(settings) {
   return next;
 }
 async function unregisterProjectHook(cwd, deps = {}) {
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
-  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
-  const settingsPath = join8(cwd, ".claude", "settings.json");
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
+  const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile6(p, d));
+  const settingsPath = join9(cwd, ".claude", "settings.json");
   let raw;
   try {
     raw = await doReadFile(settingsPath);
@@ -8931,7 +8993,7 @@ function normalizeState(raw) {
 
 // src/firstRun.ts
 function firstRunStatePath(env = process.env) {
-  return join9(configDir(env), "first-run.json");
+  return join10(configDir(env), "first-run.json");
 }
 function parseFirstRunState(raw) {
   try {
@@ -8950,7 +9012,7 @@ function parseFirstRunState(raw) {
 }
 async function readFirstRunState(env = process.env) {
   try {
-    return parseFirstRunState(await readFile7(firstRunStatePath(env), "utf8"));
+    return parseFirstRunState(await readFile8(firstRunStatePath(env), "utf8"));
   } catch {
     return {};
   }
@@ -8960,12 +9022,12 @@ async function updateFirstRunState(patch, env = process.env) {
     const current = await readFirstRunState(env);
     const next = { ...current, ...patch };
     const dir = configDir(env);
-    await mkdir6(dir, { recursive: true, mode: DIR_MODE });
-    await chmod5(dir, DIR_MODE).catch(() => {
+    await mkdir7(dir, { recursive: true, mode: DIR_MODE });
+    await chmod6(dir, DIR_MODE).catch(() => {
     });
     const path = firstRunStatePath(env);
-    await writeFile6(path, JSON.stringify(next) + "\n", { mode: CONFIG_MODE });
-    await chmod5(path, CONFIG_MODE).catch(() => {
+    await writeFile7(path, JSON.stringify(next) + "\n", { mode: CONFIG_MODE });
+    await chmod6(path, CONFIG_MODE).catch(() => {
     });
   } catch {
   }
@@ -8973,13 +9035,13 @@ async function updateFirstRunState(patch, env = process.env) {
 async function maybeShowTrustGate(deps = {}) {
   try {
     const env = deps.env ?? process.env;
-    const readState3 = deps.readStateImpl ?? readFirstRunState;
-    const state = await readState3(env);
+    const readState4 = deps.readStateImpl ?? readFirstRunState;
+    const state = await readState4(env);
     if (state.onboarded === true || state.trustShown === true) return false;
     const log = deps.log ?? ((m) => console.error(m));
     log(TRUST_COPY);
-    const writeState3 = deps.writeStateImpl ?? updateFirstRunState;
-    await writeState3({ trustShown: true }, env);
+    const writeState4 = deps.writeStateImpl ?? updateFirstRunState;
+    await writeState4({ trustShown: true }, env);
     return true;
   } catch {
     return false;
@@ -8990,8 +9052,8 @@ async function runStart(opts = {}, deps = {}) {
   const log = opts.log ?? ((m) => console.error(m));
   const cwd = opts.cwd ?? process.cwd();
   const entry = opts.entry ?? detectEntry({ claim: opts.claim, env });
-  const readState3 = deps.readStateImpl ?? readFirstRunState;
-  const existingState = await readState3(env).catch(() => ({}));
+  const readState4 = deps.readStateImpl ?? readFirstRunState;
+  const existingState = await readState4(env).catch(() => ({}));
   if (existingState.onboarded === true) {
     const readCfg = deps.readConfigImpl ?? readConfig;
     const cfg = await readCfg(env).catch(() => ({}));
@@ -9040,8 +9102,8 @@ async function runStart(opts = {}, deps = {}) {
     () => ({ status: "error", detail: "state fetch failed (swallowed)" })
   );
   log("\n" + renderNextStep(stateOut, env));
-  const writeState3 = deps.writeStateImpl ?? updateFirstRunState;
-  await writeState3({ onboarded: true, trustShown: true }, env);
+  const writeState4 = deps.writeStateImpl ?? updateFirstRunState;
+  await writeState4({ onboarded: true, trustShown: true }, env);
   return { exitCode: 0, status: "onboarded", authed: true };
 }
 function renderNextStep(out, env = process.env) {
@@ -9082,13 +9144,13 @@ async function maybeFirstCaptureConfirm(count, repoConnected, repo, deps = {}) {
     if (!repoConnected || !repo) return false;
     if (!(count > 0)) return false;
     const env = deps.env ?? process.env;
-    const readState3 = deps.readStateImpl ?? readFirstRunState;
-    const state = await readState3(env);
+    const readState4 = deps.readStateImpl ?? readFirstRunState;
+    const state = await readState4(env);
     if (state.firstCaptureShown === true) return false;
     const log = deps.log ?? ((m) => console.error(m));
     log(firstCaptureMessage(count, repo, env));
-    const writeState3 = deps.writeStateImpl ?? updateFirstRunState;
-    await writeState3({ firstCaptureShown: true }, env);
+    const writeState4 = deps.writeStateImpl ?? updateFirstRunState;
+    await writeState4({ firstCaptureShown: true }, env);
     return true;
   } catch {
     return false;
@@ -9125,7 +9187,7 @@ function readStream(stream) {
 async function runCapture(input, deps = {}) {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m) => console.error(m));
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile8(p, "utf8"));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile9(p, "utf8"));
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
     void ensureAuth({ env: e }).catch(() => {
@@ -9187,6 +9249,7 @@ async function runCapture(input, deps = {}) {
     if (!result.ok) {
       return { status: "infer-failed", detail: result.error ?? "inference failed (no detail)." };
     }
+    const inferUpgrade = result.upgrade;
     if (result.persisted) {
       const confirm = deps.firstCaptureConfirmImpl ?? maybeFirstCaptureConfirm;
       await confirm(result.decisions.length, true, repo, { env, log }).catch(() => false);
@@ -9195,7 +9258,8 @@ async function runCapture(input, deps = {}) {
         detail: `inference router persisted ${result.decisions.length} decision(s) server-side.`,
         count: result.decisions.length,
         repoConnected: true,
-        turnCount
+        turnCount,
+        ...inferUpgrade ? { upgrade: inferUpgrade } : {}
       };
     }
     if (result.decisions.length === 0) {
@@ -9203,7 +9267,8 @@ async function runCapture(input, deps = {}) {
         status: "nothing-to-capture",
         detail: "inference returned no decisions for this session.",
         count: 0,
-        turnCount
+        turnCount,
+        ...inferUpgrade ? { upgrade: inferUpgrade } : {}
       };
     }
     if (!repo) {
@@ -9211,7 +9276,8 @@ async function runCapture(input, deps = {}) {
         status: "nothing-to-capture",
         detail: "derived decisions but could not resolve a repo from cwd (no git remote) \u2014 nothing to claim them under; skipped.",
         count: 0,
-        turnCount
+        turnCount,
+        ...inferUpgrade ? { upgrade: inferUpgrade } : {}
       };
     }
     const out = await persistDerived(result.decisions, repo, config2, decidedAt, {
@@ -9281,7 +9347,7 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
   const rec = payload && typeof payload === "object" ? payload : {};
   const count = typeof rec.count === "number" ? rec.count : decisions.length;
   const repoConnected = rec.repoConnected === true;
-  const upgrade = typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : null;
+  const upgrade = typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
   const base = repoConnected ? `captured ${count} decision(s) to ${repo.owner}/${repo.name}.` : `captured ${count} decision(s) (repo not yet connected \u2014 held as pending).`;
   await maybeNudge(parseRepoStatus(rec.repoStatus), repo, ctx.sessionId, {
     env: ctx.env,
@@ -9292,16 +9358,17 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
   await confirm(count, repoConnected, repo, { env: ctx.env, log: ctx.log }).catch(() => false);
   return {
     status: "persisted",
-    detail: upgrade ? `${base} ${upgrade}` : base,
+    detail: base,
     count,
-    repoConnected
+    repoConnected,
+    ...upgrade ? { upgrade } : {}
   };
 }
 
 // src/fromHook.ts
 import { spawn as spawn2 } from "node:child_process";
-import { join as join10 } from "node:path";
-import { readFile as readFile9, writeFile as writeFile7, mkdir as mkdir7, chmod as chmod6 } from "node:fs/promises";
+import { join as join11 } from "node:path";
+import { readFile as readFile10, writeFile as writeFile8, mkdir as mkdir8, chmod as chmod7 } from "node:fs/promises";
 var KNOWN_AGENTS = /* @__PURE__ */ new Set([
   "claude-code",
   "codex",
@@ -9342,10 +9409,10 @@ function normalizeHookInput(payload, _agent) {
   return out;
 }
 function captureStatePath(env = process.env) {
-  return join10(configDir(env), "capture-sessions.json");
+  return join11(configDir(env), "capture-sessions.json");
 }
 var MAX_REMEMBERED2 = 200;
-function parseState2(raw) {
+function parseState3(raw) {
   try {
     const obj = JSON.parse(raw);
     if (obj && typeof obj === "object" && !Array.isArray(obj)) {
@@ -9363,49 +9430,49 @@ function parseState2(raw) {
   }
   return { captured: [], watermarks: {} };
 }
-async function readState2(env) {
+async function readState3(env) {
   try {
-    return parseState2(await readFile9(captureStatePath(env), "utf8"));
+    return parseState3(await readFile10(captureStatePath(env), "utf8"));
   } catch {
     return { captured: [], watermarks: {} };
   }
 }
-async function writeState2(state, env) {
+async function writeState3(state, env) {
   try {
     const dir = configDir(env);
-    await mkdir7(dir, { recursive: true, mode: DIR_MODE });
-    await chmod6(dir, DIR_MODE).catch(() => {
+    await mkdir8(dir, { recursive: true, mode: DIR_MODE });
+    await chmod7(dir, DIR_MODE).catch(() => {
     });
     const path = captureStatePath(env);
-    await writeFile7(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
-    await chmod6(path, CONFIG_MODE).catch(() => {
+    await writeFile8(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
+    await chmod7(path, CONFIG_MODE).catch(() => {
     });
   } catch {
   }
 }
 async function wasSessionCaptured(sessionId, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return false;
-  const state = await readState2(env);
+  const state = await readState3(env);
   return state.captured.includes(sessionId);
 }
 async function markSessionCaptured(sessionId, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return;
-  const state = await readState2(env);
+  const state = await readState3(env);
   if (state.captured.includes(sessionId)) return;
   const captured = [...state.captured, sessionId];
   if (captured.length > MAX_REMEMBERED2) captured.splice(0, captured.length - MAX_REMEMBERED2);
   const { [sessionId]: _dropped, ...watermarks } = state.watermarks;
-  await writeState2({ captured, watermarks }, env);
+  await writeState3({ captured, watermarks }, env);
 }
 async function captureWatermark(sessionId, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return 0;
-  const state = await readState2(env);
+  const state = await readState3(env);
   return state.watermarks[sessionId] ?? 0;
 }
 async function setCaptureWatermark(sessionId, turnCount, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return;
   if (typeof turnCount !== "number" || !Number.isFinite(turnCount) || turnCount < 0) return;
-  const state = await readState2(env);
+  const state = await readState3(env);
   const prev = state.watermarks[sessionId] ?? 0;
   if (turnCount <= prev) return;
   const { [sessionId]: _old, ...rest } = state.watermarks;
@@ -9414,7 +9481,7 @@ async function setCaptureWatermark(sessionId, turnCount, env = process.env) {
   if (keys.length > MAX_REMEMBERED2) {
     for (const k of keys.slice(0, keys.length - MAX_REMEMBERED2)) delete watermarks[k];
   }
-  await writeState2({ captured: state.captured, watermarks }, env);
+  await writeState3({ captured: state.captured, watermarks }, env);
 }
 function spawnDetached(rawPayload, agent, deps = {}) {
   const doSpawn = deps.spawnImpl ?? spawn2;
@@ -33687,15 +33754,16 @@ async function queryDecisions(input, deps = {}) {
     const rec = payload && typeof payload === "object" ? payload : {};
     const flows = normalizeFlows(rec.flows);
     const decisions = normalizeDecisions(rec.decisions);
-    const upgrade = typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : null;
+    const upgrade = typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
     const base = `${flows.length} flow(s), ${decisions.length} decision(s) for ${repo.owner}/${repo.name}.`;
     return {
       status: "ok",
-      detail: upgrade ? `${base} ${upgrade}` : base,
+      detail: base,
       repo,
       flows,
       decisions,
-      deepLink
+      deepLink,
+      ...upgrade ? { upgrade } : {}
     };
   } catch (e) {
     return { status: "error", detail: `query failed (swallowed): ${e.message}` };
@@ -33763,7 +33831,12 @@ async function handleQueryTool(args = {}, deps = {}) {
   const run = deps.queryDecisionsImpl ?? queryDecisions;
   try {
     const outcome = await run({ repo: args.repo, cwd: args.cwd }, deps.queryDeps);
-    return textResult(formatQueryOutcome(outcome, args.question), outcome.status !== "ok");
+    let text = formatQueryOutcome(outcome, args.question);
+    const nudge = await (deps.upgradeNudgeImpl ?? maybeUpgradeNudge)(outcome.upgrade);
+    if (nudge) text += `
+
+${nudge}`;
+    return textResult(text, outcome.status !== "ok");
   } catch (e) {
     return textResult(`query: error \u2014 ${e.message}`, true);
   }
