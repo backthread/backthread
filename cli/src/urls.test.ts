@@ -7,6 +7,7 @@ import {
   workerBaseUrl,
   DEFAULT_WORKER_URL,
   buildInferDecisionsUrl,
+  buildGroundedAskUrl,
   buildReadDecisionsUrl,
   buildOnboardingStateUrl,
   buildRepoDeepLink,
@@ -50,6 +51,15 @@ test('buildInferDecisionsUrl points at /infer-decisions on the worker origin', (
   const u = new URL(url);
   assert.equal(u.origin, DEFAULT_WORKER_URL);
   assert.equal(u.pathname, '/infer-decisions');
+});
+
+test('buildGroundedAskUrl points at /grounded-ask on the worker origin', () => {
+  const u = new URL(buildGroundedAskUrl({} as NodeJS.ProcessEnv));
+  assert.equal(u.origin, DEFAULT_WORKER_URL);
+  assert.equal(u.pathname, '/grounded-ask');
+  // honors the worker-url override for local dev
+  const local = new URL(buildGroundedAskUrl({ BACKTHREAD_WORKER_URL: 'http://localhost:8787' } as NodeJS.ProcessEnv));
+  assert.equal(local.origin, 'http://localhost:8787');
 });
 
 test('buildReadDecisionsUrl points at /read-decisions on the functions origin', () => {

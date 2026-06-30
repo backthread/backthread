@@ -4,26 +4,25 @@ import { queryDecisions, resolveQueryRepo, type QueryDeps } from './query.js';
 import type { BackthreadConfig } from './config.js';
 
 // GUARDRAIL: every test injects a config WITH a device_token + a mocked fetch +
-// (where relevant) a git-remote reader, so NOTHING here hits real auth, network,
-// or a browser. There is no ensureAuth/login seam in the query path at all — query
-// is an explicit user action that simply reports "run `backthread login`" when unauthed.
+// (where relevant) a git-remote reader, so NOTHING here hits real auth, network, or
+// a browser. There is no ensureAuth/login seam in the query path at all — query is
+// an explicit user action that simply reports "run `backthread login`" when unauthed.
 
 const ENV: NodeJS.ProcessEnv = {} as NodeJS.ProcessEnv;
 const CONFIG: BackthreadConfig = { account: 'acc-1', repo: 'acme/app', device_token: 'backthread_pat_secret' };
 
-// A fetch stub that asserts it only ever hits /read-decisions and records the call.
+// A fetch stub that asserts it only ever hits /grounded-ask and records the call.
 function stubFetch(resp: { status: number; body: unknown }): {
   fetch: typeof fetch;
-  calls: Array<{ url: string; body: unknown; auth: string | undefined; version: string | undefined }>;
+  calls: Array<{ url: string; body: any; auth: string | undefined; version: string | undefined }>;
 } {
-  const calls: Array<{ url: string; body: unknown; auth: string | undefined; version: string | undefined }> =
-    [];
+  const calls: Array<{ url: string; body: any; auth: string | undefined; version: string | undefined }> = [];
   const fetchImpl = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     const headers = (init?.headers ?? {}) as Record<string, string>;
     calls.push({ url, body, auth: headers.Authorization, version: headers['x-backthread-version'] });
-    if (!url.includes('/read-decisions')) {
+    if (!url.includes('/grounded-ask')) {
       throw new Error(`unexpected url: ${url}`);
     }
     return {
@@ -47,22 +46,15 @@ function deps(over: Partial<QueryDeps> = {}): QueryDeps {
 const OK_BODY = {
   ok: true,
   repo: { owner: 'acme', name: 'app' },
-  flows: [
-    { id: 'f1', name: 'Checkout', lifecycle: 'active', salience: 9, canonicalFlowId: null },
-    { id: 'f2', name: 'Auth', lifecycle: 'active', salience: 5, canonicalFlowId: 'f1' },
+  question: 'how does checkout work?',
+  answer: 'Checkout uses a queue to decouple ingestion [1].\n\nSources:\n  [1] Use a queue\n\nOpen the "How it works" diagram: https://app.backthread.dev/acme/app',
+  coverage: 'partial',
+  citations: [
+    { n: 1, decisionId: 'd1', title: 'Use a queue', url: 'https://app.backthread.dev/acme/app', moduleIds: ['m1'], decidedAt: '2026-06-01T00:00:00Z' },
   ],
-  decisions: [
-    {
-      id: 'd1',
-      title: 'Use a queue',
-      why: 'decouple ingestion',
-      significance: 8,
-      domainRisk: 'high',
-      decidedAt: '2026-06-01T00:00:00Z',
-      flowIds: ['f1'],
-      moduleIds: ['m1'],
-    },
-  ],
+  inferredSpans: [],
+  retrieved: 12,
+  deepLink: 'https://app.backthread.dev/acme/app',
 };
 
 // --- resolveQueryRepo (pure precedence) --------------------------------------
@@ -97,27 +89,35 @@ test('resolveQueryRepo: returns null when nothing resolves', () => {
   assert.equal(r, null);
 });
 
-// --- queryDecisions ----------------------------------------------------------
+// --- queryDecisions (thin relay to /grounded-ask) ----------------------------
 
-test('queryDecisions: happy path returns ranked flows/decisions + deep-link', async () => {
+test('queryDecisions: happy path relays question + repo, returns the synthesized answer verbatim', async () => {
   const { fetch, calls } = stubFetch({ status: 200, body: OK_BODY });
-  const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  const out = await queryDecisions({ question: 'how does checkout work?', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
 
   assert.equal(out.status, 'ok');
   assert.deepEqual(out.repo, { owner: 'acme', name: 'app' });
-  assert.equal(out.flows?.length, 2);
-  assert.equal(out.decisions?.length, 1);
-  assert.equal(out.flows?.[0].name, 'Checkout');
-  assert.equal(out.decisions?.[0].why, 'decouple ingestion');
+  assert.equal(out.answer, OK_BODY.answer); // rendered verbatim
+  assert.equal(out.coverage, 'partial');
+  assert.equal(out.citations?.length, 1);
+  assert.equal(out.citations?.[0].title, 'Use a queue');
   assert.equal(out.deepLink, 'https://app.backthread.dev/acme/app');
 
-  // exactly one call, to read-decisions, bearer the device token, repo in body.
+  // exactly one call, to grounded-ask, bearer the device token, {question, repo} in body.
   assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /\/read-decisions$/);
+  assert.match(calls[0].url, /\/grounded-ask$/);
   assert.equal(calls[0].auth, 'Bearer backthread_pat_secret');
-  assert.deepEqual(calls[0].body, { repo: { owner: 'acme', name: 'app' } });
+  assert.deepEqual(calls[0].body, { question: 'how does checkout work?', repo: 'acme/app' });
   // The cli stamps its version so the server can run the compat guard.
   assert.match(calls[0].version ?? '', /^\d+\.\d+\.\d+/);
+});
+
+test('queryDecisions: missing question defaults to a general question (server requires one)', async () => {
+  const { fetch, calls } = stubFetch({ status: 200, body: OK_BODY });
+  const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  assert.equal(out.status, 'ok');
+  assert.equal(calls[0].body.question, 'How does this project work?');
+  assert.equal(calls[0].body.repo, 'acme/app');
 });
 
 test('queryDecisions: carries a non-fatal server upgrade nudge in the SEPARATE upgrade field (ARP-734)', async () => {
@@ -125,9 +125,8 @@ test('queryDecisions: carries a non-fatal server upgrade nudge in the SEPARATE u
     status: 200,
     body: { ...OK_BODY, upgrade: 'A newer `backthread` is available — run `npm i -g backthread@latest`.' },
   });
-  const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'ok');
-  // The nudge rides a SEPARATE field now (so the presenter can throttle it) — NOT detail.
   assert.match(out.upgrade ?? '', /newer `backthread` is available/);
   assert.doesNotMatch(out.detail, /newer `backthread` is available/);
 });
@@ -137,7 +136,7 @@ test('queryDecisions: a 426 too-old soft-block prefers the friendly message', as
     status: 426,
     body: { error: 'client_too_old', message: 'Your `backthread` is too old — run `npm i -g backthread@latest`.' },
   });
-  const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'read-failed');
   assert.match(out.detail, /too old/);
   assert.match(out.detail, /npm i -g backthread@latest/);
@@ -146,7 +145,7 @@ test('queryDecisions: a 426 too-old soft-block prefers the friendly message', as
 test('queryDecisions: no device token → no-auth, NO fetch, NO login triggered', async () => {
   let fetched = false;
   const out = await queryDecisions(
-    { repo: 'acme/app' },
+    { question: 'q', repo: 'acme/app' },
     deps({
       readConfigImpl: async () => ({ account: 'a' }), // no device_token
       fetchImpl: (async () => {
@@ -163,7 +162,7 @@ test('queryDecisions: no device token → no-auth, NO fetch, NO login triggered'
 test('queryDecisions: no resolvable repo → no-repo, NO fetch', async () => {
   let fetched = false;
   const out = await queryDecisions(
-    {}, // no repo arg, no cwd
+    { question: 'q' }, // no repo arg, no cwd
     deps({
       readConfigImpl: async () => ({ device_token: 't' }), // no config.repo
       readRemoteImpl: () => null,
@@ -178,18 +177,18 @@ test('queryDecisions: no resolvable repo → no-repo, NO fetch', async () => {
 });
 
 test('queryDecisions: server rejection surfaces read-failed with detail + deep-link', async () => {
-  const { fetch } = stubFetch({ status: 403, body: { error: 'not a member' } });
-  const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  const { fetch } = stubFetch({ status: 403, body: { error: 'not authorized to read this repo' } });
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'read-failed');
   assert.match(out.detail, /403/);
-  assert.match(out.detail, /not a member/);
+  assert.match(out.detail, /not authorized/);
   // deep-link is still returned (repo was resolvable) so the agent can offer it.
   assert.equal(out.deepLink, 'https://app.backthread.dev/acme/app');
 });
 
 test('queryDecisions: network throw surfaces read-failed (never throws)', async () => {
   const out = await queryDecisions(
-    { repo: 'acme/app' },
+    { question: 'q', repo: 'acme/app' },
     deps({
       fetchImpl: (async () => {
         throw new Error('ECONNREFUSED');
@@ -200,25 +199,25 @@ test('queryDecisions: network throw surfaces read-failed (never throws)', async 
   assert.match(out.detail, /ECONNREFUSED/);
 });
 
-test('queryDecisions: malformed payload coerces to empty lists, still ok', async () => {
-  const { fetch } = stubFetch({ status: 200, body: { ok: true, flows: 'nope', decisions: null } });
-  const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
-  assert.equal(out.status, 'ok');
-  assert.deepEqual(out.flows, []);
-  assert.deepEqual(out.decisions, []);
+test('queryDecisions: 200 with no answer degrades to read-failed (never an empty result)', async () => {
+  const { fetch } = stubFetch({ status: 200, body: { ok: true, answer: '' } });
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  assert.equal(out.status, 'read-failed');
+  assert.match(out.detail, /no answer/);
 });
 
-test('queryDecisions: token never appears in the outcome detail', async () => {
+test('queryDecisions: token never appears in the outcome', async () => {
   const { fetch } = stubFetch({ status: 500, body: { error: 'boom' } });
-  const out = await queryDecisions({ repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'read-failed');
   assert.ok(!JSON.stringify(out).includes('backthread_pat_secret'), 'device token leaked into outcome');
 });
 
-test('queryDecisions: BACKTHREAD_APP_URL override flows into the deep-link', async () => {
-  const { fetch } = stubFetch({ status: 200, body: OK_BODY });
+test('queryDecisions: BACKTHREAD_APP_URL override flows into the fallback deep-link', async () => {
+  // server omits deepLink → cli falls back to the locally-built one (app-url override)
+  const { fetch } = stubFetch({ status: 200, body: { ...OK_BODY, deepLink: undefined } });
   const out = await queryDecisions(
-    { repo: 'acme/app' },
+    { question: 'q', repo: 'acme/app' },
     deps({ fetchImpl: fetch, env: { BACKTHREAD_APP_URL: 'http://localhost:5173' } as NodeJS.ProcessEnv }),
   );
   assert.equal(out.deepLink, 'http://localhost:5173/acme/app');

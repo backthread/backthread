@@ -134,7 +134,9 @@ export async function handleQueryTool(
 ): Promise<ToolResult> {
   const run = deps.queryDecisionsImpl ?? queryDecisions;
   try {
-    const outcome = await run({ repo: args.repo, cwd: args.cwd }, deps.queryDeps);
+    // The question is now LOAD-BEARING: the server retrieves + synthesises against
+    // it. Relay it (queryDecisions defaults a general question when absent).
+    const outcome = await run({ question: args.question, repo: args.repo, cwd: args.cwd }, deps.queryDeps);
     let text = formatQueryOutcome(outcome, args.question);
     // ARP-734 — the MCP query tool is an INTERACTIVE surface, so surface the server's
     // upgrade nudge here, throttled to once/day per machine (shared with manual
@@ -148,46 +150,18 @@ export async function handleQueryTool(
   }
 }
 
-/** Render a QueryOutcome into a compact text block for the agent. */
-export function formatQueryOutcome(outcome: QueryOutcome, question?: string): string {
-  if (outcome.status !== 'ok') {
+/**
+ * Render a QueryOutcome for the agent. On success this is the server's synthesized,
+ * cited answer rendered VERBATIM — the cli is a thin relay (ARP-758), so all of the
+ * answer prose, the inline [n] citations, the Sources footer, and the diagram
+ * deep-link are produced server-side. On a non-ok status we surface the terse,
+ * actionable detail.
+ */
+export function formatQueryOutcome(outcome: QueryOutcome, _question?: string): string {
+  if (outcome.status !== 'ok' || !outcome.answer) {
     return `query: ${outcome.status} — ${outcome.detail}`;
   }
-  const lines: string[] = [];
-  const q = question && question.trim().length > 0 ? ` for "${question.trim()}"` : '';
-  const repoSlug = outcome.repo ? `${outcome.repo.owner}/${outcome.repo.name}` : 'this repo';
-  lines.push(`How ${repoSlug} works${q} — salience-ranked from the decision log:`);
-  lines.push('');
-
-  const flows = outcome.flows ?? [];
-  if (flows.length > 0) {
-    lines.push('Flows (most salient first):');
-    for (const f of flows) {
-      const sal = f.salience != null ? ` [salience ${f.salience}]` : '';
-      lines.push(`  - ${f.name} (${f.lifecycle})${sal}`);
-    }
-  } else {
-    lines.push('Flows: none recorded yet.');
-  }
-  lines.push('');
-
-  const decisions = outcome.decisions ?? [];
-  if (decisions.length > 0) {
-    lines.push('Decisions (the "why", most significant first):');
-    for (const d of decisions) {
-      const risk = d.domainRisk ? ` {${d.domainRisk}-risk}` : '';
-      lines.push(`  - ${d.title}${risk}`);
-      if (d.why) lines.push(`      why: ${d.why}`);
-    }
-  } else {
-    lines.push('Decisions: none recorded yet.');
-  }
-  lines.push('');
-
-  if (outcome.deepLink) {
-    lines.push(`Open the "How it works" diagram: ${outcome.deepLink}`);
-  }
-  return lines.join('\n');
+  return outcome.answer;
 }
 
 // --- server wiring -----------------------------------------------------------
@@ -234,14 +208,14 @@ export function buildMcpServer(deps: BuildServerDeps = {}): McpServer {
   server.registerTool(
     'query',
     {
-      title: 'How does X work?',
+      title: 'How does it work? (grounded answer from this repo\'s decision log)',
       description:
-        'Answer "how does X work?" for the current repo: returns the salience-ranked Flows and Decisions (the "why" layer) from your Backthread decision log, plus a deep-link into the web-app "How it works" diagram. Read-only.',
+        'Call this FIRST whenever the user asks how or why any part of THIS repository works, is built, or was decided — before reading source files or guessing. It returns a short, grounded, CITED answer synthesized from the repo\'s Backthread decision log (the captured "why" that the code itself does not contain): the real reasons, trade-offs, and superseded approaches behind the current design. Pass the user\'s question. The answer is ready to relay verbatim — it already cites its sources and flags anything inferred. Read-only; nothing leaves the machine but the question.',
       inputSchema: {
         question: z
           .string()
           .optional()
-          .describe('The "how does X work?" question (the agent narrates the answer against the returned log).'),
+          .describe('The user\'s "how/why does X work?" question, in their words. Load-bearing: the server retrieves and synthesizes the answer against it.'),
         repo: z
           .string()
           .optional()
