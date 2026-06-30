@@ -7017,6 +7017,9 @@ function workerBaseUrl(env = process.env) {
 function buildInferDecisionsUrl(env = process.env) {
   return new URL("/infer-decisions", workerBaseUrl(env)).toString();
 }
+function buildGroundedAskUrl(env = process.env) {
+  return new URL("/grounded-ask", workerBaseUrl(env)).toString();
+}
 var DEFAULT_FUNCTIONS_URL = "https://yempemohevgpctkpstuf.supabase.co/functions/v1";
 function functionsBaseUrl(env = process.env) {
   const override = env.BACKTHREAD_FUNCTIONS_URL;
@@ -7025,9 +7028,6 @@ function functionsBaseUrl(env = process.env) {
 }
 function buildIngestDecisionsUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/ingest-decisions`).toString();
-}
-function buildReadDecisionsUrl(env = process.env) {
-  return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/read-decisions`).toString();
 }
 function buildOnboardingStateUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/onboarding-state`).toString();
@@ -33696,6 +33696,8 @@ var StdioServerTransport = class {
 };
 
 // src/query.ts
+var DEFAULT_QUESTION = "How does this project work?";
+var GROUNDED_ASK_TIMEOUT_MS = 3e4;
 function parseSlug2(slug) {
   const parts = slug.trim().replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
   if (parts.length !== 2) return null;
@@ -33741,9 +33743,12 @@ async function queryDecisions(input, deps = {}) {
       };
     }
     const deepLink = buildRepoDeepLink(repo.owner, repo.name, env);
+    const question = typeof input.question === "string" && input.question.trim().length > 0 ? input.question.trim() : DEFAULT_QUESTION;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
     let res;
     try {
-      res = await doFetch(buildReadDecisionsUrl(env), {
+      res = await doFetch(buildGroundedAskUrl(env), {
         method: "POST",
         headers: {
           // Bearer device token — never logged.
@@ -33752,15 +33757,20 @@ async function queryDecisions(input, deps = {}) {
           ...versionHeaders()
           // x-backthread-version — server-side compat guard
         },
-        body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name } })
+        // The server accepts `repo` as an "owner/name" slug (it re-resolves + gates).
+        body: JSON.stringify({ question, repo: `${repo.owner}/${repo.name}` }),
+        signal: ac.signal
       });
     } catch (e) {
+      const aborted2 = e.name === "AbortError";
       return {
         status: "read-failed",
-        detail: `read request failed: ${e.message}`,
+        detail: aborted2 ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1e3}s \u2014 try again.` : `grounded-ask request failed: ${e.message}`,
         repo,
         deepLink
       };
+    } finally {
+      clearTimeout(timer);
     }
     let payload;
     try {
@@ -33768,60 +33778,53 @@ async function queryDecisions(input, deps = {}) {
     } catch {
       payload = null;
     }
+    const rec = payload && typeof payload === "object" ? payload : {};
     if (!res.ok) {
-      const obj = payload && typeof payload === "object" ? payload : {};
-      const serverErr = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : "error" in obj ? String(obj.error) : `HTTP ${res.status}`;
+      const serverErr = typeof rec.message === "string" && rec.message.length > 0 ? rec.message : "error" in rec ? String(rec.error) : `HTTP ${res.status}`;
       return {
         status: "read-failed",
-        detail: `read rejected (${res.status}): ${serverErr}`,
+        detail: `grounded-ask rejected (${res.status}): ${serverErr}`,
         repo,
         deepLink
       };
     }
-    const rec = payload && typeof payload === "object" ? payload : {};
-    const flows = normalizeFlows(rec.flows);
-    const decisions = normalizeDecisions(rec.decisions);
+    const answer = typeof rec.answer === "string" ? rec.answer : "";
+    if (!answer) {
+      return {
+        status: "read-failed",
+        detail: "grounded-ask returned no answer.",
+        repo,
+        deepLink
+      };
+    }
     const upgrade = typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
-    const base = `${flows.length} flow(s), ${decisions.length} decision(s) for ${repo.owner}/${repo.name}.`;
     return {
       status: "ok",
-      detail: base,
+      detail: `grounded answer (${typeof rec.coverage === "string" ? rec.coverage : "partial"} coverage)`,
       repo,
-      flows,
-      decisions,
-      deepLink,
+      answer,
+      coverage: typeof rec.coverage === "string" ? rec.coverage : void 0,
+      citations: normalizeCitations(rec.citations),
+      inferredSpans: Array.isArray(rec.inferredSpans) ? rec.inferredSpans.map(String) : [],
+      // Prefer the server's deepLink; fall back to the locally-built one.
+      deepLink: typeof rec.deepLink === "string" && rec.deepLink.length > 0 ? rec.deepLink : deepLink,
       ...upgrade ? { upgrade } : {}
     };
   } catch (e) {
     return { status: "error", detail: `query failed (swallowed): ${e.message}` };
   }
 }
-function normalizeFlows(raw) {
+function normalizeCitations(raw) {
   if (!Array.isArray(raw)) return [];
-  return raw.map((f) => {
-    const r = f && typeof f === "object" ? f : {};
+  return raw.map((c) => {
+    const r = c && typeof c === "object" ? c : {};
     return {
-      id: String(r.id ?? ""),
-      name: String(r.name ?? ""),
-      lifecycle: String(r.lifecycle ?? ""),
-      salience: typeof r.salience === "number" ? r.salience : null,
-      canonicalFlowId: typeof r.canonicalFlowId === "string" ? r.canonicalFlowId : null
-    };
-  });
-}
-function normalizeDecisions(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((d) => {
-    const r = d && typeof d === "object" ? d : {};
-    return {
-      id: String(r.id ?? ""),
+      n: typeof r.n === "number" ? r.n : 0,
+      decisionId: String(r.decisionId ?? ""),
       title: String(r.title ?? ""),
-      why: typeof r.why === "string" ? r.why : null,
-      significance: typeof r.significance === "number" ? r.significance : null,
-      domainRisk: typeof r.domainRisk === "string" ? r.domainRisk : null,
-      decidedAt: typeof r.decidedAt === "string" ? r.decidedAt : null,
-      flowIds: Array.isArray(r.flowIds) ? r.flowIds.map(String) : [],
-      moduleIds: Array.isArray(r.moduleIds) ? r.moduleIds.map(String) : []
+      url: String(r.url ?? ""),
+      moduleIds: Array.isArray(r.moduleIds) ? r.moduleIds.map(String) : [],
+      decidedAt: typeof r.decidedAt === "string" ? r.decidedAt : null
     };
   });
 }
@@ -33857,7 +33860,7 @@ function isFailure(o) {
 async function handleQueryTool(args = {}, deps = {}) {
   const run = deps.queryDecisionsImpl ?? queryDecisions;
   try {
-    const outcome = await run({ repo: args.repo, cwd: args.cwd }, deps.queryDeps);
+    const outcome = await run({ question: args.question, repo: args.repo, cwd: args.cwd }, deps.queryDeps);
     let text = formatQueryOutcome(outcome, args.question);
     const nudge = await (deps.upgradeNudgeImpl ?? maybeUpgradeNudge)(outcome.upgrade);
     if (nudge) text += `
@@ -33868,42 +33871,11 @@ ${nudge}`;
     return textResult(`query: error \u2014 ${e.message}`, true);
   }
 }
-function formatQueryOutcome(outcome, question) {
-  if (outcome.status !== "ok") {
+function formatQueryOutcome(outcome, _question) {
+  if (outcome.status !== "ok" || !outcome.answer) {
     return `query: ${outcome.status} \u2014 ${outcome.detail}`;
   }
-  const lines = [];
-  const q = question && question.trim().length > 0 ? ` for "${question.trim()}"` : "";
-  const repoSlug = outcome.repo ? `${outcome.repo.owner}/${outcome.repo.name}` : "this repo";
-  lines.push(`How ${repoSlug} works${q} \u2014 salience-ranked from the decision log:`);
-  lines.push("");
-  const flows = outcome.flows ?? [];
-  if (flows.length > 0) {
-    lines.push("Flows (most salient first):");
-    for (const f of flows) {
-      const sal = f.salience != null ? ` [salience ${f.salience}]` : "";
-      lines.push(`  - ${f.name} (${f.lifecycle})${sal}`);
-    }
-  } else {
-    lines.push("Flows: none recorded yet.");
-  }
-  lines.push("");
-  const decisions = outcome.decisions ?? [];
-  if (decisions.length > 0) {
-    lines.push('Decisions (the "why", most significant first):');
-    for (const d of decisions) {
-      const risk = d.domainRisk ? ` {${d.domainRisk}-risk}` : "";
-      lines.push(`  - ${d.title}${risk}`);
-      if (d.why) lines.push(`      why: ${d.why}`);
-    }
-  } else {
-    lines.push("Decisions: none recorded yet.");
-  }
-  lines.push("");
-  if (outcome.deepLink) {
-    lines.push(`Open the "How it works" diagram: ${outcome.deepLink}`);
-  }
-  return lines.join("\n");
+  return outcome.answer;
 }
 function buildMcpServer(deps = {}) {
   const server = new McpServer({
@@ -33928,10 +33900,10 @@ function buildMcpServer(deps = {}) {
   server.registerTool(
     "query",
     {
-      title: "How does X work?",
-      description: 'Answer "how does X work?" for the current repo: returns the salience-ranked Flows and Decisions (the "why" layer) from your Backthread decision log, plus a deep-link into the web-app "How it works" diagram. Read-only.',
+      title: "How does it work? (grounded answer from this repo's decision log)",
+      description: `Call this FIRST whenever the user asks how or why any part of THIS repository works, is built, or was decided \u2014 before reading source files or guessing. It returns a short, grounded, CITED answer synthesized from the repo's Backthread decision log (the captured "why" that the code itself does not contain): the real reasons, trade-offs, and superseded approaches behind the current design. Pass the user's question. The answer is ready to relay verbatim \u2014 it already cites its sources and flags anything inferred. Read-only; nothing leaves the machine but the question.`,
       inputSchema: {
-        question: external_exports.string().optional().describe('The "how does X work?" question (the agent narrates the answer against the returned log).'),
+        question: external_exports.string().optional().describe(`The user's "how/why does X work?" question, in their words. Load-bearing: the server retrieves and synthesizes the answer against it.`),
         repo: external_exports.string().optional().describe('Optional repo override as "owner/name"; otherwise the configured repo or the cwd git remote.'),
         cwd: external_exports.string().optional().describe("The session's working directory (repo fallback).")
       }

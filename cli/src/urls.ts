@@ -45,6 +45,15 @@ export function buildInferDecisionsUrl(env: NodeJS.ProcessEnv = process.env): st
   return new URL('/infer-decisions', workerBaseUrl(env)).toString();
 }
 
+// Build the /grounded-ask URL the MCP `query` tool POSTs `{ question, repo }` to
+// (ARP-753). On the WORKER origin (not Functions): the worker reuses the bundled
+// LLM stack to retrieve + synthesize a grounded, cited answer server-side, so the
+// cli is a thin relay that renders the returned prose verbatim. Same device-token
+// auth as /infer-decisions.
+export function buildGroundedAskUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/grounded-ask', workerBaseUrl(env)).toString();
+}
+
 // Production Supabase Functions origin — the host of the `ingest-decisions` Edge
 // Function the capture hook POSTs DERIVED decisions to (the persist leg, when
 // the router didn't already persist them server-side). Overridable via

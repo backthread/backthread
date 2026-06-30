@@ -1,54 +1,53 @@
-// query.ts — the "how does X work?" read path behind the MCP
-// `query` tool.
+// query.ts — the "how does X work?" read path behind the MCP `query` tool.
 //
-// This is the in-Claude-Code complement to the in-app materialized Flows list
-// (src/lib/decisionsPanel.ts): per product.md the CC-side MCP query + a future
-// in-app ask-bar are the two query entry points. It reads the salience-ranked
-// Flows + Decisions ("why" layer) for the configured repo from the read
-// endpoint (read-decisions), authenticated with the `backthread_pat_` device
-// token, and returns them PLUS a deep-link into the web-app diagram so the founder
-// can jump from CC to the visual.
+// THIN CLIENT (ARP-753/758): the cli no longer fetches the raw decision log and
+// lets the agent synthesize. It relays the user's question + the resolved repo to
+// the worker's `/grounded-ask` endpoint, which retrieves the question-relevant
+// merged decisions and SYNTHESISES one grounded, cited, never-refusing answer on a
+// cheap model (Gemini Flash-Lite) — then we render that prose VERBATIM. After this
+// one change all prompt/model/retrieval tuning stays server-side (no further cli
+// publishes).
 //
-// READ-ONLY: no DML, no inference, no source ever leaves the machine. The only
-// network hop is the authenticated POST to read-decisions (repo ref in the body,
-// never in a logged URL). Mirrors capture.ts's deps-seam style so tests inject a
-// fake config (WITH a device_token), a mocked fetch, and a git-remote reader — no
+// READ-ONLY: no DML, no inference here, no source ever leaves the machine. The only
+// network hop is the authenticated POST to /grounded-ask (question + repo ref in the
+// body, never in a logged URL). Mirrors capture.ts's deps-seam style so tests inject
+// a fake config (WITH a device_token), a mocked fetch, and a git-remote reader — no
 // live network, no browser, no real auth.
 
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
-import { buildReadDecisionsUrl, buildRepoDeepLink } from './urls.js';
+import { buildGroundedAskUrl, buildRepoDeepLink } from './urls.js';
 import { versionHeaders } from './version.js';
 
-// --- response contract (mirrors read-decisions/shape.ts FlowOut / DecisionOut) ---
-// Kept structural (not imported from supabase/) so the cli package never crosses
-// into the Edge Function bundle. The endpoint already salience-ranks both lists.
+// The general-purpose question used when the caller invokes the tool without one.
+// /grounded-ask requires a non-empty question; this keeps a bare `query` useful.
+const DEFAULT_QUESTION = 'How does this project work?';
 
-export interface QueryFlow {
-  id: string;
-  name: string;
-  lifecycle: string;
-  salience: number | null;
-  canonicalFlowId: string | null;
-}
+// Client-side bound on the grounded-ask round-trip (two server-side Flash-Lite
+// calls). Comfortably above the typical few seconds; abort → a clean read-failed.
+const GROUNDED_ASK_TIMEOUT_MS = 30_000;
 
-export interface QueryDecision {
-  id: string;
+// --- response contract (mirrors the worker /grounded-ask answer contract) -----
+// Kept structural (not imported from worker/) so the cli package never crosses into
+// the worker bundle. The server owns synthesis + the citation shape.
+
+/** A structured citation the server resolved (for future spatial highlighting; the
+ * Tier-1 cli renders the prose `answer`, which already embeds [n] + a Sources list). */
+export interface QueryCitation {
+  n: number;
+  decisionId: string;
   title: string;
-  why: string | null;
-  significance: number | null;
-  domainRisk: string | null;
-  decidedAt: string | null;
-  flowIds: string[];
+  url: string;
   moduleIds: string[];
+  decidedAt: string | null;
 }
 
 /** A terse machine-readable status for the MCP tool layer + tests. */
 export type QueryStatus =
-  | 'ok' // got flows/decisions (either list may be empty — a valid answer)
+  | 'ok' // got a synthesized grounded answer
   | 'no-auth' // no device token in config — the user must `backthread login`
   | 'no-repo' // no repo in config and none resolvable from cwd
-  | 'read-failed' // the read-decisions request failed / was rejected
+  | 'read-failed' // the grounded-ask request failed / was rejected
   | 'error'; // any unexpected failure (swallowed; never thrown)
 
 export interface QueryOutcome {
@@ -57,29 +56,35 @@ export interface QueryOutcome {
   detail: string;
   /** The repo the query ran against (when resolved). */
   repo?: RepoHandle;
-  /** Salience-ranked Flows for the repo (when status === 'ok'). */
-  flows?: QueryFlow[];
-  /** Salience-ranked Decisions for the repo (when status === 'ok'). */
-  decisions?: QueryDecision[];
+  /** The server's synthesized, cited answer — rendered VERBATIM (when status 'ok'). */
+  answer?: string;
+  /** 'full' | 'partial' — the server's coverage flag (when status 'ok'). */
+  coverage?: string;
+  /** Structured citations the answer's [n] markers map to (when status 'ok'). */
+  citations?: QueryCitation[];
+  /** The claims the server flagged inferred (when status 'ok'). */
+  inferredSpans?: string[];
   /** Deep-link into the web-app diagram for the repo (when resolved). */
   deepLink?: string;
   /**
-   * ARP-734 — the server's non-fatal `upgrade` nudge string, when the response carried
-   * one. Kept SEPARATE from `detail` (not baked in) so the interactive presenter (the
-   * MCP query tool) can surface it THROTTLED (once/day per machine), while non-
-   * interactive callers can ignore it. Absent when the server sent no nudge.
+   * ARP-734 — the server's non-fatal `upgrade` nudge string, when present. Kept
+   * SEPARATE from `detail`/`answer` so the interactive presenter (the MCP query
+   * tool) can surface it THROTTLED (once/day per machine). Absent when no nudge.
    */
   upgrade?: string;
 }
 
 export interface QueryInput {
   /**
-   * Optional caller-supplied repo override as `owner/name` or `owner`+`name`.
-   * When absent we resolve the repo from config.repo, then from cwd's git remote.
-   * (The "how does X work?" free-text intent is NOT a repo selector — X is the
-   * subsystem the founder asks about; the answer is the whole salience-ranked log,
-   * which is already "a log, not a firehose". We surface the ranked lists and let
-   * the agent narrate against X; we do not server-side filter by X here.)
+   * The "how does X work?" question. RELAYED to the server, which retrieves the
+   * question-relevant decisions and synthesises the answer (unlike the old path,
+   * the question IS now load-bearing server-side). Defaults to a general question
+   * when absent so a bare `query` still returns something useful.
+   */
+  question?: string;
+  /**
+   * Optional caller-supplied repo override as `owner/name` or `owner`+`name`. When
+   * absent we resolve the repo from config.repo, then from cwd's git remote.
    */
   repo?: string | { owner: string; name: string };
   /** The session's working directory, used as the repo fallback (git remote). */
@@ -137,9 +142,10 @@ export function resolveQueryRepo(
 }
 
 /**
- * Run the "how does X work?" read. NEVER throws — every failure mode resolves with
- * a `QueryOutcome` (the MCP tool layer renders it). The only network hop is the
- * authenticated POST to read-decisions.
+ * Run the "how does X work?" grounded ask. NEVER throws — every failure mode
+ * resolves with a `QueryOutcome` (the MCP tool layer renders it). The only network
+ * hop is the authenticated POST to /grounded-ask; the server does the retrieval +
+ * synthesis and returns ready-to-render prose.
  */
 export async function queryDecisions(
   input: QueryInput,
@@ -174,10 +180,20 @@ export async function queryDecisions(
     }
 
     const deepLink = buildRepoDeepLink(repo.owner, repo.name, env);
+    const question =
+      typeof input.question === 'string' && input.question.trim().length > 0
+        ? input.question.trim()
+        : DEFAULT_QUESTION;
 
+    // Unlike the old read-decisions hop, /grounded-ask does two Flash-Lite calls
+    // server-side, so a response is seconds — bound it with a client-side timeout so
+    // a hung/slow worker yields a clean read-failed instead of stalling the tool
+    // (the MCP host timeout would be the only backstop otherwise).
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
     let res: Response;
     try {
-      res = await doFetch(buildReadDecisionsUrl(env), {
+      res = await doFetch(buildGroundedAskUrl(env), {
         method: 'POST',
         headers: {
           // Bearer device token — never logged.
@@ -185,15 +201,22 @@ export async function queryDecisions(
           'Content-Type': 'application/json',
           ...versionHeaders(), // x-backthread-version — server-side compat guard
         },
-        body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name } }),
+        // The server accepts `repo` as an "owner/name" slug (it re-resolves + gates).
+        body: JSON.stringify({ question, repo: `${repo.owner}/${repo.name}` }),
+        signal: ac.signal,
       });
     } catch (e) {
+      const aborted = (e as Error).name === 'AbortError';
       return {
         status: 'read-failed',
-        detail: `read request failed: ${(e as Error).message}`,
+        detail: aborted
+          ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1000}s — try again.`
+          : `grounded-ask request failed: ${(e as Error).message}`,
         repo,
         deepLink,
       };
+    } finally {
+      clearTimeout(timer);
     }
 
     let payload: unknown;
@@ -202,41 +225,48 @@ export async function queryDecisions(
     } catch {
       payload = null;
     }
+    const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
 
     if (!res.ok) {
-      // A 426 means the server soft-blocked this `backthread` as too old. Prefer
-      // the friendly `message` ("please update backthread …") over the machine error code.
-      const obj = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+      // A 426 means the server soft-blocked this `backthread` as too old. Prefer the
+      // friendly `message` over the machine error code.
       const serverErr =
-        typeof obj.message === 'string' && obj.message.length > 0
-          ? obj.message
-          : 'error' in obj
-            ? String(obj.error)
+        typeof rec.message === 'string' && rec.message.length > 0
+          ? rec.message
+          : 'error' in rec
+            ? String(rec.error)
             : `HTTP ${res.status}`;
       return {
         status: 'read-failed',
-        detail: `read rejected (${res.status}): ${serverErr}`,
+        detail: `grounded-ask rejected (${res.status}): ${serverErr}`,
         repo,
         deepLink,
       };
     }
 
-    const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
-    const flows = normalizeFlows(rec.flows);
-    const decisions = normalizeDecisions(rec.decisions);
+    const answer = typeof rec.answer === 'string' ? rec.answer : '';
+    if (!answer) {
+      // Shouldn't happen (the server never-refuses), but never render an empty tool
+      // result: degrade to a clear read-failed with the diagram link.
+      return {
+        status: 'read-failed',
+        detail: 'grounded-ask returned no answer.',
+        repo,
+        deepLink,
+      };
+    }
 
-    // Non-fatal upgrade nudge for an outdated-but-supported client. Carried as a
-    // SEPARATE field (not baked into `detail`) so the MCP query presenter surfaces it
-    // THROTTLED (ARP-734) and the detached hook never does.
     const upgrade = typeof rec.upgrade === 'string' && rec.upgrade.length > 0 ? rec.upgrade : undefined;
-    const base = `${flows.length} flow(s), ${decisions.length} decision(s) for ${repo.owner}/${repo.name}.`;
     return {
       status: 'ok',
-      detail: base,
+      detail: `grounded answer (${typeof rec.coverage === 'string' ? rec.coverage : 'partial'} coverage)`,
       repo,
-      flows,
-      decisions,
-      deepLink,
+      answer,
+      coverage: typeof rec.coverage === 'string' ? rec.coverage : undefined,
+      citations: normalizeCitations(rec.citations),
+      inferredSpans: Array.isArray(rec.inferredSpans) ? rec.inferredSpans.map(String) : [],
+      // Prefer the server's deepLink; fall back to the locally-built one.
+      deepLink: typeof rec.deepLink === 'string' && rec.deepLink.length > 0 ? rec.deepLink : deepLink,
       ...(upgrade ? { upgrade } : {}),
     };
   } catch (e) {
@@ -244,37 +274,20 @@ export async function queryDecisions(
   }
 }
 
-// --- defensive normalizers ---------------------------------------------------
-// The endpoint owns the shape, but we never trust a network payload blindly:
-// coerce to the contract so a malformed field can't crash the tool layer.
+// --- defensive normalizer ----------------------------------------------------
+// The endpoint owns the shape, but we never trust a network payload blindly.
 
-function normalizeFlows(raw: unknown): QueryFlow[] {
+function normalizeCitations(raw: unknown): QueryCitation[] {
   if (!Array.isArray(raw)) return [];
-  return raw.map((f) => {
-    const r = (f && typeof f === 'object' ? f : {}) as Record<string, unknown>;
+  return raw.map((c) => {
+    const r = (c && typeof c === 'object' ? c : {}) as Record<string, unknown>;
     return {
-      id: String(r.id ?? ''),
-      name: String(r.name ?? ''),
-      lifecycle: String(r.lifecycle ?? ''),
-      salience: typeof r.salience === 'number' ? r.salience : null,
-      canonicalFlowId: typeof r.canonicalFlowId === 'string' ? r.canonicalFlowId : null,
-    };
-  });
-}
-
-function normalizeDecisions(raw: unknown): QueryDecision[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((d) => {
-    const r = (d && typeof d === 'object' ? d : {}) as Record<string, unknown>;
-    return {
-      id: String(r.id ?? ''),
+      n: typeof r.n === 'number' ? r.n : 0,
+      decisionId: String(r.decisionId ?? ''),
       title: String(r.title ?? ''),
-      why: typeof r.why === 'string' ? r.why : null,
-      significance: typeof r.significance === 'number' ? r.significance : null,
-      domainRisk: typeof r.domainRisk === 'string' ? r.domainRisk : null,
-      decidedAt: typeof r.decidedAt === 'string' ? r.decidedAt : null,
-      flowIds: Array.isArray(r.flowIds) ? r.flowIds.map(String) : [],
+      url: String(r.url ?? ''),
       moduleIds: Array.isArray(r.moduleIds) ? r.moduleIds.map(String) : [],
+      decidedAt: typeof r.decidedAt === 'string' ? r.decidedAt : null,
     };
   });
 }

@@ -73,33 +73,22 @@ test('handleCaptureTool: missing transcript_path short-circuits with an actionab
   assert.notEqual(r.isError, true); // not an error — a normal "supply the path" outcome
 });
 
-test('handleQueryTool: renders flows/decisions + deep-link', async () => {
+test('handleQueryTool: renders the server-synthesized answer VERBATIM', async () => {
+  const answer =
+    'Checkout uses a queue to decouple ingestion [1].\n\nSources:\n  [1] Use a queue\n\nOpen the "How it works" diagram: https://app.backthread.dev/acme/app';
   const outcome: QueryOutcome = {
     status: 'ok',
-    detail: '',
+    detail: 'grounded answer (partial coverage)',
     repo: { owner: 'acme', name: 'app' },
-    flows: [{ id: 'f1', name: 'Checkout', lifecycle: 'active', salience: 9, canonicalFlowId: null }],
-    decisions: [
-      {
-        id: 'd1',
-        title: 'Use a queue',
-        why: 'decouple ingestion',
-        significance: 8,
-        domainRisk: 'high',
-        decidedAt: null,
-        flowIds: ['f1'],
-        moduleIds: [],
-      },
-    ],
+    answer,
+    coverage: 'partial',
+    citations: [{ n: 1, decisionId: 'd1', title: 'Use a queue', url: 'https://app.backthread.dev/acme/app', moduleIds: [], decidedAt: null }],
+    inferredSpans: [],
     deepLink: 'https://app.backthread.dev/acme/app',
   };
   const r = await handleQueryTool({ question: 'how does checkout work?' }, { queryDecisionsImpl: async () => outcome });
-  const text = textOf(r);
-  assert.match(text, /how does checkout work\?/);
-  assert.match(text, /Checkout \(active\) \[salience 9\]/);
-  assert.match(text, /Use a queue \{high-risk\}/);
-  assert.match(text, /why: decouple ingestion/);
-  assert.match(text, /https:\/\/app\.backthread\.dev\/acme\/app/);
+  // thin client: the tool text IS the server's answer, byte-for-byte (no re-wrapping).
+  assert.equal(textOf(r), answer);
   assert.notEqual(r.isError, true);
 });
 
@@ -107,10 +96,12 @@ test('handleQueryTool: ARP-734 — appends the throttled upgrade nudge to the qu
   let nudgeArg: string | null | undefined = 'unset';
   const outcome: QueryOutcome = {
     status: 'ok',
-    detail: '1 flow(s), 0 decision(s) for acme/app.',
+    detail: 'grounded answer (partial coverage)',
     repo: { owner: 'acme', name: 'app' },
-    flows: [],
-    decisions: [],
+    answer: 'A grounded answer.',
+    coverage: 'partial',
+    citations: [],
+    inferredSpans: [],
     deepLink: 'https://app.backthread.dev/acme/app',
     upgrade: 'A newer `backthread` is available — npm i -g backthread@latest',
   };
@@ -132,8 +123,7 @@ test('handleQueryTool: ARP-734 — a suppressed (throttled) nudge is NOT appende
     status: 'ok',
     detail: 'x',
     repo: { owner: 'acme', name: 'app' },
-    flows: [],
-    decisions: [],
+    answer: 'A grounded answer.',
     upgrade: 'should be hidden',
   };
   const r = await handleQueryTool(
@@ -152,31 +142,30 @@ test('handleQueryTool: non-ok status flagged as error', async () => {
   assert.match(textOf(r), /no-repo/);
 });
 
-test('handleQueryTool: passes repo + cwd args through to the read', async () => {
+test('handleQueryTool: passes question + repo + cwd args through to the read', async () => {
   let seen: unknown;
   await handleQueryTool(
     { repo: 'o/n', cwd: '/here', question: 'x' },
     {
       queryDecisionsImpl: async (input) => {
         seen = input;
-        return { status: 'ok', detail: '', flows: [], decisions: [], deepLink: 'd' };
+        return { status: 'ok', detail: '', answer: 'a', deepLink: 'd' };
       },
     },
   );
-  assert.deepEqual(seen, { repo: 'o/n', cwd: '/here' });
+  // the question is now load-bearing (relayed to the server), so it must thread through
+  assert.deepEqual(seen, { question: 'x', repo: 'o/n', cwd: '/here' });
 });
 
-test('formatQueryOutcome: empty lists read as "none recorded yet"', () => {
-  const text = formatQueryOutcome({
-    status: 'ok',
-    detail: '',
-    repo: { owner: 'o', name: 'n' },
-    flows: [],
-    decisions: [],
-    deepLink: 'https://app.backthread.dev/o/n',
-  });
-  assert.match(text, /Flows: none recorded yet/);
-  assert.match(text, /Decisions: none recorded yet/);
+test('formatQueryOutcome: ok renders the answer verbatim; non-ok renders the detail', () => {
+  assert.equal(
+    formatQueryOutcome({ status: 'ok', detail: 'x', answer: 'THE ANSWER', deepLink: 'd' }),
+    'THE ANSWER',
+  );
+  assert.match(
+    formatQueryOutcome({ status: 'no-repo', detail: 'no repo here' }),
+    /query: no-repo — no repo here/,
+  );
 });
 
 // --- end-to-end over the SDK's in-memory transport ---------------------------
@@ -200,8 +189,7 @@ test('buildMcpServer: lists exactly capture + query and routes calls to mocked i
           status: 'ok',
           detail: '',
           repo: { owner: 'acme', name: 'app' },
-          flows: [],
-          decisions: [],
+          answer: 'A grounded answer.\n\nOpen the "How it works" diagram: https://app.backthread.dev/acme/app',
           deepLink: 'https://app.backthread.dev/acme/app',
         };
       },
@@ -228,7 +216,7 @@ test('buildMcpServer: lists exactly capture + query and routes calls to mocked i
       name: 'query',
       arguments: { repo: 'acme/app', question: 'how does it work?' },
     });
-    assert.deepEqual(queriedInput, { repo: 'acme/app', cwd: undefined });
+    assert.deepEqual(queriedInput, { question: 'how does it work?', repo: 'acme/app', cwd: undefined });
     assert.match(JSON.stringify(qRes.content), /app\.backthread\.dev\/acme\/app/);
   } finally {
     await client.close();
