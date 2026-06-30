@@ -262,7 +262,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // best-effort telemetry. runSessionStart does only a fast local config read and
       // NEVER throws → always exit 0 with valid JSON, so a hiccup can't break or stall
       // session start. An empty `{}` (not set up) = no injection.
-      setRequestAgent('claude-code');
+      // Honor --agent (the manifest passes claude-code); default to claude-code when
+      // absent — this hook is the CC path, and parseAgent('') would be 'unknown'.
+      const ssAgent = parseAgent(flagValue(rest, '--agent'));
+      setRequestAgent(ssAgent === 'unknown' ? 'claude-code' : ssAgent);
       await readRawHookInput().catch(() => '');
       const output = await runSessionStart();
       console.log(JSON.stringify(output));

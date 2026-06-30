@@ -34123,7 +34123,8 @@ async function main(argv, deps = {}) {
       return 0;
     }
     case "session-start": {
-      setRequestAgent("claude-code");
+      const ssAgent = parseAgent(flagValue(rest, "--agent"));
+      setRequestAgent(ssAgent === "unknown" ? "claude-code" : ssAgent);
       await readRawHookInput().catch(() => "");
       const output = await runSessionStart();
       console.log(JSON.stringify(output));
