@@ -68,12 +68,18 @@ test('only SessionEnd is registered (Stop fires per-turn — intentionally absen
 });
 
 test('slash commands prefer the bundled bin (npx only as a fallback)', () => {
-  for (const name of ['capture.md', 'start.md']) {
+  for (const name of ['capture.md', 'start.md', 'how.md']) {
     const md = readFileSync(join(cliRoot, 'commands', name), 'utf8');
     assert.ok(md.includes(BUNDLE_REF), `${name} references the bundled bin via \${CLAUDE_PLUGIN_ROOT}`);
     // npx is allowed ONLY as the else-branch fallback, never the sole invocation.
     assert.ok(md.includes('else npx backthread'), `${name} keeps an npx fallback`);
   }
+});
+
+test('/backthread:how invokes the `how` subcommand and disables model invocation', () => {
+  const md = readFileSync(join(cliRoot, 'commands', 'how.md'), 'utf8');
+  assert.match(md, /node "\$BT" how --cwd/, 'how.md runs the deterministic `how` subcommand');
+  assert.match(md, /disable-model-invocation:\s*true/, 'how.md is user-typed (model routes via the query tool instead)');
 });
 
 test('the self-contained bundle is committed and is a node script', () => {

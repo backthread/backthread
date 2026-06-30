@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { main, runOnboarding } from './bin/backthread.js';
+import { main, runOnboarding, stripFlag } from './bin/backthread.js';
+import type { QueryOutcome } from './query.js';
 
 // GUARDRAIL: these tests cover the COMMAND DISPATCH only — which subcommand routes
 // where. They inject a fake onboarding runner (runOnboardingImpl) so a bare
@@ -105,6 +106,59 @@ test('an unknown subcommand errors with usage and exits 1 (no onboarding)', asyn
   assert.match(err, /Unknown command: frobnicate/);
   assert.match(err, /Usage:/);
   assert.equal(spy.calls.length, 0, 'an unknown command must not silently onboard');
+});
+
+// --- `how` / `ask` → deterministic grounded ask (ARP-759) --------------------
+
+test('stripFlag removes a flag and its value, leaving the free-text question', () => {
+  assert.deepEqual(stripFlag(['--cwd', '/p', 'does', 'auth', 'work?'], '--cwd'), ['does', 'auth', 'work?']);
+  assert.deepEqual(stripFlag(['how', 'does', 'it', 'work'], '--cwd'), ['how', 'does', 'it', 'work']); // absent → unchanged
+  // a trailing flag with no value is dropped without eating a non-existent value
+  assert.deepEqual(stripFlag(['q', '--cwd'], '--cwd'), ['q']);
+});
+
+test('`backthread how <question>` strips --cwd, relays the question, prints the answer, exits 0', async () => {
+  let seen: unknown;
+  const outcome: QueryOutcome = {
+    status: 'ok',
+    detail: '',
+    answer: 'Auth uses device tokens [1].\n\nOpen the "How it works" diagram: https://app.backthread.dev/o/r',
+  };
+  const { out, result } = await captureConsole(() =>
+    main(['how', '--cwd', '/repo', 'does', 'auth', 'work?'], {
+      queryDecisionsImpl: async (input) => {
+        seen = input;
+        return outcome;
+      },
+    }),
+  );
+  assert.deepEqual(seen, { question: 'does auth work?', cwd: '/repo' });
+  assert.match(out, /Auth uses device tokens \[1\]\./); // the answer is printed verbatim
+  assert.equal(result, 0);
+});
+
+test('`backthread ask` is an alias for `how`', async () => {
+  let called = false;
+  const { result } = await captureConsole(() =>
+    main(['ask', 'how', 'does', 'it', 'work'], {
+      queryDecisionsImpl: async () => {
+        called = true;
+        return { status: 'ok', detail: '', answer: 'a' };
+      },
+    }),
+  );
+  assert.equal(called, true);
+  assert.equal(result, 0);
+});
+
+test('`backthread how` with a non-ok outcome exits 1 (failure visible)', async () => {
+  const { out, result } = await captureConsole(() =>
+    main(['how', 'q'], {
+      queryDecisionsImpl: async () => ({ status: 'no-auth', detail: 'run `backthread login`' }),
+    }),
+  );
+  assert.equal(result, 1);
+  assert.match(out, /no-auth/);
 });
 
 // --- the default runOnboarding is wired (smoke: it is a function) ------------
