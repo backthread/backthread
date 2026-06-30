@@ -41,7 +41,8 @@ import { readHookInput, readRawHookInput, runCapture } from '../capture.js';
 import { parseManualArgs, runManualCapture } from '../captureCommand.js';
 import { parseAgent, runFromHook } from '../fromHook.js';
 import { setRequestAgent } from '../version.js';
-import { startMcpServer } from '../mcp.js';
+import { startMcpServer, formatQueryOutcome } from '../mcp.js';
+import { queryDecisions } from '../query.js';
 import { runInstall } from '../install.js';
 import { parseInstallAgent } from '../installAgent.js';
 import { runStart } from '../firstRun.js';
@@ -62,6 +63,9 @@ Usage:
                           (no browser needed — codes expire in ~10 minutes)
   backthread login --device     Headless / SSH login (device-code flow — coming soon)
   backthread whoami             Show the current device's config (token is never printed)
+  backthread how <question>     Ask how/why something in this repo works — prints a
+                          grounded, cited answer from your Backthread decision log
+                          (backs the /backthread:how slash command). [--cwd <path>]
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
   backthread capture --from-hook
                           Shared multi-agent hook entrypoint: read the hook payload off
@@ -112,6 +116,16 @@ function flagValue(rest: string[], flag: string): string | undefined {
   return value;
 }
 
+/** Return args with `flag` and its value removed — so the remaining free-text (e.g.
+ * a `backthread how` question) can be joined without the `--cwd …` pair leaking in. */
+export function stripFlag(rest: string[], flag: string): string[] {
+  const i = rest.indexOf(flag);
+  if (i === -1) return rest;
+  // drop the flag and (when present + not itself a flag) its value
+  const dropValue = rest[i + 1] !== undefined && !rest[i + 1].startsWith('--');
+  return [...rest.slice(0, i), ...rest.slice(i + (dropValue ? 2 : 1))];
+}
+
 /**
  * The unified onboarding front door, shared by a bare `npx backthread` and the
  * explicit `backthread start` (and its `/backthread:start` slash command). Idempotent:
@@ -137,6 +151,8 @@ export async function runOnboarding(rest: string[]): Promise<number> {
 export interface MainDeps {
   /** The unified onboarding runner (bare `npx backthread` + `start`). Defaults to runOnboarding. */
   runOnboardingImpl?: (rest: string[]) => Promise<number>;
+  /** Test seam for the `how`/`ask` grounded-ask dispatch. Defaults to queryDecisions. */
+  queryDecisionsImpl?: typeof queryDecisions;
 }
 
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number | null> {
@@ -278,6 +294,22 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
         skipBackfill: rest.includes('--skip-backfill'),
       });
       return result.exitCode;
+    }
+    case 'how':
+    case 'ask': {
+      // The /backthread:how slash command (ARP-759) — DETERMINISTIC grounded ask.
+      // The free-text args ARE the question; --cwd resolves the repo (the slash host
+      // passes the session cwd). Relays to the worker's /grounded-ask (via
+      // queryDecisions) and prints the synthesized, cited answer to STDOUT for the
+      // host (or the user) to read — the reliable Tier-1 path that never depends on
+      // the agent's probabilistic tool routing. Exits non-zero on a non-ok outcome
+      // (not-logged-in / no-repo / read-failed) so a failure is visible.
+      const query = deps.queryDecisionsImpl ?? queryDecisions;
+      const cwd = flagValue(rest, '--cwd') ?? process.cwd();
+      const question = stripFlag(rest, '--cwd').join(' ').trim();
+      const outcome = await query({ question, cwd });
+      console.log(formatQueryOutcome(outcome, question));
+      return outcome.status === 'ok' ? 0 : 1;
     }
     case undefined:
       // BARE `npx backthread` (no subcommand) IS the canonical unified front door

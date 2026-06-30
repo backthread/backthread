@@ -33935,6 +33935,9 @@ Usage:
                           (no browser needed \u2014 codes expire in ~10 minutes)
   backthread login --device     Headless / SSH login (device-code flow \u2014 coming soon)
   backthread whoami             Show the current device's config (token is never printed)
+  backthread how <question>     Ask how/why something in this repo works \u2014 prints a
+                          grounded, cited answer from your Backthread decision log
+                          (backs the /backthread:how slash command). [--cwd <path>]
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
   backthread capture --from-hook
                           Shared multi-agent hook entrypoint: read the hook payload off
@@ -33968,6 +33971,12 @@ function flagValue(rest, flag) {
   const value = rest[i + 1];
   if (!value || value.startsWith("--")) return void 0;
   return value;
+}
+function stripFlag(rest, flag) {
+  const i = rest.indexOf(flag);
+  if (i === -1) return rest;
+  const dropValue = rest[i + 1] !== void 0 && !rest[i + 1].startsWith("--");
+  return [...rest.slice(0, i), ...rest.slice(i + (dropValue ? 2 : 1))];
 }
 async function runOnboarding(rest) {
   const claim = parseClaimFlag(rest);
@@ -34055,6 +34064,15 @@ async function main(argv, deps = {}) {
       });
       return result.exitCode;
     }
+    case "how":
+    case "ask": {
+      const query = deps.queryDecisionsImpl ?? queryDecisions;
+      const cwd = flagValue(rest, "--cwd") ?? process.cwd();
+      const question = stripFlag(rest, "--cwd").join(" ").trim();
+      const outcome = await query({ question, cwd });
+      console.log(formatQueryOutcome(outcome, question));
+      return outcome.status === "ok" ? 0 : 1;
+    }
     case void 0:
       return onboarding(rest);
     case "help":
@@ -34098,5 +34116,6 @@ if (isEntryPoint()) {
 }
 export {
   main,
-  runOnboarding
+  runOnboarding,
+  stripFlag
 };
