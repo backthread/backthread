@@ -199,6 +199,21 @@ test('queryDecisions: network throw surfaces read-failed (never throws)', async 
   assert.match(out.detail, /ECONNREFUSED/);
 });
 
+test('queryDecisions: a timeout (AbortError) surfaces a clean read-failed', async () => {
+  const out = await queryDecisions(
+    { question: 'q', repo: 'acme/app' },
+    deps({
+      fetchImpl: (async () => {
+        const e = new Error('aborted');
+        e.name = 'AbortError';
+        throw e;
+      }) as typeof fetch,
+    }),
+  );
+  assert.equal(out.status, 'read-failed');
+  assert.match(out.detail, /timed out/);
+});
+
 test('queryDecisions: 200 with no answer degrades to read-failed (never an empty result)', async () => {
   const { fetch } = stubFetch({ status: 200, body: { ok: true, answer: '' } });
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));

@@ -23,6 +23,10 @@ import { versionHeaders } from './version.js';
 // /grounded-ask requires a non-empty question; this keeps a bare `query` useful.
 const DEFAULT_QUESTION = 'How does this project work?';
 
+// Client-side bound on the grounded-ask round-trip (two server-side Flash-Lite
+// calls). Comfortably above the typical few seconds; abort → a clean read-failed.
+const GROUNDED_ASK_TIMEOUT_MS = 30_000;
+
 // --- response contract (mirrors the worker /grounded-ask answer contract) -----
 // Kept structural (not imported from worker/) so the cli package never crosses into
 // the worker bundle. The server owns synthesis + the citation shape.
@@ -181,6 +185,12 @@ export async function queryDecisions(
         ? input.question.trim()
         : DEFAULT_QUESTION;
 
+    // Unlike the old read-decisions hop, /grounded-ask does two Flash-Lite calls
+    // server-side, so a response is seconds — bound it with a client-side timeout so
+    // a hung/slow worker yields a clean read-failed instead of stalling the tool
+    // (the MCP host timeout would be the only backstop otherwise).
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
     let res: Response;
     try {
       res = await doFetch(buildGroundedAskUrl(env), {
@@ -193,14 +203,20 @@ export async function queryDecisions(
         },
         // The server accepts `repo` as an "owner/name" slug (it re-resolves + gates).
         body: JSON.stringify({ question, repo: `${repo.owner}/${repo.name}` }),
+        signal: ac.signal,
       });
     } catch (e) {
+      const aborted = (e as Error).name === 'AbortError';
       return {
         status: 'read-failed',
-        detail: `grounded-ask request failed: ${(e as Error).message}`,
+        detail: aborted
+          ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1000}s — try again.`
+          : `grounded-ask request failed: ${(e as Error).message}`,
         repo,
         deepLink,
       };
+    } finally {
+      clearTimeout(timer);
     }
 
     let payload: unknown;
