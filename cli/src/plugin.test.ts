@@ -62,9 +62,21 @@ test('the SessionEnd hook runs the bundled bin, not npx, and detaches', () => {
   assert.ok(cmd.includes('--detach'), 'hook detaches so a slow capture is not SIGTERMd (ARP-682)');
 });
 
-test('only SessionEnd is registered (Stop fires per-turn — intentionally absent)', () => {
+test('the manifest registers SessionStart + SessionEnd only (Stop fires per-turn — intentionally absent)', () => {
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
-  assert.deepEqual(Object.keys(hooks.hooks), ['SessionEnd']);
+  // ARP-763 added SessionStart (ambient routing); Stop stays out (would capture
+  // every turn). Order doesn't matter to CC, so compare as a set.
+  assert.deepEqual([...Object.keys(hooks.hooks)].sort(), ['SessionEnd', 'SessionStart']);
+});
+
+test('the SessionStart routing hook runs the bundled bin SYNCHRONOUSLY (ARP-763)', () => {
+  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
+  const cmd: string = hooks.hooks.SessionStart[0].hooks[0].command;
+  assert.ok(cmd.includes(BUNDLE_REF), 'hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
+  assert.ok(!/\bnpx\b/.test(cmd), 'hook must NOT use npx (a sync session-start would block on the resolve)');
+  assert.ok(cmd.includes('session-start'), 'hook routes through the session-start command');
+  assert.ok(cmd.includes('--agent claude-code'), 'hook stamps the claude-code provider');
+  assert.ok(!cmd.includes('--detach'), 'SessionStart must NOT detach — CC reads stdout for the additionalContext');
 });
 
 test('slash commands prefer the bundled bin (npx only as a fallback)', () => {

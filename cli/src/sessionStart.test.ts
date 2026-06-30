@@ -1,0 +1,60 @@
+// ARP-763 — SessionStart ambient-routing hook tests.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  ROUTING_CONTEXT,
+  buildSessionStartOutput,
+  runSessionStart,
+} from './sessionStart.js';
+import type { BackthreadConfig } from './config.js';
+
+test('buildSessionStartOutput: set up → injects the routing instruction', () => {
+  const out = buildSessionStartOutput(true);
+  assert.equal(out.hookSpecificOutput?.hookEventName, 'SessionStart');
+  assert.equal(out.hookSpecificOutput?.additionalContext, ROUTING_CONTEXT);
+  // the instruction tells Claude to call the query tool first, before grepping
+  assert.match(ROUTING_CONTEXT, /call the backthread `query` tool FIRST/);
+  assert.match(ROUTING_CONTEXT, /before grepping/);
+});
+
+test('buildSessionStartOutput: not set up → no injection (empty object)', () => {
+  assert.deepEqual(buildSessionStartOutput(false), {});
+});
+
+test('runSessionStart: device token present → injects + records the opportunity', async () => {
+  let recorded = 0;
+  const out = await runSessionStart({
+    readConfig: async () => ({ device_token: 'backthread_pat_x' }) as BackthreadConfig,
+    recordRoutingInjected: async () => { recorded += 1; },
+  });
+  assert.equal(out.hookSpecificOutput?.additionalContext, ROUTING_CONTEXT);
+  assert.equal(recorded, 1); // the injection was counted
+});
+
+test('runSessionStart: no device token → no injection, does NOT record', async () => {
+  let recorded = 0;
+  const out = await runSessionStart({
+    readConfig: async () => ({}) as BackthreadConfig,
+    recordRoutingInjected: async () => { recorded += 1; },
+  });
+  assert.deepEqual(out, {});
+  assert.equal(recorded, 0);
+});
+
+test('runSessionStart: a config read error degrades to no injection (never throws)', async () => {
+  const out = await runSessionStart({
+    readConfig: async () => { throw new Error('unreadable config'); },
+    recordRoutingInjected: async () => {},
+  });
+  assert.deepEqual(out, {});
+});
+
+test('runSessionStart: a stats-record error never breaks the injection', async () => {
+  const out = await runSessionStart({
+    readConfig: async () => ({ device_token: 'backthread_pat_x' }) as BackthreadConfig,
+    recordRoutingInjected: async () => { throw new Error('disk full'); },
+  });
+  // still injected — the record failure is swallowed
+  assert.equal(out.hookSpecificOutput?.additionalContext, ROUTING_CONTEXT);
+});
