@@ -47,6 +47,7 @@ import { runInstall } from '../install.js';
 import { parseInstallAgent } from '../installAgent.js';
 import { runStart } from '../firstRun.js';
 import { detectEntry } from '../entry.js';
+import { runSessionStart } from '../sessionStart.js';
 
 const USAGE = `backthread — capture the "why" of your AI-coded changes
 
@@ -249,6 +250,25 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
         // Belt-and-braces: a capture problem can never fail the session.
         console.error(`backthread capture: error (swallowed) — ${(e as Error).message ?? e}`);
       }
+      return 0;
+    }
+    case 'session-start': {
+      // The Claude Code SessionStart hook (ARP-763) — AMBIENT ROUTING. Injects a
+      // one-time instruction telling Claude to call `query` FIRST on how/why
+      // questions (before grepping). SYNCHRONOUS, NOT detached: CC reads THIS
+      // command's STDOUT for hookSpecificOutput.additionalContext, so we print it
+      // here. Drain the SessionStart payload off stdin (we don't need its fields, but
+      // a hook must consume its stdin) and stamp the provider for the stats path's
+      // best-effort telemetry. runSessionStart does only a fast local config read and
+      // NEVER throws → always exit 0 with valid JSON, so a hiccup can't break or stall
+      // session start. An empty `{}` (not set up) = no injection.
+      // Honor --agent (the manifest passes claude-code); default to claude-code when
+      // absent — this hook is the CC path, and parseAgent('') would be 'unknown'.
+      const ssAgent = parseAgent(flagValue(rest, '--agent'));
+      setRequestAgent(ssAgent === 'unknown' ? 'claude-code' : ssAgent);
+      await readRawHookInput().catch(() => '');
+      const output = await runSessionStart();
+      console.log(JSON.stringify(output));
       return 0;
     }
     case 'mcp': {

@@ -33919,6 +33919,87 @@ async function startMcpServer(deps = {}) {
   return server;
 }
 
+// src/routingStats.ts
+import { join as join12 } from "node:path";
+import { readFile as readFile11, writeFile as writeFile9, mkdir as mkdir9, chmod as chmod8 } from "node:fs/promises";
+var STATS_FILE = "routing-stats.json";
+function statsPath(env) {
+  return join12(configDir(env), STATS_FILE);
+}
+async function readRoutingStats(deps = {}) {
+  const env = deps.env ?? process.env;
+  const read = deps.readFileImpl ?? readFile11;
+  try {
+    const raw = await read(statsPath(env), "utf8");
+    const obj = JSON.parse(raw);
+    return {
+      injected: typeof obj.injected === "number" && obj.injected >= 0 ? Math.floor(obj.injected) : 0,
+      lastInjectedAt: typeof obj.lastInjectedAt === "string" ? obj.lastInjectedAt : void 0
+    };
+  } catch {
+    return { injected: 0 };
+  }
+}
+async function recordRoutingInjected(deps = {}) {
+  const env = deps.env ?? process.env;
+  const now = deps.now ?? (() => /* @__PURE__ */ new Date());
+  const write = deps.writeFileImpl ?? writeFile9;
+  const mkdirp = deps.mkdirImpl ?? mkdir9;
+  const chmodp = deps.chmodImpl ?? chmod8;
+  try {
+    const prev = await readRoutingStats(deps);
+    const next = { injected: prev.injected + 1, lastInjectedAt: now().toISOString() };
+    await mkdirp(configDir(env), { recursive: true, mode: DIR_MODE });
+    await write(statsPath(env), `${JSON.stringify(next, null, 2)}
+`, { mode: CONFIG_MODE });
+    await chmodp(statsPath(env), CONFIG_MODE).catch(() => {
+    });
+  } catch {
+  }
+}
+
+// src/sessionStart.ts
+var ROUTING_CONTEXT = [
+  'This repository is set up with Backthread, which has captured the "why" behind its',
+  "changes into a decision log. The backthread `query` MCP tool (and the",
+  '`/backthread:how` slash command) answer "how does X work?" and "why was Y decided?"',
+  "with a short, CITED answer synthesized from that log \u2014 the real reasons, trade-offs,",
+  "and superseded approaches the source code itself does not contain.",
+  "",
+  "When the user asks how or why any part of THIS codebase works, is structured, or was",
+  "decided, call the backthread `query` tool FIRST \u2014 before grepping or reading source",
+  "files. Pass the user's question and relay the cited answer it returns; only read",
+  "source afterwards if it didn't cover what you need."
+].join("\n");
+function buildSessionStartOutput(isSetUp) {
+  if (!isSetUp) return {};
+  return {
+    hookSpecificOutput: {
+      hookEventName: "SessionStart",
+      additionalContext: ROUTING_CONTEXT
+    }
+  };
+}
+async function runSessionStart(deps = {}) {
+  const readConfig2 = deps.readConfig ?? readConfig;
+  const record2 = deps.recordRoutingInjected ?? recordRoutingInjected;
+  let isSetUp = false;
+  try {
+    const cfg = await readConfig2();
+    isSetUp = !!cfg.device_token;
+  } catch {
+    isSetUp = false;
+  }
+  const output = buildSessionStartOutput(isSetUp);
+  if (output.hookSpecificOutput) {
+    try {
+      await record2();
+    } catch {
+    }
+  }
+  return output;
+}
+
 // src/bin/backthread.ts
 var USAGE = `backthread \u2014 capture the "why" of your AI-coded changes
 
@@ -34039,6 +34120,14 @@ async function main(argv, deps = {}) {
       } catch (e) {
         console.error(`backthread capture: error (swallowed) \u2014 ${e.message ?? e}`);
       }
+      return 0;
+    }
+    case "session-start": {
+      const ssAgent = parseAgent(flagValue(rest, "--agent"));
+      setRequestAgent(ssAgent === "unknown" ? "claude-code" : ssAgent);
+      await readRawHookInput().catch(() => "");
+      const output = await runSessionStart();
+      console.log(JSON.stringify(output));
       return 0;
     }
     case "mcp": {
