@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 import { login } from '../login.js';
 import { runLogout } from '../logout.js';
+import { runUpdate } from '../update.js';
 import { readConfig } from '../config.js';
 import { readHookInput, readRawHookInput, runCapture } from '../capture.js';
 import { parseManualArgs, runManualCapture } from '../captureCommand.js';
@@ -80,6 +81,8 @@ Manage
   backthread install            Set up capture for this repo (login + hook + backfill history)
                           [--claim <code>] [--agent <codex|cursor|gemini>] [--skip-auth]
                           [--skip-hook] [--skip-backfill]
+  backthread update             Update a global install to the latest (also -u). npx is
+                          always latest already; the plugin updates via /plugin update.
   backthread version            Print the installed version (also --version, -v)
   backthread help               Show this message (also --help, -h)
 
@@ -100,6 +103,7 @@ const KNOWN_COMMANDS = [
   'capture',
   'mcp',
   'install',
+  'update',
   'version',
   'help',
 ] as const;
@@ -176,6 +180,8 @@ export interface MainDeps {
   queryDecisionsImpl?: typeof queryDecisions;
   /** Test seam for `logout` (touches ~/.backthread on disk). Defaults to runLogout. */
   runLogoutImpl?: typeof runLogout;
+  /** Test seam for `update` (spawns npm / touches the network). Defaults to runUpdate. */
+  runUpdateImpl?: typeof runUpdate;
 }
 
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number | null> {
@@ -369,6 +375,18 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // for a returning user; entry-point-aware order (terminal-first by default, web-
       // initiated when a `--claim` code is present). `backthread help` still shows usage.
       return onboarding(rest);
+    case 'update':
+    case '--update':
+    case '-u': {
+      // Explicit on-demand self-update. Context-aware (see update.ts): a global install
+      // gets `npm i -g backthread@latest` (old → new, nudge quieted); an ephemeral npx run
+      // or the CC-plugin copy is EXPLAINED, not faked. Progress → stderr, final summary →
+      // stdout; exit non-zero only on a genuine npm/offline failure (current install intact).
+      const updateImpl = deps.runUpdateImpl ?? runUpdate;
+      const result = await updateImpl();
+      console.log(result.message);
+      return result.ok ? 0 : 1;
+    }
     case 'version':
     case '--version':
     case '-v':

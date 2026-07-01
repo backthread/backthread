@@ -136,6 +136,37 @@ test('`backthread logout` propagates a non-ok result as exit 1', async () => {
   assert.equal(result, 1);
 });
 
+// --- update → routes to the update runner (seam keeps this off npm/network) ---
+
+for (const arg of ['update', '--update', '-u']) {
+  test(`\`backthread ${arg}\` routes to the update runner, never onboards`, async () => {
+    const spy = onboardingSpy(0);
+    let called = 0;
+    const { out, result } = await captureConsole(() =>
+      main([arg], {
+        runOnboardingImpl: spy.impl,
+        runUpdateImpl: async () => {
+          called += 1;
+          return { ok: true, context: 'global', updated: true, message: 'Updated Backthread 0.7.0 → 0.8.0.' };
+        },
+      }),
+    );
+    assert.equal(called, 1, 'update ran exactly once');
+    assert.match(out, /Updated Backthread/);
+    assert.equal(result, 0);
+    assert.equal(spy.calls.length, 0, 'update (incl. the leading-dash -u/--update) never onboards');
+  });
+}
+
+test('`backthread update` propagates a non-ok result as exit 1', async () => {
+  const { result } = await captureConsole(() =>
+    main(['update'], {
+      runUpdateImpl: async () => ({ ok: false, context: 'global', updated: false, message: 'offline' }),
+    }),
+  );
+  assert.equal(result, 1);
+});
+
 // --- unknown subcommand → friendly pointer (not a usage wall), exit 1 ---------
 
 test('an unknown subcommand points at help and exits 1 (no onboarding, no usage wall)', async () => {

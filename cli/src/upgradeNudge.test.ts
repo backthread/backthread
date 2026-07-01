@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   maybeUpgradeNudge,
+  resetUpgradeNudge,
   upgradeNudgeStatePath,
   UPGRADE_NUDGE_THROTTLE_MS,
 } from './upgradeNudge.js';
@@ -81,4 +82,25 @@ test('a corrupt state file degrades to showing once (never throws)', async () =>
   await mkdir(env.BACKTHREAD_CONFIG_DIR!, { recursive: true });
   await writeFile(upgradeNudgeStatePath(env), 'not json{{{');
   assert.equal(await maybeUpgradeNudge(MSG, { env, now: () => 1 }), MSG);
+});
+
+// --- resetUpgradeNudge (called by `backthread update`) ------------------------
+
+test('resetUpgradeNudge records now → suppresses the next nudge for the full window', async () => {
+  const env = await tempEnv();
+  const t0 = 5_000_000;
+  await resetUpgradeNudge({ env, now: () => t0 });
+  // State should now say "last nudged at t0" (a quiet window), NOT be cleared.
+  const raw = await readFile(upgradeNudgeStatePath(env), 'utf8');
+  assert.deepEqual(JSON.parse(raw), { lastUpgradeNudgeAt: t0 });
+  // A nudge inside the window is suppressed…
+  assert.equal(await maybeUpgradeNudge(MSG, { env, now: () => t0 + 1000 }), null);
+  // …and shows again only after 24h.
+  assert.equal(await maybeUpgradeNudge(MSG, { env, now: () => t0 + UPGRADE_NUDGE_THROTTLE_MS }), MSG);
+});
+
+test('resetUpgradeNudge never throws on an unwritable state dir', async () => {
+  // A bogus config dir (empty string forces the default path logic; point it at a file to
+  // make writes fail) must not throw — reset is best-effort.
+  await resetUpgradeNudge({ env: { BACKTHREAD_CONFIG_DIR: '/dev/null/nope' }, now: () => 1 });
 });
