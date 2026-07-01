@@ -38,6 +38,7 @@ import { realpathSync } from 'node:fs';
 import { login } from '../login.js';
 import { runLogout } from '../logout.js';
 import { runUpdate } from '../update.js';
+import { runDoctor } from '../doctor.js';
 import { readConfig } from '../config.js';
 import { readHookInput, readRawHookInput, runCapture } from '../capture.js';
 import { parseManualArgs, runManualCapture } from '../captureCommand.js';
@@ -83,6 +84,8 @@ Manage
                           [--skip-hook] [--skip-backfill]
   backthread update             Update a global install to the latest (also -u). npx is
                           always latest already; the plugin updates via /plugin update.
+  backthread doctor             Diagnose your setup — auth, capture hook, connectivity,
+                          version, repo. Prints ✓/✗ with fix hints; exits non-zero if broken.
   backthread version            Print the installed version (also --version, -v)
   backthread help               Show this message (also --help, -h)
 
@@ -104,6 +107,7 @@ const KNOWN_COMMANDS = [
   'mcp',
   'install',
   'update',
+  'doctor',
   'version',
   'help',
 ] as const;
@@ -182,6 +186,8 @@ export interface MainDeps {
   runLogoutImpl?: typeof runLogout;
   /** Test seam for `update` (spawns npm / touches the network). Defaults to runUpdate. */
   runUpdateImpl?: typeof runUpdate;
+  /** Test seam for `doctor` (reads config/hook files, fetch + npm). Defaults to runDoctor. */
+  runDoctorImpl?: typeof runDoctor;
 }
 
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number | null> {
@@ -216,6 +222,16 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       const result = await logoutImpl();
       console.log(result.message);
       return result.ok ? 0 : 1;
+    }
+    case 'doctor': {
+      // One-shot diagnostics: ✓/✗/⚠/ℹ over auth, config perms, repo, capture-hook wiring
+      // (incl. the ARP-680 project-scope trap), connectivity, and version. READ-ONLY + safe
+      // (never prints the token). Exits non-zero only when a CRITICAL check (auth) fails, so
+      // it's usable in a setup script. runDoctor never throws.
+      const doctorImpl = deps.runDoctorImpl ?? runDoctor;
+      const result = await doctorImpl();
+      console.log(result.text);
+      return result.exitCode;
     }
     case 'capture': {
       // THREE modes share `backthread capture`:

@@ -7377,7 +7377,6 @@ function configLocationHint3(env) {
 }
 
 // src/update.ts
-import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 
 // src/upgradeNudge.ts
@@ -7442,25 +7441,9 @@ async function resetUpgradeNudge(deps = {}) {
   }
 }
 
-// src/update.ts
-var SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
-var NPX_SEGMENT_RE = /(?:^|[\\/])_npx[\\/]/;
-function detectInstallContext(env, scriptPath) {
-  if (typeof env.CLAUDE_PLUGIN_ROOT === "string" && env.CLAUDE_PLUGIN_ROOT.trim().length > 0) return "plugin";
-  if (scriptPath && NPX_SEGMENT_RE.test(scriptPath)) return "npx";
-  return "global";
-}
-function resolveScriptPath() {
-  const raw = process.argv[1] ?? "";
-  if (!raw) return "";
-  if (NPX_SEGMENT_RE.test(raw)) return raw;
-  try {
-    return realpathSync(raw);
-  } catch {
-    return raw;
-  }
-}
-function realRunNpm(args) {
+// src/npm.ts
+import { execFile } from "node:child_process";
+function runNpm(args) {
   const isWin = process.platform === "win32";
   const npm = isWin ? "npm.cmd" : "npm";
   return new Promise((resolve) => {
@@ -7482,6 +7465,25 @@ function realRunNpm(args) {
     }
   });
 }
+
+// src/update.ts
+var SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+var NPX_SEGMENT_RE = /(?:^|[\\/])_npx[\\/]/;
+function detectInstallContext(env, scriptPath) {
+  if (typeof env.CLAUDE_PLUGIN_ROOT === "string" && env.CLAUDE_PLUGIN_ROOT.trim().length > 0) return "plugin";
+  if (scriptPath && NPX_SEGMENT_RE.test(scriptPath)) return "npx";
+  return "global";
+}
+function resolveScriptPath() {
+  const raw = process.argv[1] ?? "";
+  if (!raw) return "";
+  if (NPX_SEGMENT_RE.test(raw)) return raw;
+  try {
+    return realpathSync(raw);
+  } catch {
+    return raw;
+  }
+}
 function firstLine(s) {
   const line = s.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
   return line ?? "unknown npm error";
@@ -7490,7 +7492,7 @@ async function runUpdate(deps = {}) {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m) => console.error(m));
   const current = (deps.currentVersion ?? cliVersion)();
-  const runNpm = deps.runNpm ?? realRunNpm;
+  const runNpm2 = deps.runNpm ?? runNpm;
   const resetNudge = deps.resetNudge ?? ((e) => resetUpgradeNudge({ env: e }));
   const scriptPath = deps.scriptPath ?? resolveScriptPath();
   const context = detectInstallContext(env, scriptPath);
@@ -7511,7 +7513,7 @@ async function runUpdate(deps = {}) {
     };
   }
   log("Checking npm for the latest backthread\u2026");
-  const view = await runNpm(["view", "backthread", "version"]);
+  const view = await runNpm2(["view", "backthread", "version"]);
   if (!view.ok || !SEMVER_RE.test(view.stdout)) {
     const why = view.ok ? `unexpected npm output "${view.stdout}"` : firstLine(view.stderr);
     return {
@@ -7527,7 +7529,7 @@ async function runUpdate(deps = {}) {
     return { ok: true, context, updated: false, message: `Backthread is already up to date (${current} is the latest).` };
   }
   log(`Updating backthread ${current} \u2192 ${latest} (npm i -g backthread@latest)\u2026`);
-  const install = await runNpm(["install", "-g", "backthread@latest"]);
+  const install = await runNpm2(["install", "-g", "backthread@latest"]);
   if (!install.ok) {
     return {
       ok: false,
@@ -7546,8 +7548,207 @@ Your current install (${current}) is untouched. If this is a permissions error, 
   };
 }
 
+// src/doctor.ts
+import { homedir as homedir2 } from "node:os";
+import { join as join4 } from "node:path";
+import { readFile as readFile3, stat } from "node:fs/promises";
+var SEMVER_RE2 = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+var REPO_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
+async function authCheck(env) {
+  try {
+    const cfg = await readConfig(env);
+    if (cfg.device_token) {
+      return { key: "auth", label: "Auth", status: "ok", detail: "signed in (device token present)" };
+    }
+    return { key: "auth", label: "Auth", status: "fail", critical: true, detail: "not signed in \u2014 run `backthread login`" };
+  } catch (e) {
+    return {
+      key: "auth",
+      label: "Auth",
+      status: "fail",
+      critical: true,
+      detail: `couldn't read ${configHint(env)} (${e.message ?? e}) \u2014 check its permissions`
+    };
+  }
+}
+async function permsCheck(deps, env) {
+  if (process.platform === "win32") {
+    return { key: "perms", label: "Config perms", status: "info", detail: "n/a on Windows (POSIX modes not enforced)" };
+  }
+  const doStat = deps.statImpl ?? ((p) => stat(p));
+  const filePath = configPath(env);
+  const dirPath = configDir(env);
+  let fileMode = null;
+  let dirMode = null;
+  try {
+    fileMode = (await doStat(filePath)).mode & 511;
+  } catch {
+    return { key: "perms", label: "Config perms", status: "info", detail: "no config file yet (run `backthread login`)" };
+  }
+  try {
+    dirMode = (await doStat(dirPath)).mode & 511;
+  } catch {
+    dirMode = null;
+  }
+  const fileLoose = (fileMode & 63) !== 0;
+  const dirLoose = dirMode !== null && (dirMode & 63) !== 0;
+  if (fileLoose || dirLoose) {
+    return {
+      key: "perms",
+      label: "Config perms",
+      status: "warn",
+      detail: `too open (config ${octal(fileMode)}${dirMode !== null ? `, dir ${octal(dirMode)}` : ""}) \u2014 run \`chmod 600 ${configHint(env)}\` (dir 700)`
+    };
+  }
+  return { key: "perms", label: "Config perms", status: "ok", detail: `config 0600${dirMode !== null ? ", dir 0700" : ""}` };
+}
+async function repoCheck(env) {
+  try {
+    const cfg = await readConfig(env);
+    if (cfg.repo && REPO_SLUG_RE.test(cfg.repo)) {
+      return { key: "repo", label: "Repo", status: "ok", detail: cfg.repo };
+    }
+    if (cfg.repo) {
+      return { key: "repo", label: "Repo", status: "warn", detail: `connected slug "${cfg.repo}" is not owner/name \u2014 reconnect in the web app` };
+    }
+    return { key: "repo", label: "Repo", status: "warn", detail: "no repo connected \u2014 run `backthread install` (or connect it in the web app)" };
+  } catch {
+    return { key: "repo", label: "Repo", status: "warn", detail: "could not read the connected repo" };
+  }
+}
+var AGENT_HOOK_FILES = [
+  { agent: "claude-code", files: (h) => [join4(h, ".claude", "settings.json")] },
+  { agent: "gemini", files: (h) => [join4(h, ".gemini", "settings.json")] },
+  { agent: "codex", files: (h) => [join4(h, ".codex", "hooks.json"), join4(h, ".codex", "config.toml")] },
+  { agent: "cursor", files: (h) => [join4(h, ".cursor", "hooks.json"), join4(h, ".cursor", "mcp.json")] }
+];
+async function hookCheck(deps, env) {
+  const home = deps.home ?? homedir2();
+  const cwd = deps.cwd ?? process.cwd();
+  const doRead = deps.readFileImpl ?? ((p) => readFile3(p, "utf8"));
+  const mentions = async (path) => {
+    try {
+      return (await doRead(path)).includes("backthread");
+    } catch {
+      return false;
+    }
+  };
+  const asPlugin = typeof env.CLAUDE_PLUGIN_ROOT === "string" && env.CLAUDE_PLUGIN_ROOT.trim().length > 0;
+  const wired = [];
+  if (asPlugin) wired.push("claude-code (plugin)");
+  for (const { agent, files } of AGENT_HOOK_FILES) {
+    for (const f of files(home)) {
+      if (await mentions(f)) {
+        wired.push(agent);
+        break;
+      }
+    }
+  }
+  const projectScoped = await mentions(join4(cwd, ".claude", "settings.json")) || await mentions(join4(cwd, ".claude", "settings.local.json"));
+  const userScopedCC = asPlugin || await mentions(join4(home, ".claude", "settings.json"));
+  const uniqueWired = Array.from(new Set(wired));
+  if (projectScoped && !userScopedCC) {
+    return {
+      key: "hook",
+      label: "Capture hook",
+      status: "warn",
+      detail: "PROJECT-scoped only \u2014 blind in git worktrees + other repos (ARP-680). Re-run `backthread install` for the user-scope hook."
+    };
+  }
+  if (uniqueWired.length > 0) {
+    return { key: "hook", label: "Capture hook", status: "ok", detail: `wired for ${uniqueWired.join(", ")}` };
+  }
+  return {
+    key: "hook",
+    label: "Capture hook",
+    status: "warn",
+    detail: "not detected \u2014 run `backthread install` here (or `backthread install --agent <codex|cursor|gemini>`)"
+  };
+}
+async function connectivityCheck(deps, env) {
+  const doFetch = deps.fetchImpl ?? fetch;
+  const timeout = deps.connectTimeoutMs ?? 5e3;
+  const targets = [
+    { name: "worker", url: workerBaseUrl(env) },
+    { name: "functions", url: functionsBaseUrl(env) }
+  ];
+  const results = await Promise.all(
+    targets.map(async ({ name, url: url2 }) => {
+      try {
+        await doFetch(url2, { method: "GET", signal: AbortSignal.timeout(timeout) });
+        return { name, reachable: true };
+      } catch {
+        return { name, reachable: false };
+      }
+    })
+  );
+  const down = results.filter((r) => !r.reachable).map((r) => r.name);
+  if (down.length === 0) {
+    return { key: "connectivity", label: "Connectivity", status: "ok", detail: "worker + functions reachable" };
+  }
+  return {
+    key: "connectivity",
+    label: "Connectivity",
+    status: "warn",
+    detail: `couldn't reach ${down.join(" + ")} (offline, or blocked by a proxy/firewall?)`
+  };
+}
+async function versionCheck(deps) {
+  const current = cliVersion();
+  const redact = redactVersion();
+  const base = `backthread ${current} \xB7 redact ${redact}`;
+  const runNpm2 = deps.runNpm ?? runNpm;
+  const view = await runNpm2(["view", "backthread", "version"]);
+  if (!view.ok || !SEMVER_RE2.test(view.stdout)) {
+    return { key: "version", label: "Version", status: "info", detail: `${base} (couldn't check npm for the latest \u2014 offline?)` };
+  }
+  const latest = view.stdout;
+  if (current === latest) {
+    return { key: "version", label: "Version", status: "ok", detail: `${base} (latest)` };
+  }
+  return { key: "version", label: "Version", status: "info", detail: `${base} \u2014 update available (${latest}): \`backthread update\`` };
+}
+async function collectChecks(deps = {}) {
+  const env = deps.env ?? process.env;
+  const [auth, perms, repo, hook, connectivity, version2] = await Promise.all([
+    authCheck(env),
+    permsCheck(deps, env),
+    repoCheck(env),
+    hookCheck(deps, env),
+    connectivityCheck(deps, env),
+    versionCheck(deps)
+  ]);
+  return [auth, perms, repo, hook, connectivity, version2];
+}
+var GLYPH = { ok: "\u2713", fail: "\u2717", warn: "\u26A0", info: "\u2139" };
+function formatReport(checks) {
+  const width = Math.max(...checks.map((c) => c.label.length));
+  const lines = checks.map((c) => `${GLYPH[c.status]} ${c.label.padEnd(width)}  ${c.detail}`);
+  const fails = checks.filter((c) => c.status === "fail").length;
+  const warns = checks.filter((c) => c.status === "warn").length;
+  let summary;
+  if (fails > 0) summary = `
+${fails} issue${fails === 1 ? "" : "s"} to fix \u2014 see the \u2717 above, then re-run \`backthread doctor\`.`;
+  else if (warns > 0) summary = `
+Mostly good \u2014 the \u26A0 above are worth a look but capture can still run.`;
+  else summary = `
+All good \u2014 Backthread is set up. \u{1F9F5}`;
+  return ["backthread doctor\n", ...lines, summary].join("\n");
+}
+async function runDoctor(deps = {}) {
+  const checks = await collectChecks(deps);
+  const exitCode = checks.some((c) => c.status === "fail" && c.critical) ? 1 : 0;
+  return { text: formatReport(checks), exitCode, checks };
+}
+function octal(mode) {
+  return "0" + mode.toString(8).padStart(3, "0");
+}
+function configHint(env) {
+  return env.BACKTHREAD_CONFIG_DIR ? configPath(env) : "~/.backthread/config.json";
+}
+
 // src/capture.ts
-import { readFile as readFile9 } from "node:fs/promises";
+import { readFile as readFile10 } from "node:fs/promises";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -7907,8 +8108,8 @@ async function inferDecisions(transcript, config2, opts = {}) {
 }
 
 // src/connectNudge.ts
-import { join as join4 } from "node:path";
-import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
+import { join as join5 } from "node:path";
+import { readFile as readFile4, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
 function parseRepoStatus(value) {
   return value === "connected" || value === "not_connected" || value === "disconnected" ? value : null;
 }
@@ -7921,7 +8122,7 @@ function parseNextStep(value) {
   return "absent";
 }
 function nudgeStatePath(env = process.env) {
-  return join4(configDir(env), "connect-nudge.json");
+  return join5(configDir(env), "connect-nudge.json");
 }
 var MAX_REMEMBERED = 50;
 function parseState2(raw) {
@@ -7937,7 +8138,7 @@ function parseState2(raw) {
 }
 async function readState2(env) {
   try {
-    return parseState2(await readFile3(nudgeStatePath(env), "utf8"));
+    return parseState2(await readFile4(nudgeStatePath(env), "utf8"));
   } catch {
     return { nudged: [] };
   }
@@ -8001,28 +8202,28 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
 }
 
 // src/firstRun.ts
-import { join as join10 } from "node:path";
-import { readFile as readFile8, writeFile as writeFile7, mkdir as mkdir7, chmod as chmod6 } from "node:fs/promises";
+import { join as join11 } from "node:path";
+import { readFile as readFile9, writeFile as writeFile7, mkdir as mkdir7, chmod as chmod6 } from "node:fs/promises";
 
 // src/install.ts
-import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir6 } from "node:fs/promises";
-import { homedir as homedir5 } from "node:os";
-import { join as join9 } from "node:path";
+import { readFile as readFile8, writeFile as writeFile6, mkdir as mkdir6 } from "node:fs/promises";
+import { homedir as homedir6 } from "node:os";
+import { join as join10 } from "node:path";
 
 // src/captureCommand.ts
-import { stat } from "node:fs/promises";
-import { homedir as homedir2 } from "node:os";
-import { join as join5 } from "node:path";
+import { stat as stat2 } from "node:fs/promises";
+import { homedir as homedir3 } from "node:os";
+import { join as join6 } from "node:path";
 function slugifyCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function deriveTranscriptPath(sessionId, cwd, home) {
   if (!sessionId || sessionId.trim().length === 0) return null;
-  return join5(home, ".claude", "projects", slugifyCwd(cwd), `${sessionId}.jsonl`);
+  return join6(home, ".claude", "projects", slugifyCwd(cwd), `${sessionId}.jsonl`);
 }
 async function defaultStat(path) {
   try {
-    const s = await stat(path);
+    const s = await stat2(path);
     return s.isFile();
   } catch {
     return false;
@@ -8031,7 +8232,7 @@ async function defaultStat(path) {
 async function resolveTranscriptPath(input, deps = {}) {
   const explicit = input.transcriptPath;
   if (explicit && explicit.trim().length > 0) return explicit;
-  const home = (deps.homedirImpl ?? homedir2)();
+  const home = (deps.homedirImpl ?? homedir3)();
   const cwd = input.cwd ?? process.cwd();
   const derived = deriveTranscriptPath(input.sessionId, cwd, home);
   if (!derived) return null;
@@ -8122,17 +8323,17 @@ function parseManualArgs(argv) {
 }
 
 // src/sweep.ts
-import { readFile as readFile5, stat as stat2, readdir } from "node:fs/promises";
+import { readFile as readFile6, stat as stat3, readdir } from "node:fs/promises";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join7 } from "node:path";
+import { homedir as homedir4 } from "node:os";
+import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join8 } from "node:path";
 
 // src/sweepLedger.ts
-import { join as join6 } from "node:path";
-import { readFile as readFile4, writeFile as writeFile4, mkdir as mkdir4, chmod as chmod4 } from "node:fs/promises";
+import { join as join7 } from "node:path";
+import { readFile as readFile5, writeFile as writeFile4, mkdir as mkdir4, chmod as chmod4 } from "node:fs/promises";
 var MAX_PROCESSED = 2e4;
 function sweepStatePath(env = process.env) {
-  return join6(configDir(env), "sweep-state.json");
+  return join7(configDir(env), "sweep-state.json");
 }
 function parseSweepState(raw) {
   try {
@@ -8157,7 +8358,7 @@ function serializeSweepState(state) {
 }
 async function readSweepState(env = process.env) {
   try {
-    return parseSweepState(await readFile4(sweepStatePath(env), "utf8"));
+    return parseSweepState(await readFile5(sweepStatePath(env), "utf8"));
   } catch {
     return { processed: [], lastSweptAt: {} };
   }
@@ -8260,7 +8461,7 @@ async function defaultReadDir(dir) {
 }
 async function defaultPathExists(path) {
   try {
-    await stat2(path);
+    await stat3(path);
     return true;
   } catch {
     return false;
@@ -8274,7 +8475,7 @@ function defaultMainRoot(cwd) {
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
     if (!out) return null;
-    const abs = isAbsolute2(out) ? out : join7(cwd, out);
+    const abs = isAbsolute2(out) ? out : join8(cwd, out);
     return dirname2(abs.replace(/\/+$/, ""));
   } catch {
     return null;
@@ -8292,7 +8493,7 @@ async function runSweep(input = {}, deps = {}) {
       return [];
     }
   };
-  const baseReadFile = deps.readFileImpl ?? ((p) => readFile5(p, "utf8"));
+  const baseReadFile = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
   const doReadFile = async (p) => {
     try {
       return await baseReadFile(p);
@@ -8321,7 +8522,7 @@ async function runSweep(input = {}, deps = {}) {
   const doReadState = deps.readSweepStateImpl ?? readSweepState;
   const doWriteState = deps.writeSweepStateImpl ?? writeSweepState;
   try {
-    const home = (deps.homedirImpl ?? homedir3)();
+    const home = (deps.homedirImpl ?? homedir4)();
     const now = (deps.nowImpl ?? (() => (/* @__PURE__ */ new Date()).toISOString()))();
     const cwd = input.cwd ?? process.cwd();
     const target = resolveRepo(cwd, readRemote);
@@ -8349,7 +8550,7 @@ async function runSweep(input = {}, deps = {}) {
     }
     const mainRoot = doMainRoot(cwd) ?? cwd;
     const mainSlug = slugifyCwd(mainRoot);
-    const projectsRoot = join7(home, ".claude", "projects");
+    const projectsRoot = join8(home, ".claude", "projects");
     const entries = await doReadDir(projectsRoot);
     const candidates = entries.filter((n) => n === mainSlug || n.startsWith(mainSlug + "-")).sort();
     const skip = new Set(state.processed);
@@ -8362,12 +8563,12 @@ async function runSweep(input = {}, deps = {}) {
     let captured = 0;
     let decisions = 0;
     for (const dirName of candidates) {
-      const dir = join7(projectsRoot, dirName);
+      const dir = join8(projectsRoot, dirName);
       const files = (await doReadDir(dir)).filter((n) => n.endsWith(".jsonl")).sort();
       if (files.length === 0) continue;
       let embeddedCwd = null;
       for (const file2 of files) {
-        embeddedCwd = extractCwdFromRaw(await doReadFile(join7(dir, file2)));
+        embeddedCwd = extractCwdFromRaw(await doReadFile(join8(dir, file2)));
         if (embeddedCwd) break;
       }
       const cwdExists = embeddedCwd ? await doPathExists(embeddedCwd) : false;
@@ -8406,7 +8607,7 @@ async function runSweep(input = {}, deps = {}) {
         try {
           outcome = await run(
             {
-              transcript_path: join7(dir, file2),
+              transcript_path: join8(dir, file2),
               cwd: cls.cwd ?? mainRoot,
               session_id: sid,
               hook_event_name: "SessionEnd"
@@ -8469,9 +8670,9 @@ async function runBackfill(input = {}, deps = {}) {
 // src/installAgent.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
-import { homedir as homedir4 } from "node:os";
-import { join as join8, dirname as dirname3 } from "node:path";
-import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod5 } from "node:fs/promises";
+import { homedir as homedir5 } from "node:os";
+import { join as join9, dirname as dirname3 } from "node:path";
+import { readFile as readFile7, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod5 } from "node:fs/promises";
 var execFileP = promisify(execFile2);
 var MCP_COMMAND = "npx";
 var MCP_ARGS = ["-y", "backthread", "mcp"];
@@ -8567,8 +8768,8 @@ async function writeJson(deps, path, obj) {
   await doWrite(path, JSON.stringify(obj, null, 2) + "\n");
 }
 async function installGemini(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
-  const path = join8(home, ".gemini", "settings.json");
+  const doRead = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
+  const path = join9(home, ".gemini", "settings.json");
   const current = await loadJsonObject(doRead, path);
   const a = withMcpServer(current);
   const b = withNestedHook(a.next, "SessionEnd", hookCommand("gemini-cli"), { name: "backthread-capture" }, [
@@ -8578,9 +8779,9 @@ async function installGemini(home, deps) {
   return [{ path, wrote: a.changed || b.changed }];
 }
 async function installCodex(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const doRead = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
   const writes = [];
-  const tomlPath = join8(home, ".codex", "config.toml");
+  const tomlPath = join9(home, ".codex", "config.toml");
   let toml = "";
   try {
     toml = await doRead(tomlPath);
@@ -8601,7 +8802,7 @@ args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
     await doWrite(tomlPath, toml + sep + block);
     writes.push({ path: tomlPath, wrote: true });
   }
-  const hooksPath = join8(home, ".codex", "hooks.json");
+  const hooksPath = join9(home, ".codex", "hooks.json");
   const current = await loadJsonObject(doRead, hooksPath);
   const h = withNestedHook(current, "Stop", hookCommand("codex"), { timeout: 60 }, [legacyHookCommand("codex")]);
   if (h.changed) await writeJson(deps, hooksPath, h.next);
@@ -8609,12 +8810,12 @@ args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
   return writes;
 }
 async function installCursor(home, deps) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const doRead = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
   const nodeBinDir = deps.nodeBinDir ?? dirname3(process.execPath);
   const writes = [];
-  const scriptDir = join8(home, ".cursor", "hooks");
-  const captureScriptPath = join8(scriptDir, "backthread-capture.sh");
-  const mcpScriptPath = join8(scriptDir, "backthread-mcp.sh");
+  const scriptDir = join9(home, ".cursor", "hooks");
+  const captureScriptPath = join9(scriptDir, "backthread-capture.sh");
+  const mcpScriptPath = join9(scriptDir, "backthread-mcp.sh");
   writes.push(
     await writeCursorScript(
       deps,
@@ -8624,12 +8825,12 @@ async function installCursor(home, deps) {
     )
   );
   writes.push(await writeCursorScript(deps, mcpScriptPath, cursorWrapperScript(nodeBinDir, "mcp")));
-  const mcpPath = join8(home, ".cursor", "mcp.json");
+  const mcpPath = join9(home, ".cursor", "mcp.json");
   const mcpCurrent = await loadJsonObject(doRead, mcpPath);
   const m = withCursorMcpServer(mcpCurrent, mcpScriptPath);
   if (m.changed) await writeJson(deps, mcpPath, m.next);
   writes.push({ path: mcpPath, wrote: m.changed });
-  const hooksPath = join8(home, ".cursor", "hooks.json");
+  const hooksPath = join9(home, ".cursor", "hooks.json");
   const hooksCurrent = await loadJsonObject(doRead, hooksPath);
   const c = withCursorStopHook(hooksCurrent, captureScriptPath);
   if (c.changed) await writeJson(deps, hooksPath, c.next);
@@ -8663,7 +8864,7 @@ function cursorWrapperScript(nodeBinDir, backthreadArgs, latest = false) {
   ].join("\n") + "\n";
 }
 async function writeCursorScript(deps, path, content) {
-  const doRead = deps.readFileImpl ?? ((p) => readFile6(p, "utf8"));
+  const doRead = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
   const doChmod = deps.chmodImpl ?? ((p, mode) => chmod5(p, mode));
   let existing = null;
   try {
@@ -8737,7 +8938,7 @@ async function versionGate(agent, deps) {
   return null;
 }
 async function runInstallAgent(agent, deps = {}) {
-  const home = deps.home ?? homedir4();
+  const home = deps.home ?? homedir5();
   const versionWarning = await versionGate(agent, deps);
   let writes;
   switch (agent) {
@@ -8779,12 +8980,12 @@ var LEGACY_HOOK_COMMANDS = [
 ];
 var OUR_HOOK_COMMANDS = /* @__PURE__ */ new Set([HOOK_COMMAND, ...LEGACY_HOOK_COMMANDS]);
 async function registerHook(deps = {}) {
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile8(p, "utf8"));
   const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile6(p, d));
   const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir6(d, { recursive: true }));
-  const home = deps.home ?? homedir5();
-  const settingsDir = join9(home, ".claude");
-  const settingsPath = join9(settingsDir, "settings.json");
+  const home = deps.home ?? homedir6();
+  const settingsDir = join10(home, ".claude");
+  const settingsPath = join10(settingsDir, "settings.json");
   let settings = {};
   let raw = null;
   try {
@@ -8896,9 +9097,9 @@ function stripSessionEndHook(settings) {
   return next;
 }
 async function unregisterProjectHook(cwd, deps = {}) {
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile8(p, "utf8"));
   const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile6(p, d));
-  const settingsPath = join9(cwd, ".claude", "settings.json");
+  const settingsPath = join10(cwd, ".claude", "settings.json");
   let raw;
   try {
     raw = await doReadFile(settingsPath);
@@ -9163,7 +9364,7 @@ function normalizeState(raw) {
 
 // src/firstRun.ts
 function firstRunStatePath(env = process.env) {
-  return join10(configDir(env), "first-run.json");
+  return join11(configDir(env), "first-run.json");
 }
 function parseFirstRunState(raw) {
   try {
@@ -9182,7 +9383,7 @@ function parseFirstRunState(raw) {
 }
 async function readFirstRunState(env = process.env) {
   try {
-    return parseFirstRunState(await readFile8(firstRunStatePath(env), "utf8"));
+    return parseFirstRunState(await readFile9(firstRunStatePath(env), "utf8"));
   } catch {
     return {};
   }
@@ -9357,7 +9558,7 @@ function readStream(stream) {
 async function runCapture(input, deps = {}) {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m) => console.error(m));
-  const doReadFile = deps.readFileImpl ?? ((p) => readFile9(p, "utf8"));
+  const doReadFile = deps.readFileImpl ?? ((p) => readFile10(p, "utf8"));
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
     void ensureAuth({ env: e }).catch(() => {
@@ -9537,8 +9738,8 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
 
 // src/fromHook.ts
 import { spawn as spawn2 } from "node:child_process";
-import { join as join11 } from "node:path";
-import { readFile as readFile10, writeFile as writeFile8, mkdir as mkdir8, chmod as chmod7 } from "node:fs/promises";
+import { join as join12 } from "node:path";
+import { readFile as readFile11, writeFile as writeFile8, mkdir as mkdir8, chmod as chmod7 } from "node:fs/promises";
 var KNOWN_AGENTS = /* @__PURE__ */ new Set([
   "claude-code",
   "codex",
@@ -9579,7 +9780,7 @@ function normalizeHookInput(payload, _agent) {
   return out;
 }
 function captureStatePath(env = process.env) {
-  return join11(configDir(env), "capture-sessions.json");
+  return join12(configDir(env), "capture-sessions.json");
 }
 var MAX_REMEMBERED2 = 200;
 function parseState3(raw) {
@@ -9602,7 +9803,7 @@ function parseState3(raw) {
 }
 async function readState3(env) {
   try {
-    return parseState3(await readFile10(captureStatePath(env), "utf8"));
+    return parseState3(await readFile11(captureStatePath(env), "utf8"));
   } catch {
     return { captured: [], watermarks: {} };
   }
@@ -34102,15 +34303,15 @@ async function startMcpServer(deps = {}) {
 }
 
 // src/routingStats.ts
-import { join as join12 } from "node:path";
-import { readFile as readFile11, writeFile as writeFile9, mkdir as mkdir9, chmod as chmod8 } from "node:fs/promises";
+import { join as join13 } from "node:path";
+import { readFile as readFile12, writeFile as writeFile9, mkdir as mkdir9, chmod as chmod8 } from "node:fs/promises";
 var STATS_FILE = "routing-stats.json";
 function statsPath(env) {
-  return join12(configDir(env), STATS_FILE);
+  return join13(configDir(env), STATS_FILE);
 }
 async function readRoutingStats(deps = {}) {
   const env = deps.env ?? process.env;
-  const read = deps.readFileImpl ?? readFile11;
+  const read = deps.readFileImpl ?? readFile12;
   try {
     const raw = await read(statsPath(env), "utf8");
     const obj = JSON.parse(raw);
@@ -34214,6 +34415,8 @@ Manage
                           [--skip-hook] [--skip-backfill]
   backthread update             Update a global install to the latest (also -u). npx is
                           always latest already; the plugin updates via /plugin update.
+  backthread doctor             Diagnose your setup \u2014 auth, capture hook, connectivity,
+                          version, repo. Prints \u2713/\u2717 with fix hints; exits non-zero if broken.
   backthread version            Print the installed version (also --version, -v)
   backthread help               Show this message (also --help, -h)
 
@@ -34231,6 +34434,7 @@ var KNOWN_COMMANDS = [
   "mcp",
   "install",
   "update",
+  "doctor",
   "version",
   "help"
 ];
@@ -34292,6 +34496,12 @@ async function main(argv, deps = {}) {
       const result = await logoutImpl();
       console.log(result.message);
       return result.ok ? 0 : 1;
+    }
+    case "doctor": {
+      const doctorImpl = deps.runDoctorImpl ?? runDoctor;
+      const result = await doctorImpl();
+      console.log(result.text);
+      return result.exitCode;
     }
     case "capture": {
       if (rest.includes("--from-hook")) {

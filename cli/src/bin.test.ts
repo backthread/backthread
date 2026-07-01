@@ -167,6 +167,32 @@ test('`backthread update` propagates a non-ok result as exit 1', async () => {
   assert.equal(result, 1);
 });
 
+// --- doctor → routes to the doctor runner, returns its exit code -------------
+
+test('`backthread doctor` prints the report and returns the runner exit code', async () => {
+  let called = 0;
+  const { out, result } = await captureConsole(() =>
+    main(['doctor'], {
+      runDoctorImpl: async () => {
+        called += 1;
+        return { text: 'backthread doctor\n✓ Auth  signed in', exitCode: 0, checks: [] };
+      },
+    }),
+  );
+  assert.equal(called, 1);
+  assert.match(out, /backthread doctor/);
+  assert.equal(result, 0);
+});
+
+test('`backthread doctor` propagates a non-zero exit when a critical check fails', async () => {
+  const { result } = await captureConsole(() =>
+    main(['doctor'], {
+      runDoctorImpl: async () => ({ text: '✗ Auth  not signed in', exitCode: 1, checks: [] }),
+    }),
+  );
+  assert.equal(result, 1);
+});
+
 // --- unknown subcommand → friendly pointer (not a usage wall), exit 1 ---------
 
 test('an unknown subcommand points at help and exits 1 (no onboarding, no usage wall)', async () => {
