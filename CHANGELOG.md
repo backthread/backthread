@@ -5,6 +5,19 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.8.0
+
+**The commands you reflexively reach for — `version`, `update`, `doctor`, `logout` — now exist, plus a friendlier CLI, a Windows login fix, and a hardened supply chain.** This release rounds out the standard command surface and gets the package ready for wider use.
+
+- **`backthread --version` / `-v` / `version`** — print the installed version (finally). Reads the package's own version, so it never needs auth or the network.
+- **`backthread doctor`** — one-shot diagnostics: ✓/✗ over auth, the capture hook (including the user-vs-project worktree-scope trap), connectivity, your version, and the connected repo — each with a fix hint. Exits non-zero when something's broken, so it's scriptable. Prints only safe output (never your token).
+- **`backthread update` / `-u`** — update a global install to `backthread@latest` (old → new) and quiet the upgrade nudge. It knows the difference between a global install (updates it), an ephemeral `npx` run (already latest — explains, doesn't fake it), and the Claude Code plugin (points you at `/plugin update`), and never leaves a half-updated state.
+- **`backthread logout`** — drop this device's token from `~/.backthread/config.json` while keeping your repo link. A one-liner for shared or handed-down machines.
+- **Friendlier CLI** — a mistyped command now gets a "did you mean `backthread login`?" pointer instead of a wall of usage; `backthread help` is grouped and actually readable.
+- **Windows login fix.** Opening the sign-in URL no longer routes through `cmd.exe` (which re-parses `&` and `%`-encoded characters in the URL, and put a shell in the open path); it now uses a direct launcher (`rundll32`).
+
+Under the hood, for a package that's meant to spread: an internal **security review** (no critical findings — see [`SECURITY.md`](./SECURITY.md)), a **supply-chain CI floor** (a high-severity `npm audit` gate, SHA-pinned GitHub Actions, Dependabot, npm build provenance kept on), a public **`SECURITY.md`** with a private disclosure policy, and a rewritten **README** plus **`llms.txt` / `llms-full.txt` / `FAQ.md`** so both humans and LLMs get the value prop straight. Nothing about the trust model changes: your source never leaves your machine unredacted.
+
 ## 0.7.0
 
 **`backthread login` no longer touches localhost.** The old flow spun up a `127.0.0.1`
