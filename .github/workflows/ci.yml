@@ -1,5 +1,10 @@
-# CI — typecheck + test the `backthread` CLI on every PR + push to main, and verify
-# the committed self-contained bundle is in sync with src (ARP-478).
+# CI — typecheck + test the `backthread` CLI on every PR + push to main, verify the
+# committed self-contained bundle is in sync with src (ARP-478), and hold the supply-chain
+# floor for a widely-`npx`'d package: a vulnerability gate, a lockfile-integrity gate, and
+# a guard that the release keeps npm provenance on (ARP-797).
+#
+# GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
+# action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
 name: CI
 
 on:
@@ -11,12 +16,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      # Lockfile integrity: it must be present, and `npm ci` (below) hard-fails if it's out
+      # of sync with package.json — so an un-committed dependency change can't slip through.
+      - name: Lockfile present
+        run: test -f package-lock.json || { echo "::error::package-lock.json is missing — commit it (npm install)."; exit 1; }
+      - name: Install (npm ci — fails on a drifted lockfile)
+        run: npm ci
+      # Vulnerability gate: fail the build on a HIGH+ advisory anywhere in the tree. The
+      # published `npx backthread` bundle INLINES the one runtime dep (@modelcontextprotocol/sdk)
+      # via esbuild, so a vuln in a "devDependency" can still ship — we audit the FULL tree,
+      # not just prod. Keep the tree clean; if a future dev-only advisory genuinely can't ship
+      # and can't be fixed, add a reviewed exception here (don't silently lower the level).
+      - name: Vulnerability gate (npm audit, high+)
+        run: npm audit --audit-level=high
       - name: Typecheck
         run: npm run typecheck
       # `npm test` runs the cli test suite + `npm run build` + `npm run bundle` (smoke),
@@ -30,3 +47,9 @@ jobs:
       # deterministic for the lockfile-pinned version).
       - name: Committed bundle is in sync with src
         run: git diff --exit-code cli/dist-bundle/backthread.js
+      # Regression guard: the release workflow must keep npm build provenance on, so the
+      # published package always carries a verifiable, tamper-evident build attestation.
+      - name: Release keeps npm provenance on
+        # Anchor to the `npm publish … --provenance` line (not just any occurrence), so a
+        # flag left behind in a comment can't mask a publish step that dropped it.
+        run: grep -Eq 'npm publish[^#]*--provenance' .github/workflows/release.yml || { echo "::error::release.yml's npm publish must keep --provenance"; exit 1; }
