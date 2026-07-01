@@ -1,0 +1,26 @@
+# Dependabot — keep npm deps + the SHA-pinned GitHub Actions current, with security fixes
+# raised automatically (ARP-797). npm updates are grouped into one weekly PR to keep the
+# noise low on this small repo; Dependabot still opens SEPARATE PRs for security advisories
+# regardless of grouping, so a fix never waits on the weekly batch.
+version: 2
+updates:
+  # npm — the workspace root covers cli/ + packages/* (npm workspaces).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm-dependencies:
+        patterns: ["*"]
+
+  # GitHub Actions — bump the pinned commit SHAs (ci.yml + release.yml) as new releases land.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
