@@ -113,3 +113,20 @@ export async function maybeUpgradeNudge(
     return null;
   }
 }
+
+/**
+ * Quiet the upgrade nudge for a fresh 24h window — called after `backthread update`
+ * succeeds (or confirms already-latest). We RECORD `now` rather than DELETE the state:
+ * deleting resets to "never nudged", which would let the nudge show again on the very next
+ * request; recording now means "just handled, stay quiet". Best-effort — never throws (an
+ * unwritable state file just means the next nudge isn't suppressed, a mild over-nudge).
+ */
+export async function resetUpgradeNudge(deps: UpgradeNudgeDeps = {}): Promise<void> {
+  try {
+    const env = deps.env ?? process.env;
+    const now = deps.now ? deps.now() : Date.now();
+    await writeState({ lastUpgradeNudgeAt: now }, env);
+  } catch {
+    // best-effort, same posture as maybeUpgradeNudge
+  }
+}

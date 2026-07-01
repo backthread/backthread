@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 
 // src/bin/backthread.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { realpathSync } from "node:fs";
+import { realpathSync as realpathSync2 } from "node:fs";
 
 // src/login.ts
 import { hostname } from "node:os";
@@ -7376,6 +7376,176 @@ function configLocationHint3(env) {
   return env.BACKTHREAD_CONFIG_DIR ? configPath(env) : "~/.backthread/config.json";
 }
 
+// src/update.ts
+import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
+
+// src/upgradeNudge.ts
+import { join as join3 } from "node:path";
+import { readFile as readFile2, writeFile as writeFile2, mkdir as mkdir2, chmod as chmod2 } from "node:fs/promises";
+function upgradeNudgeStatePath(env = process.env) {
+  return join3(configDir(env), "upgrade-nudge.json");
+}
+var UPGRADE_NUDGE_THROTTLE_MS = 24 * 60 * 60 * 1e3;
+function parseState(raw) {
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+      const at = obj.lastUpgradeNudgeAt;
+      if (typeof at === "number" && Number.isFinite(at)) return { lastUpgradeNudgeAt: at };
+    }
+  } catch {
+  }
+  return {};
+}
+async function readState(env) {
+  try {
+    return parseState(await readFile2(upgradeNudgeStatePath(env), "utf8"));
+  } catch {
+    return {};
+  }
+}
+async function writeState(state, env) {
+  try {
+    const dir = configDir(env);
+    await mkdir2(dir, { recursive: true, mode: DIR_MODE });
+    await chmod2(dir, DIR_MODE).catch(() => {
+    });
+    const path = upgradeNudgeStatePath(env);
+    await writeFile2(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
+    await chmod2(path, CONFIG_MODE).catch(() => {
+    });
+  } catch {
+  }
+}
+async function maybeUpgradeNudge(upgrade, deps = {}) {
+  try {
+    if (typeof upgrade !== "string" || upgrade.trim().length === 0) return null;
+    const env = deps.env ?? process.env;
+    const now = deps.now ? deps.now() : Date.now();
+    const state = await readState(env);
+    if (typeof state.lastUpgradeNudgeAt === "number" && now - state.lastUpgradeNudgeAt < UPGRADE_NUDGE_THROTTLE_MS) {
+      return null;
+    }
+    await writeState({ lastUpgradeNudgeAt: now }, env);
+    return upgrade.trim();
+  } catch {
+    return null;
+  }
+}
+async function resetUpgradeNudge(deps = {}) {
+  try {
+    const env = deps.env ?? process.env;
+    const now = deps.now ? deps.now() : Date.now();
+    await writeState({ lastUpgradeNudgeAt: now }, env);
+  } catch {
+  }
+}
+
+// src/update.ts
+var SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+var NPX_SEGMENT_RE = /(?:^|[\\/])_npx[\\/]/;
+function detectInstallContext(env, scriptPath) {
+  if (typeof env.CLAUDE_PLUGIN_ROOT === "string" && env.CLAUDE_PLUGIN_ROOT.trim().length > 0) return "plugin";
+  if (scriptPath && NPX_SEGMENT_RE.test(scriptPath)) return "npx";
+  return "global";
+}
+function resolveScriptPath() {
+  const raw = process.argv[1] ?? "";
+  if (!raw) return "";
+  if (NPX_SEGMENT_RE.test(raw)) return raw;
+  try {
+    return realpathSync(raw);
+  } catch {
+    return raw;
+  }
+}
+function realRunNpm(args) {
+  const isWin = process.platform === "win32";
+  const npm = isWin ? "npm.cmd" : "npm";
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        npm,
+        args,
+        { timeout: 12e4, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          resolve({
+            ok: !err,
+            stdout: (stdout ?? "").toString().trim(),
+            stderr: (stderr ?? "").toString().trim()
+          });
+        }
+      );
+    } catch (e) {
+      resolve({ ok: false, stdout: "", stderr: e.message ?? String(e) });
+    }
+  });
+}
+function firstLine(s) {
+  const line = s.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
+  return line ?? "unknown npm error";
+}
+async function runUpdate(deps = {}) {
+  const env = deps.env ?? process.env;
+  const log = deps.log ?? ((m) => console.error(m));
+  const current = (deps.currentVersion ?? cliVersion)();
+  const runNpm = deps.runNpm ?? realRunNpm;
+  const resetNudge = deps.resetNudge ?? ((e) => resetUpgradeNudge({ env: e }));
+  const scriptPath = deps.scriptPath ?? resolveScriptPath();
+  const context = detectInstallContext(env, scriptPath);
+  if (context === "npx") {
+    return {
+      ok: true,
+      context,
+      updated: false,
+      message: "You're running Backthread via `npx`, which already fetches the latest published version\non every run \u2014 nothing to update. Want a pinned, always-available binary?\n  npm i -g backthread\nThen `backthread update` pulls new releases on demand."
+    };
+  }
+  if (context === "plugin") {
+    return {
+      ok: true,
+      context,
+      updated: false,
+      message: "This is the Claude Code plugin's bundled copy of Backthread \u2014 the plugin manages it,\nnot npm. Update it from Claude Code:\n  /plugin update backthread\nFor a standalone terminal CLI too: `npm i -g backthread`."
+    };
+  }
+  log("Checking npm for the latest backthread\u2026");
+  const view = await runNpm(["view", "backthread", "version"]);
+  if (!view.ok || !SEMVER_RE.test(view.stdout)) {
+    const why = view.ok ? `unexpected npm output "${view.stdout}"` : firstLine(view.stderr);
+    return {
+      ok: false,
+      context,
+      updated: false,
+      message: `Couldn't check npm for the latest version (${why}). Are you online? Your current install (${current}) is untouched.`
+    };
+  }
+  const latest = view.stdout;
+  if (current === latest) {
+    await resetNudge(env);
+    return { ok: true, context, updated: false, message: `Backthread is already up to date (${current} is the latest).` };
+  }
+  log(`Updating backthread ${current} \u2192 ${latest} (npm i -g backthread@latest)\u2026`);
+  const install = await runNpm(["install", "-g", "backthread@latest"]);
+  if (!install.ok) {
+    return {
+      ok: false,
+      context,
+      updated: false,
+      message: `npm couldn't install backthread@latest: ${firstLine(install.stderr)}
+Your current install (${current}) is untouched. If this is a permissions error, retry with your global-install method (e.g. a Node version manager, or sudo).`
+    };
+  }
+  await resetNudge(env);
+  return {
+    ok: true,
+    context,
+    updated: true,
+    message: `Updated Backthread ${current} \u2192 ${latest}. Restart any long-running sessions to pick it up.`
+  };
+}
+
 // src/capture.ts
 import { readFile as readFile9 } from "node:fs/promises";
 
@@ -7737,8 +7907,8 @@ async function inferDecisions(transcript, config2, opts = {}) {
 }
 
 // src/connectNudge.ts
-import { join as join3 } from "node:path";
-import { readFile as readFile2, writeFile as writeFile2, mkdir as mkdir2, chmod as chmod2 } from "node:fs/promises";
+import { join as join4 } from "node:path";
+import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
 function parseRepoStatus(value) {
   return value === "connected" || value === "not_connected" || value === "disconnected" ? value : null;
 }
@@ -7751,10 +7921,10 @@ function parseNextStep(value) {
   return "absent";
 }
 function nudgeStatePath(env = process.env) {
-  return join3(configDir(env), "connect-nudge.json");
+  return join4(configDir(env), "connect-nudge.json");
 }
 var MAX_REMEMBERED = 50;
-function parseState(raw) {
+function parseState2(raw) {
   try {
     const obj = JSON.parse(raw);
     if (obj && typeof obj === "object" && Array.isArray(obj.nudged)) {
@@ -7765,22 +7935,22 @@ function parseState(raw) {
   }
   return { nudged: [] };
 }
-async function readState(env) {
+async function readState2(env) {
   try {
-    return parseState(await readFile2(nudgeStatePath(env), "utf8"));
+    return parseState2(await readFile3(nudgeStatePath(env), "utf8"));
   } catch {
     return { nudged: [] };
   }
 }
-async function writeState(state, env) {
+async function writeState2(state, env) {
   try {
     const dir = configDir(env);
-    await mkdir2(dir, { recursive: true, mode: DIR_MODE });
-    await chmod2(dir, DIR_MODE).catch(() => {
+    await mkdir3(dir, { recursive: true, mode: DIR_MODE });
+    await chmod3(dir, DIR_MODE).catch(() => {
     });
     const path = nudgeStatePath(env);
-    await writeFile2(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
-    await chmod2(path, CONFIG_MODE).catch(() => {
+    await writeFile3(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
+    await chmod3(path, CONFIG_MODE).catch(() => {
     });
   } catch {
   }
@@ -7818,12 +7988,12 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
     }
     if (line === null) return false;
     const log = deps.log ?? ((m) => console.error(m));
-    const state = await readState(env);
+    const state = await readState2(env);
     if (state.nudged.includes(sessionId)) return false;
     log(line);
     const nudged = [...state.nudged, sessionId];
     if (nudged.length > MAX_REMEMBERED) nudged.splice(0, nudged.length - MAX_REMEMBERED);
-    await writeState({ nudged }, env);
+    await writeState2({ nudged }, env);
     return true;
   } catch {
     return false;
@@ -7843,62 +8013,6 @@ import { join as join9 } from "node:path";
 import { stat } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
 import { join as join5 } from "node:path";
-
-// src/upgradeNudge.ts
-import { join as join4 } from "node:path";
-import { readFile as readFile3, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
-function upgradeNudgeStatePath(env = process.env) {
-  return join4(configDir(env), "upgrade-nudge.json");
-}
-var UPGRADE_NUDGE_THROTTLE_MS = 24 * 60 * 60 * 1e3;
-function parseState2(raw) {
-  try {
-    const obj = JSON.parse(raw);
-    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-      const at = obj.lastUpgradeNudgeAt;
-      if (typeof at === "number" && Number.isFinite(at)) return { lastUpgradeNudgeAt: at };
-    }
-  } catch {
-  }
-  return {};
-}
-async function readState2(env) {
-  try {
-    return parseState2(await readFile3(upgradeNudgeStatePath(env), "utf8"));
-  } catch {
-    return {};
-  }
-}
-async function writeState2(state, env) {
-  try {
-    const dir = configDir(env);
-    await mkdir3(dir, { recursive: true, mode: DIR_MODE });
-    await chmod3(dir, DIR_MODE).catch(() => {
-    });
-    const path = upgradeNudgeStatePath(env);
-    await writeFile3(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
-    await chmod3(path, CONFIG_MODE).catch(() => {
-    });
-  } catch {
-  }
-}
-async function maybeUpgradeNudge(upgrade, deps = {}) {
-  try {
-    if (typeof upgrade !== "string" || upgrade.trim().length === 0) return null;
-    const env = deps.env ?? process.env;
-    const now = deps.now ? deps.now() : Date.now();
-    const state = await readState2(env);
-    if (typeof state.lastUpgradeNudgeAt === "number" && now - state.lastUpgradeNudgeAt < UPGRADE_NUDGE_THROTTLE_MS) {
-      return null;
-    }
-    await writeState2({ lastUpgradeNudgeAt: now }, env);
-    return upgrade.trim();
-  } catch {
-    return null;
-  }
-}
-
-// src/captureCommand.ts
 function slugifyCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
@@ -8353,12 +8467,12 @@ async function runBackfill(input = {}, deps = {}) {
 }
 
 // src/installAgent.ts
-import { execFile } from "node:child_process";
+import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir as homedir4 } from "node:os";
 import { join as join8, dirname as dirname3 } from "node:path";
 import { readFile as readFile6, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod5 } from "node:fs/promises";
-var execFileP = promisify(execFile);
+var execFileP = promisify(execFile2);
 var MCP_COMMAND = "npx";
 var MCP_ARGS = ["-y", "backthread", "mcp"];
 function hookCommand(agent) {
@@ -34098,6 +34212,8 @@ Manage
   backthread install            Set up capture for this repo (login + hook + backfill history)
                           [--claim <code>] [--agent <codex|cursor|gemini>] [--skip-auth]
                           [--skip-hook] [--skip-backfill]
+  backthread update             Update a global install to the latest (also -u). npx is
+                          always latest already; the plugin updates via /plugin update.
   backthread version            Print the installed version (also --version, -v)
   backthread help               Show this message (also --help, -h)
 
@@ -34114,6 +34230,7 @@ var KNOWN_COMMANDS = [
   "capture",
   "mcp",
   "install",
+  "update",
   "version",
   "help"
 ];
@@ -34252,6 +34369,14 @@ async function main(argv, deps = {}) {
     }
     case void 0:
       return onboarding(rest);
+    case "update":
+    case "--update":
+    case "-u": {
+      const updateImpl = deps.runUpdateImpl ?? runUpdate;
+      const result = await updateImpl();
+      console.log(result.message);
+      return result.ok ? 0 : 1;
+    }
     case "version":
     case "--version":
     case "-v":
@@ -34282,7 +34407,7 @@ function isEntryPoint() {
     const self = fileURLToPath2(import.meta.url);
     const resolve = (p) => {
       try {
-        return realpathSync(p);
+        return realpathSync2(p);
       } catch {
         return p;
       }
