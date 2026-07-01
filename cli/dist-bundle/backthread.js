@@ -7302,19 +7302,15 @@ async function login(opts = {}) {
   const poll = opts.pollImpl ?? pollForToken;
   const result = await poll(sessionId, keypair, { env });
   if (!result.ok) {
-    return { ok: false, message: pollFailureMessage(result, authUrl) };
+    return { ok: false, message: pollFailureMessage(result) };
   }
   await updateConfig({ device_token: result.token }, env);
   log(`Authorized. Token stored in ${configLocationHint2(env)} (chmod 0600).`);
   return { ok: true, message: "Device authorized and token stored." };
 }
-function pollFailureMessage(result, authUrl) {
+function pollFailureMessage(result) {
   if (result.reason === "expired" || result.reason === "timeout") {
-    return `Login ${result.reason === "expired" ? "expired" : "timed out"}: ${result.message}.
-Try again \u2014 re-run \`backthread login\`, or open this on any device:
-
-  ${authUrl}
-`;
+    return `Login ${result.reason === "expired" ? "expired" : "timed out"}: ${result.message}. Re-run \`backthread login\` to try again.`;
   }
   return `Login failed: ${result.message}`;
 }

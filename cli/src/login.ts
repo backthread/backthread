@@ -86,7 +86,7 @@ export async function login(opts: LoginOptions = {}): Promise<LoginResult> {
   const poll = opts.pollImpl ?? pollForToken;
   const result = await poll(sessionId, keypair, { env });
   if (!result.ok) {
-    return { ok: false, message: pollFailureMessage(result, authUrl) };
+    return { ok: false, message: pollFailureMessage(result) };
   }
 
   // Persist the token at 0600 (read-modify-write leaves any existing account/repo slug
@@ -98,9 +98,12 @@ export async function login(opts: LoginOptions = {}): Promise<LoginResult> {
 }
 
 // Turn a non-ok poll result into an actionable message (never leaks token material).
-function pollFailureMessage(result: Extract<PollResult, { ok: false }>, authUrl: string): string {
+// On timeout/expired we do NOT re-offer the original URL: its session's poller has
+// stopped, so re-opening it would stash a token nothing is fetching — re-running
+// `backthread login` (a fresh session + a fresh poll) is the only real recovery.
+function pollFailureMessage(result: Extract<PollResult, { ok: false }>): string {
   if (result.reason === 'expired' || result.reason === 'timeout') {
-    return `Login ${result.reason === 'expired' ? 'expired' : 'timed out'}: ${result.message}.\nTry again — re-run \`backthread login\`, or open this on any device:\n\n  ${authUrl}\n`;
+    return `Login ${result.reason === 'expired' ? 'expired' : 'timed out'}: ${result.message}. Re-run \`backthread login\` to try again.`;
   }
   return `Login failed: ${result.message}`;
 }
