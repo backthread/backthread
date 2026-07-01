@@ -19,10 +19,13 @@
 //                          current, else `npm install -g backthread@latest`; report old → new
 //                          and quiet the upgrade nudge. Any npm/offline error → a clear
 //                          message + non-zero exit, current install untouched.
-import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { cliVersion } from './version.js';
 import { resetUpgradeNudge } from './upgradeNudge.js';
+import { runNpm as realRunNpm, type NpmRun } from './npm.js';
+
+// Re-exported so existing importers (update.test.ts) keep the type off ./update.js.
+export type { NpmRun } from './npm.js';
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 /** npm's ephemeral npx cache always lives under a `_npx` path segment (all npm versions/OSes). */
@@ -36,12 +39,6 @@ export interface UpdateResult {
   /** True iff a global install actually ran and moved the version. */
   updated: boolean;
   message: string;
-}
-
-export interface NpmRun {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
 }
 
 export interface UpdateDeps {
@@ -84,34 +81,6 @@ function resolveScriptPath(): string {
   } catch {
     return raw;
   }
-}
-
-// Real npm spawn: `npm <args>` with a bounded timeout. On Windows npm is `npm.cmd`, and
-// modern Node (the CVE-2024-27980 mitigation) refuses to execFile a `.cmd`/`.bat` without
-// `shell: true` — so run under the shell there (our args are fixed, space/metachar-free, so
-// this is injection-safe). Never throws: a spawn failure (npm missing, timeout, network) —
-// including a SYNCHRONOUS validation throw from execFile — resolves to ok:false + stderr.
-function realRunNpm(args: string[]): Promise<NpmRun> {
-  const isWin = process.platform === 'win32';
-  const npm = isWin ? 'npm.cmd' : 'npm';
-  return new Promise<NpmRun>((resolve) => {
-    try {
-      execFile(
-        npm,
-        args,
-        { timeout: 120_000, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
-        (err, stdout, stderr) => {
-          resolve({
-            ok: !err,
-            stdout: (stdout ?? '').toString().trim(),
-            stderr: (stderr ?? '').toString().trim(),
-          });
-        },
-      );
-    } catch (e) {
-      resolve({ ok: false, stdout: '', stderr: (e as Error).message ?? String(e) });
-    }
-  });
 }
 
 // First non-empty line of npm's stderr, for a compact one-line error hint.
