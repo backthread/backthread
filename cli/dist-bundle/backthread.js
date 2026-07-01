@@ -7554,22 +7554,27 @@ import { join as join4 } from "node:path";
 import { readFile as readFile3, stat } from "node:fs/promises";
 var SEMVER_RE2 = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 var REPO_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
-async function authCheck(env) {
+async function loadConfig(env) {
   try {
-    const cfg = await readConfig(env);
-    if (cfg.device_token) {
-      return { key: "auth", label: "Auth", status: "ok", detail: "signed in (device token present)" };
-    }
-    return { key: "auth", label: "Auth", status: "fail", critical: true, detail: "not signed in \u2014 run `backthread login`" };
+    return { config: await readConfig(env), error: null };
   } catch (e) {
+    return { config: null, error: e };
+  }
+}
+function authCheck(loaded, env) {
+  if (loaded.error) {
     return {
       key: "auth",
       label: "Auth",
       status: "fail",
       critical: true,
-      detail: `couldn't read ${configHint(env)} (${e.message ?? e}) \u2014 check its permissions`
+      detail: `couldn't read ${configHint(env)} (${loaded.error.message ?? loaded.error}) \u2014 check its permissions`
     };
   }
+  if (loaded.config?.device_token) {
+    return { key: "auth", label: "Auth", status: "ok", detail: "signed in (device token present)" };
+  }
+  return { key: "auth", label: "Auth", status: "fail", critical: true, detail: "not signed in \u2014 run `backthread login`" };
 }
 async function permsCheck(deps, env) {
   if (process.platform === "win32") {
@@ -7602,19 +7607,18 @@ async function permsCheck(deps, env) {
   }
   return { key: "perms", label: "Config perms", status: "ok", detail: `config 0600${dirMode !== null ? ", dir 0700" : ""}` };
 }
-async function repoCheck(env) {
-  try {
-    const cfg = await readConfig(env);
-    if (cfg.repo && REPO_SLUG_RE.test(cfg.repo)) {
-      return { key: "repo", label: "Repo", status: "ok", detail: cfg.repo };
-    }
-    if (cfg.repo) {
-      return { key: "repo", label: "Repo", status: "warn", detail: `connected slug "${cfg.repo}" is not owner/name \u2014 reconnect in the web app` };
-    }
-    return { key: "repo", label: "Repo", status: "warn", detail: "no repo connected \u2014 run `backthread install` (or connect it in the web app)" };
-  } catch {
+function repoCheck(loaded) {
+  if (loaded.error) {
     return { key: "repo", label: "Repo", status: "warn", detail: "could not read the connected repo" };
   }
+  const repo = loaded.config?.repo;
+  if (repo && REPO_SLUG_RE.test(repo)) {
+    return { key: "repo", label: "Repo", status: "ok", detail: repo };
+  }
+  if (repo) {
+    return { key: "repo", label: "Repo", status: "warn", detail: `connected slug "${repo}" is not owner/name \u2014 reconnect in the web app` };
+  }
+  return { key: "repo", label: "Repo", status: "warn", detail: "no repo connected \u2014 run `backthread install` (or connect it in the web app)" };
 }
 var AGENT_HOOK_FILES = [
   { agent: "claude-code", files: (h) => [join4(h, ".claude", "settings.json")] },
@@ -7674,11 +7678,17 @@ async function connectivityCheck(deps, env) {
   ];
   const results = await Promise.all(
     targets.map(async ({ name, url: url2 }) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
       try {
-        await doFetch(url2, { method: "GET", signal: AbortSignal.timeout(timeout) });
+        const res = await doFetch(url2, { method: "GET", signal: controller.signal });
+        await res.body?.cancel?.().catch(() => {
+        });
         return { name, reachable: true };
       } catch {
         return { name, reachable: false };
+      } finally {
+        clearTimeout(timer);
       }
     })
   );
@@ -7710,15 +7720,14 @@ async function versionCheck(deps) {
 }
 async function collectChecks(deps = {}) {
   const env = deps.env ?? process.env;
-  const [auth, perms, repo, hook, connectivity, version2] = await Promise.all([
-    authCheck(env),
+  const loaded = await loadConfig(env);
+  const [perms, hook, connectivity, version2] = await Promise.all([
     permsCheck(deps, env),
-    repoCheck(env),
     hookCheck(deps, env),
     connectivityCheck(deps, env),
     versionCheck(deps)
   ]);
-  return [auth, perms, repo, hook, connectivity, version2];
+  return [authCheck(loaded, env), perms, repoCheck(loaded), hook, connectivity, version2];
 }
 var GLYPH = { ok: "\u2713", fail: "\u2717", warn: "\u26A0", info: "\u2139" };
 function formatReport(checks) {

@@ -24,7 +24,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
-import { readConfig, configPath, configDir } from './config.js';
+import { readConfig, configPath, configDir, type BackthreadConfig } from './config.js';
 import { cliVersion, redactVersion } from './version.js';
 import { workerBaseUrl, functionsBaseUrl } from './urls.js';
 import { runNpm as realRunNpm, type NpmRun } from './npm.js';
@@ -63,22 +63,35 @@ const REPO_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
 
 // --- individual checks (each best-effort; never throws) ----------------------
 
-async function authCheck(env: NodeJS.ProcessEnv): Promise<Check> {
+// The config is read ONCE per doctor run (loadConfig) and shared by the auth + repo checks —
+// so a broken/unreadable config surfaces the same way in both, and we don't touch disk twice.
+interface LoadedConfig {
+  config: BackthreadConfig | null;
+  error: Error | null;
+}
+
+async function loadConfig(env: NodeJS.ProcessEnv): Promise<LoadedConfig> {
   try {
-    const cfg = await readConfig(env);
-    if (cfg.device_token) {
-      return { key: 'auth', label: 'Auth', status: 'ok', detail: 'signed in (device token present)' };
-    }
-    return { key: 'auth', label: 'Auth', status: 'fail', critical: true, detail: 'not signed in — run `backthread login`' };
+    return { config: await readConfig(env), error: null };
   } catch (e) {
+    return { config: null, error: e as Error };
+  }
+}
+
+function authCheck(loaded: LoadedConfig, env: NodeJS.ProcessEnv): Check {
+  if (loaded.error) {
     return {
       key: 'auth',
       label: 'Auth',
       status: 'fail',
       critical: true,
-      detail: `couldn't read ${configHint(env)} (${(e as Error).message ?? e}) — check its permissions`,
+      detail: `couldn't read ${configHint(env)} (${loaded.error.message ?? loaded.error}) — check its permissions`,
     };
   }
+  if (loaded.config?.device_token) {
+    return { key: 'auth', label: 'Auth', status: 'ok', detail: 'signed in (device token present)' };
+  }
+  return { key: 'auth', label: 'Auth', status: 'fail', critical: true, detail: 'not signed in — run `backthread login`' };
 }
 
 async function permsCheck(deps: DoctorDeps, env: NodeJS.ProcessEnv): Promise<Check> {
@@ -114,19 +127,18 @@ async function permsCheck(deps: DoctorDeps, env: NodeJS.ProcessEnv): Promise<Che
   return { key: 'perms', label: 'Config perms', status: 'ok', detail: `config 0600${dirMode !== null ? ', dir 0700' : ''}` };
 }
 
-async function repoCheck(env: NodeJS.ProcessEnv): Promise<Check> {
-  try {
-    const cfg = await readConfig(env);
-    if (cfg.repo && REPO_SLUG_RE.test(cfg.repo)) {
-      return { key: 'repo', label: 'Repo', status: 'ok', detail: cfg.repo };
-    }
-    if (cfg.repo) {
-      return { key: 'repo', label: 'Repo', status: 'warn', detail: `connected slug "${cfg.repo}" is not owner/name — reconnect in the web app` };
-    }
-    return { key: 'repo', label: 'Repo', status: 'warn', detail: 'no repo connected — run `backthread install` (or connect it in the web app)' };
-  } catch {
+function repoCheck(loaded: LoadedConfig): Check {
+  if (loaded.error) {
     return { key: 'repo', label: 'Repo', status: 'warn', detail: 'could not read the connected repo' };
   }
+  const repo = loaded.config?.repo;
+  if (repo && REPO_SLUG_RE.test(repo)) {
+    return { key: 'repo', label: 'Repo', status: 'ok', detail: repo };
+  }
+  if (repo) {
+    return { key: 'repo', label: 'Repo', status: 'warn', detail: `connected slug "${repo}" is not owner/name — reconnect in the web app` };
+  }
+  return { key: 'repo', label: 'Repo', status: 'warn', detail: 'no repo connected — run `backthread install` (or connect it in the web app)' };
 }
 
 // Host agents whose user-global hook we can look for, and the files that would carry it.
@@ -202,13 +214,21 @@ async function connectivityCheck(deps: DoctorDeps, env: NodeJS.ProcessEnv): Prom
 
   const results = await Promise.all(
     targets.map(async ({ name, url }) => {
+      // Own AbortController (not AbortSignal.timeout) so the timer is CLEARED on success —
+      // no pending 5s timer lingering after the check resolves.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
       try {
         // ANY HTTP response (even 401/404) proves the origin is reachable. Only a thrown
         // fetch (DNS/network/timeout) is "unreachable". GET (not HEAD) — some gateways 405 HEAD.
-        await doFetch(url, { method: 'GET', signal: AbortSignal.timeout(timeout) });
+        const res = await doFetch(url, { method: 'GET', signal: controller.signal });
+        // Drain the body so the socket is freed immediately (we only needed the status line).
+        await res.body?.cancel?.().catch(() => {});
         return { name, reachable: true };
       } catch {
         return { name, reachable: false };
+      } finally {
+        clearTimeout(timer);
       }
     }),
   );
@@ -246,17 +266,17 @@ async function versionCheck(deps: DoctorDeps): Promise<Check> {
 /** Run every check. Order is stable (matches the report). Never throws. */
 export async function collectChecks(deps: DoctorDeps = {}): Promise<Check[]> {
   const env = deps.env ?? process.env;
-  // Auth / perms / repo are local + fast; hook is local file reads; connectivity + version
-  // hit the network — run them concurrently, then present in a fixed order.
-  const [auth, perms, repo, hook, connectivity, version] = await Promise.all([
-    authCheck(env),
+  // Read the config ONCE, shared by auth + repo. Perms is a stat, hook is local file reads,
+  // connectivity + version hit the network — run the async checks concurrently, then present
+  // everything in a fixed order.
+  const loaded = await loadConfig(env);
+  const [perms, hook, connectivity, version] = await Promise.all([
     permsCheck(deps, env),
-    repoCheck(env),
     hookCheck(deps, env),
     connectivityCheck(deps, env),
     versionCheck(deps),
   ]);
-  return [auth, perms, repo, hook, connectivity, version];
+  return [authCheck(loaded, env), perms, repoCheck(loaded), hook, connectivity, version];
 }
 
 const GLYPH: Record<CheckStatus, string> = { ok: '✓', fail: '✗', warn: '⚠', info: 'ℹ' };
