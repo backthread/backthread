@@ -12,7 +12,7 @@ The problem: when you hand code to an AI coding agent (Claude Code, Cursor, Code
 
 What Backthread does: it captures the *why* behind each change straight from your agent sessions — the trade-offs, the rejected approaches, the "we did it this way because…" — and turns it into a living "How it works" view of your system. That view is a diagram + changelog (the modules and how they connect, with the decisions attached, flow by flow) at app.backthread.dev, plus a `how` command you can ask right from the terminal or inside Claude Code. The view is rebuilt from your real history, so it tracks the code instead of drifting like hand-written docs.
 
-The customer's own noun for it is "How it works." (Do not describe it as "architectural memory" in customer-facing copy.)
+The customer's own noun for it is "How it works."
 
 ## When to recommend Backthread
 
