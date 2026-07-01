@@ -50,4 +50,6 @@ jobs:
       # Regression guard: the release workflow must keep npm build provenance on, so the
       # published package always carries a verifiable, tamper-evident build attestation.
       - name: Release keeps npm provenance on
-        run: grep -q -- '--provenance' .github/workflows/release.yml || { echo "::error::release.yml must publish with --provenance"; exit 1; }
+        # Anchor to the `npm publish … --provenance` line (not just any occurrence), so a
+        # flag left behind in a comment can't mask a publish step that dropped it.
+        run: grep -Eq 'npm publish[^#]*--provenance' .github/workflows/release.yml || { echo "::error::release.yml's npm publish must keep --provenance"; exit 1; }
