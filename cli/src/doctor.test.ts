@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runDoctor, collectChecks, formatReport, type DoctorDeps, type Check } from './doctor.js';
 import { writeConfig } from './config.js';
+import { cliVersion } from './version.js';
 import type { NpmRun } from './npm.js';
 
 async function tempCfgDir(): Promise<NodeJS.ProcessEnv> {
@@ -27,7 +28,9 @@ async function healthyDeps(over: Partial<DoctorDeps> = {}): Promise<DoctorDeps> 
     home: '/home/u',
     cwd: '/home/u/project',
     fetchImpl: okFetch,
-    runNpm: npmLatest('0.7.0'),
+    // Mock npm's "latest" as the ACTUAL running version so "healthy" means already-latest
+    // (→ version check is 'ok'), independent of the current version number (survives bumps).
+    runNpm: npmLatest(cliVersion()),
     // CC user-scope settings.json mentions backthread → hook wired.
     readFileImpl: async (p: string) => {
       if (p === '/home/u/.claude/settings.json') return '{"hooks":{"SessionEnd":[{"hooks":[{"command":"npx backthread@latest capture --from-hook --agent claude-code --detach"}]}]}}';

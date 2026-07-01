@@ -2,7 +2,7 @@
   "name": "backthread",
   "displayName": "Backthread",
   "description": "Backthread helps you understand your codebase while AI ships features. It captures the why behind every Claude Code session so you can ask \"how does X work?\" without digging through PRs.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "author": {
     "name": "Backthread"
   },
