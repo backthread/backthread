@@ -26,8 +26,17 @@ export interface LogoutResult {
  * missing config (that's just "already signed out").
  */
 export async function runLogout(env: NodeJS.ProcessEnv = process.env): Promise<LogoutResult> {
-  const cfg = await readConfig(env);
   const where = configLocationHint(env);
+
+  // readConfig treats a MISSING file as an empty config (that's just "signed out"), but a
+  // non-ENOENT read failure (e.g. EACCES on a mis-permissioned file) would otherwise throw
+  // out to main()'s generic catch-all. Give logout its own actionable hint instead.
+  let cfg;
+  try {
+    cfg = await readConfig(env);
+  } catch (err) {
+    return { ok: false, cleared: false, message: `Couldn't read ${where} to sign out (${(err as Error).message ?? err}). Check its permissions and retry.` };
+  }
 
   if (!cfg.device_token) {
     return { ok: true, cleared: false, message: `Already signed out — no device token in ${where}.` };

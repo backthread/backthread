@@ -61,6 +61,19 @@ test('logout is an idempotent no-op when already signed out', async () => {
   assert.match(result.message, /Already signed out/);
 });
 
+test('logout returns a friendly ok:false when the config can not be read', async () => {
+  const env = await freshConfigDir();
+  await writeConfig({ device_token: 'backthread_pat_z' }, env);
+  // Point the dir at the config FILE itself so the readFile(dir/config.json) resolves to a
+  // path under a non-directory → a non-ENOENT error (ENOTDIR), exercising the catch branch.
+  const brokenEnv = { ...env, BACKTHREAD_CONFIG_DIR: configPath(env) };
+
+  const result = await runLogout(brokenEnv);
+  assert.equal(result.ok, false);
+  assert.equal(result.cleared, false);
+  assert.match(result.message, /Couldn't read/);
+});
+
 test('logout on a token-less-but-present config is still a clean no-op', async () => {
   const env = await freshConfigDir();
   await writeConfig({ repo: 'a/b' }, env); // repo connected, never logged in

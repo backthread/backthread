@@ -7350,8 +7350,13 @@ async function ensureAuth(opts = {}) {
 
 // src/logout.ts
 async function runLogout(env = process.env) {
-  const cfg = await readConfig(env);
   const where = configLocationHint3(env);
+  let cfg;
+  try {
+    cfg = await readConfig(env);
+  } catch (err) {
+    return { ok: false, cleared: false, message: `Couldn't read ${where} to sign out (${err.message ?? err}). Check its permissions and retry.` };
+  }
   if (!cfg.device_token) {
     return { ok: true, cleared: false, message: `Already signed out \u2014 no device token in ${where}.` };
   }
