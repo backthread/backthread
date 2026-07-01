@@ -6945,7 +6945,7 @@ function browserCommand(platform) {
     case "darwin":
       return { cmd: "open", prefixArgs: [] };
     case "win32":
-      return { cmd: "cmd", prefixArgs: ["/c", "start", ""] };
+      return { cmd: "rundll32", prefixArgs: ["url.dll,FileProtocolHandler"] };
     default:
       return { cmd: "xdg-open", prefixArgs: [] };
   }
@@ -7258,7 +7258,7 @@ async function pollForToken(sessionId, keypair, opts = {}) {
       return { ok: false, reason: "expired", message: "the login session expired before you authorized" };
     }
     if (status === "consumed") {
-      return { ok: false, reason: "error", message: "this login was already used \u2014 start a fresh `bt login`" };
+      return { ok: false, reason: "error", message: "this login was already used \u2014 start a fresh `backthread login`" };
     }
     await sleep(interval);
   }
