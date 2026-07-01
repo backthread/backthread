@@ -6892,109 +6892,6 @@ import { realpathSync } from "node:fs";
 // src/login.ts
 import { hostname } from "node:os";
 
-// src/loopback.ts
-import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
-function generateState() {
-  return base64url(randomBytes(32));
-}
-function base64url(bytes) {
-  return bytes.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-function validateCallback(method, rawUrl, expectedState) {
-  if ((method ?? "").toUpperCase() !== "GET") return { ok: false, reason: "bad_method" };
-  let url2;
-  try {
-    url2 = new URL(rawUrl ?? "", "http://127.0.0.1");
-  } catch {
-    return { ok: false, reason: "wrong_path" };
-  }
-  if (url2.pathname !== "/callback") return { ok: false, reason: "wrong_path" };
-  const errorParam = url2.searchParams.get("error");
-  if (errorParam) return { ok: false, reason: "error_param", error: errorParam };
-  const state = url2.searchParams.get("state");
-  if (state === null || state !== expectedState) return { ok: false, reason: "state_mismatch" };
-  const token = url2.searchParams.get("token");
-  if (!token || !/^backthread_pat_[A-Za-z0-9_-]+$/.test(token)) {
-    return { ok: false, reason: "missing_token" };
-  }
-  return { ok: true, token };
-}
-function resultPage(ok) {
-  const title = ok ? "You\u2019re connected" : "Something went wrong";
-  const body = ok ? "Backthread is now authorized on this device. You can close this tab and return to your terminal." : "Backthread couldn\u2019t finish authorizing this device. Close this tab and run <code>backthread login</code> again.";
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
-<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:18vh auto;padding:0 1.5rem;color:#18181b}
-h1{font-size:1.25rem}code{background:#f4f4f5;padding:.1em .3em;border-radius:4px}</style></head>
-<body><h1>${title}</h1><p>${body}</p></body></html>`;
-}
-function startLoopbackServer() {
-  return new Promise((resolveStart, rejectStart) => {
-    const state = generateState();
-    let outcome = null;
-    let onOutcome = null;
-    const deliver = (o) => {
-      if (outcome) return;
-      outcome = o;
-      onOutcome?.();
-    };
-    const server = createServer((req, res) => {
-      const result = validateCallback(req.method, req.url, state);
-      if (!result.ok && result.reason === "wrong_path") {
-        res.writeHead(404, { "Content-Type": "text/plain" });
-        res.end("not found");
-        return;
-      }
-      res.writeHead(result.ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(resultPage(result.ok));
-      if (result.ok && result.token) {
-        deliver({ token: result.token });
-      } else {
-        deliver({
-          error: new Error(
-            result.reason === "error_param" ? `web app reported: ${result.error}` : `invalid callback (${result.reason})`
-          )
-        });
-      }
-    });
-    server.on("error", (err) => {
-      if (outcome === null && onOutcome === null) rejectStart(err);
-      else deliver({ error: err });
-    });
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      const port = addr.port;
-      const close = () => {
-        try {
-          server.close();
-        } catch {
-        }
-      };
-      const waitForToken = (timeoutMs = 5 * 6e4) => new Promise((resolve, reject) => {
-        const finish = () => {
-          if (!outcome) return;
-          close();
-          if ("token" in outcome) resolve(outcome.token);
-          else reject(outcome.error);
-        };
-        const timer = setTimeout(() => {
-          close();
-          reject(new Error("timed out waiting for the browser to authorize this device"));
-        }, timeoutMs);
-        onOutcome = () => {
-          clearTimeout(timer);
-          finish();
-        };
-        if (outcome) {
-          clearTimeout(timer);
-          finish();
-        }
-      });
-      resolveStart({ port, state, waitForToken, close });
-    });
-  });
-}
-
 // src/urls.ts
 var DEFAULT_APP_URL = "https://app.backthread.dev";
 function appBaseUrl(env = process.env) {
@@ -7002,10 +6899,11 @@ function appBaseUrl(env = process.env) {
   if (override && override.trim().length > 0) return override.replace(/\/+$/, "");
   return DEFAULT_APP_URL;
 }
-function buildCliAuthUrl(port, state, env = process.env) {
+function buildCliAuthUrl(session, clientPubKey, env = process.env, label) {
   const u = new URL("/cli-auth", appBaseUrl(env));
-  u.searchParams.set("port", String(port));
-  u.searchParams.set("state", state);
+  u.searchParams.set("session", session);
+  u.searchParams.set("k", clientPubKey);
+  if (label && label.trim().length > 0) u.searchParams.set("label", label.trim());
   return u.toString();
 }
 var DEFAULT_WORKER_URL = "https://clew-ingest-worker.arpy-183.workers.dev";
@@ -7031,6 +6929,9 @@ function buildIngestDecisionsUrl(env = process.env) {
 }
 function buildOnboardingStateUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/onboarding-state`).toString();
+}
+function buildCliAuthPollUrl(env = process.env) {
+  return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/cli-auth-poll`).toString();
 }
 function buildRepoDeepLink(owner, name, env = process.env) {
   const base = appBaseUrl(env);
@@ -7278,22 +7179,117 @@ function configLocationHint(env) {
   return env.BACKTHREAD_CONFIG_DIR ? `${env.BACKTHREAD_CONFIG_DIR}/config.json` : "~/.backthread/config.json";
 }
 
+// src/cliAuthCrypto.ts
+import { createECDH, hkdfSync, createDecipheriv, randomBytes } from "node:crypto";
+var HKDF_SALT = Buffer.from("backthread-cli-auth");
+var HKDF_INFO = Buffer.from("device-token-v1");
+function generateSessionId() {
+  return toB64url(randomBytes(32));
+}
+function generateEphemeralKeypair() {
+  const ecdh = createECDH("prime256v1");
+  ecdh.generateKeys();
+  return { ecdh, publicKeyB64url: toB64url(ecdh.getPublicKey()) };
+}
+function decryptToken(enc, ecdh) {
+  const pagePub = fromB64url(enc.page_ephemeral_pubkey);
+  const shared = ecdh.computeSecret(pagePub);
+  const aesKey = Buffer.from(hkdfSync("sha256", shared, HKDF_SALT, HKDF_INFO, 32));
+  const ctFull = fromB64url(enc.ciphertext);
+  const tag = ctFull.subarray(ctFull.length - 16);
+  const ct = ctFull.subarray(0, ctFull.length - 16);
+  const iv = fromB64url(enc.iv);
+  const decipher = createDecipheriv("aes-256-gcm", aesKey, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8");
+}
+function toB64url(buf) {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function fromB64url(s) {
+  return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
+// src/cliAuthPoll.ts
+var TOKEN_RE = /^backthread_pat_[A-Za-z0-9_-]+$/;
+async function pollForToken(sessionId, keypair, opts = {}) {
+  const env = opts.env ?? process.env;
+  const doFetch = opts.fetchImpl ?? fetch;
+  const interval = opts.intervalMs ?? 1500;
+  const timeout = opts.timeoutMs ?? 5 * 6e4;
+  const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const now = opts.now ?? (() => Date.now());
+  const url2 = buildCliAuthPollUrl(env);
+  const deadline = now() + timeout;
+  while (now() < deadline) {
+    let res;
+    try {
+      res = await doFetch(url2, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...versionHeaders() },
+        // The CLI is the CONSUMING poller (default mode) — the browser peeks separately.
+        body: JSON.stringify({ session_id: sessionId })
+      });
+    } catch {
+      await sleep(interval);
+      continue;
+    }
+    if (res.status === 429 || res.status >= 500) {
+      await sleep(interval);
+      continue;
+    }
+    const body = await res.json().catch(() => null);
+    const status = typeof body?.status === "string" ? body.status : null;
+    if (status === "ready") {
+      const enc = extractPayload(body);
+      if (!enc) return { ok: false, reason: "error", message: "incomplete token payload from the server" };
+      let token;
+      try {
+        token = decryptToken(enc, keypair.ecdh);
+      } catch {
+        return { ok: false, reason: "error", message: "could not decrypt the token (key mismatch)" };
+      }
+      if (!TOKEN_RE.test(token)) {
+        return { ok: false, reason: "error", message: "the decrypted token was malformed" };
+      }
+      return { ok: true, token };
+    }
+    if (status === "expired") {
+      return { ok: false, reason: "expired", message: "the login session expired before you authorized" };
+    }
+    if (status === "consumed") {
+      return { ok: false, reason: "error", message: "this login was already used \u2014 start a fresh `bt login`" };
+    }
+    await sleep(interval);
+  }
+  return { ok: false, reason: "timeout", message: "timed out waiting for the browser to authorize this device" };
+}
+function extractPayload(body) {
+  if (!body) return null;
+  const { page_ephemeral_pubkey, iv, ciphertext } = body;
+  if (typeof page_ephemeral_pubkey === "string" && typeof iv === "string" && typeof ciphertext === "string") {
+    return { page_ephemeral_pubkey, iv, ciphertext };
+  }
+  return null;
+}
+
 // src/login.ts
 async function login(opts = {}) {
   const env = opts.env ?? process.env;
   const log = opts.log ?? ((m) => console.error(m));
   if (opts.claim) {
-    const result = await exchangeClaim(opts.claim, { env, label: deviceLabel() });
-    log(result.message);
-    return { ok: result.ok, message: result.message };
+    const result2 = await exchangeClaim(opts.claim, { env, label: deviceLabel() });
+    log(result2.message);
+    return { ok: result2.ok, message: result2.message };
   }
   if (opts.device) {
     return deviceLogin(log);
   }
-  const handle = await startLoopbackServer();
-  const authUrl = buildCliAuthUrl(handle.port, handle.state, env);
+  const sessionId = generateSessionId();
+  const keypair = generateEphemeralKeypair();
+  const authUrl = buildCliAuthUrl(sessionId, keypair.publicKeyB64url, env, deviceLabel());
   log("Opening your browser to authorize this device\u2026");
-  log(`If it doesn't open, visit:
+  log(`If it doesn't open \u2014 or you're on a remote/SSH box \u2014 open this on any device:
 
   ${authUrl}
 `);
@@ -7303,16 +7299,20 @@ async function login(opts = {}) {
       log("(Could not open a browser automatically \u2014 use the URL above.)");
     }
   }
-  let token;
-  try {
-    token = await handle.waitForToken();
-  } catch (err) {
-    handle.close();
-    return { ok: false, message: `Login failed: ${err.message}` };
+  const poll = opts.pollImpl ?? pollForToken;
+  const result = await poll(sessionId, keypair, { env });
+  if (!result.ok) {
+    return { ok: false, message: pollFailureMessage(result) };
   }
-  await updateConfig({ device_token: token }, env);
+  await updateConfig({ device_token: result.token }, env);
   log(`Authorized. Token stored in ${configLocationHint2(env)} (chmod 0600).`);
   return { ok: true, message: "Device authorized and token stored." };
+}
+function pollFailureMessage(result) {
+  if (result.reason === "expired" || result.reason === "timeout") {
+    return `Login ${result.reason === "expired" ? "expired" : "timed out"}: ${result.message}. Re-run \`backthread login\` to try again.`;
+  }
+  return `Login failed: ${result.message}`;
 }
 function deviceLabel() {
   try {
@@ -7330,10 +7330,11 @@ function deviceLogin(log) {
     [
       "Headless (--device) login is not available yet.",
       "",
-      "The device-code fallback needs a server-side device-authorization endpoint",
-      "that ships in a later task. For now, run `backthread login` on a machine with a",
-      "browser, or mint a token from the web app (Account \u2192 Connected devices) and",
-      'place it in ~/.backthread/config.json under "device_token".'
+      "You usually don\u2019t need it: `backthread login` prints a URL you can open on ANY",
+      "device (phone, laptop) \u2014 the token is delivered by polling, so the browser doesn\u2019t",
+      "have to be on this machine. For a fully browserless box, mint a token from the web",
+      "app (Account \u2192 Connected devices) and place it in ~/.backthread/config.json under",
+      '"device_token", or use `--claim <code>` from the web app.'
     ].join("\n")
   );
   return { ok: false, message: "--device fallback not implemented yet." };
@@ -14533,8 +14534,8 @@ function uint8ArrayToBase64(bytes) {
   }
   return btoa(binaryString);
 }
-function base64urlToUint8Array(base64url4) {
-  const base643 = base64url4.replace(/-/g, "+").replace(/_/g, "/");
+function base64urlToUint8Array(base64url3) {
+  const base643 = base64url3.replace(/-/g, "+").replace(/_/g, "/");
   const padding = "=".repeat((4 - base643.length % 4) % 4);
   return base64ToUint8Array(base643 + padding);
 }
@@ -14791,7 +14792,7 @@ var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError);
 var regexes_exports = {};
 __export(regexes_exports, {
   base64: () => base64,
-  base64url: () => base64url2,
+  base64url: () => base64url,
   bigint: () => bigint,
   boolean: () => boolean,
   browserEmail: () => browserEmail,
@@ -14886,7 +14887,7 @@ var mac = (delimiter) => {
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
 var cidrv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::|([0-9a-fA-F]{1,4})?::([0-9a-fA-F]{1,4}:?){0,6})\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
 var base64 = /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/;
-var base64url2 = /^[A-Za-z0-9_-]*$/;
+var base64url = /^[A-Za-z0-9_-]*$/;
 var hostname2 = /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\.?$/;
 var domain = /^([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
 var httpProtocol = /^https?$/;
@@ -15900,14 +15901,14 @@ var $ZodBase64 = /* @__PURE__ */ $constructor("$ZodBase64", (inst, def) => {
   };
 });
 function isValidBase64URL(data) {
-  if (!base64url2.test(data))
+  if (!base64url.test(data))
     return false;
   const base643 = data.replace(/[-_]/g, (c) => c === "-" ? "+" : "/");
   const padded = base643.padEnd(Math.ceil(base643.length / 4) * 4, "=");
   return isValidBase64(padded);
 }
 var $ZodBase64URL = /* @__PURE__ */ $constructor("$ZodBase64URL", (inst, def) => {
-  def.pattern ?? (def.pattern = base64url2);
+  def.pattern ?? (def.pattern = base64url);
   $ZodStringFormat.init(inst, def);
   inst._zod.bag.contentEncoding = "base64url";
   inst._zod.check = (payload) => {
@@ -25936,7 +25937,7 @@ __export(external_exports, {
   any: () => any,
   array: () => array,
   base64: () => base642,
-  base64url: () => base64url3,
+  base64url: () => base64url2,
   bigint: () => bigint2,
   boolean: () => boolean2,
   catch: () => _catch2,
@@ -26166,7 +26167,7 @@ __export(schemas_exports2, {
   any: () => any,
   array: () => array,
   base64: () => base642,
-  base64url: () => base64url3,
+  base64url: () => base64url2,
   bigint: () => bigint2,
   boolean: () => boolean2,
   catch: () => _catch2,
@@ -26788,7 +26789,7 @@ var ZodBase64URL = /* @__PURE__ */ $constructor("ZodBase64URL", (inst, def) => {
   $ZodBase64URL.init(inst, def);
   ZodStringFormat.init(inst, def);
 });
-function base64url3(params) {
+function base64url2(params) {
   return _base64url(ZodBase64URL, params);
 }
 var ZodE164 = /* @__PURE__ */ $constructor("ZodE164", (inst, def) => {

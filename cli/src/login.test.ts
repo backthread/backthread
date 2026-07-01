@@ -40,10 +40,10 @@ test('ensureAuth short-circuits when a token already exists (no browser flow)', 
 
 test('ensureAuth re-running with a token + NO claim never re-mints (idempotent)', async () => {
   // The re-run safety AC: a second run with an already-stored
-  // token must reuse it, never start the loopback or a claim exchange. We prove
+  // token must reuse it, never start the poll flow or a claim exchange. We prove
   // the short-circuit by passing noBrowser:false — if ensureAuth fell through to
-  // login() it would try to open a browser + start the loopback server; instead
-  // it returns the cached config untouched and the token is unchanged.
+  // login() it would try to open a browser + start polling; instead it returns the
+  // cached config untouched and the token is unchanged.
   await withTempEnv(async (env) => {
     await writeConfig({ device_token: 'backthread_pat_existing', repo: 'o/r' }, env);
     const cfg = await ensureAuth({ env, noBrowser: false });
@@ -65,6 +65,44 @@ test('ensureAuth WITH an explicit --claim re-exchanges even when a token exists'
       ensureAuth({ env: claimEnv, claim: 'backthread_claim_abc', log: () => {} }),
       /reach the exchange endpoint|Exchange failed|claim code/i,
     );
+  });
+});
+
+test('login (poll flow) writes the decrypted token and reports success', async () => {
+  // Drive login without a browser or network: noBrowser skips openBrowser, and the
+  // pollImpl seam stands in for the real poll+decrypt, returning a token as if the
+  // browser had authorized. The token must land in the 0600 config.
+  await withTempEnv(async (env) => {
+    const logs: string[] = [];
+    const result = await login({
+      env,
+      noBrowser: true,
+      log: (m) => logs.push(m),
+      pollImpl: async () => ({ ok: true, token: 'backthread_pat_polltoken' }),
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(await readConfig(env), { device_token: 'backthread_pat_polltoken' });
+    // The token is NEVER printed to the log (only a location hint).
+    assert.ok(!logs.join('\n').includes('backthread_pat_polltoken'));
+    // The printed URL is the poll flow (session/k), never a loopback port.
+    assert.ok(logs.join('\n').includes('/cli-auth?session='));
+    assert.ok(!logs.join('\n').includes('127.0.0.1'));
+  });
+});
+
+test('login (poll flow) surfaces a timeout with a retry URL and writes nothing', async () => {
+  await withTempEnv(async (env) => {
+    const result = await login({
+      env,
+      noBrowser: true,
+      log: () => {},
+      pollImpl: async () => ({ ok: false, reason: 'timeout', message: 'timed out waiting' }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /timed out/i);
+    assert.match(result.message, /backthread login/); // tells the user how to retry
+    // No token was written on failure.
+    assert.deepEqual(await readConfig(env), {});
   });
 });
 
