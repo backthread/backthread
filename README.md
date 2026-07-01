@@ -82,7 +82,7 @@ Not sure what's wired up? `npx backthread doctor` tells you exactly what's set u
 
 The redaction fence and the CLI are the parts of Backthread that run **on your machine and see your code**. The trust claim — *"source code and tool I/O never leave your machine unredacted"* — is only worth as much as your ability to verify it. So this code is public: read it, audit it, run it. **Verify us, don't trust us.**
 
-The structural extractor that derives the architecture view will join this repo as [`@backthread/extractor`](https://www.npmjs.com/package/@backthread/extractor) — polyglot by design (TypeScript today, more languages behind a pluggable adapter seam).
+The structural extractor that derives the architecture view will join this repo as `@backthread/extractor` (not yet published) — polyglot by design (TypeScript today, more languages behind a pluggable adapter seam).
 
 ## Security
 
