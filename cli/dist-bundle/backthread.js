@@ -7461,15 +7461,25 @@ function resolveScriptPath() {
   }
 }
 function realRunNpm(args) {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const isWin = process.platform === "win32";
+  const npm = isWin ? "npm.cmd" : "npm";
   return new Promise((resolve) => {
-    execFile(npm, args, { timeout: 12e4, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({
-        ok: !err,
-        stdout: (stdout ?? "").toString().trim(),
-        stderr: (stderr ?? "").toString().trim()
-      });
-    });
+    try {
+      execFile(
+        npm,
+        args,
+        { timeout: 12e4, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          resolve({
+            ok: !err,
+            stdout: (stdout ?? "").toString().trim(),
+            stderr: (stderr ?? "").toString().trim()
+          });
+        }
+      );
+    } catch (e) {
+      resolve({ ok: false, stdout: "", stderr: e.message ?? String(e) });
+    }
   });
 }
 function firstLine(s) {

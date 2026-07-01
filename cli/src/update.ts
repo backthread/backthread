@@ -86,18 +86,31 @@ function resolveScriptPath(): string {
   }
 }
 
-// Real npm spawn: `npm <args>` with a bounded timeout. npm is `npm.cmd` on Windows. Never
-// throws — a spawn failure (npm missing, timeout, network) resolves to ok:false + stderr.
+// Real npm spawn: `npm <args>` with a bounded timeout. On Windows npm is `npm.cmd`, and
+// modern Node (the CVE-2024-27980 mitigation) refuses to execFile a `.cmd`/`.bat` without
+// `shell: true` — so run under the shell there (our args are fixed, space/metachar-free, so
+// this is injection-safe). Never throws: a spawn failure (npm missing, timeout, network) —
+// including a SYNCHRONOUS validation throw from execFile — resolves to ok:false + stderr.
 function realRunNpm(args: string[]): Promise<NpmRun> {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const isWin = process.platform === 'win32';
+  const npm = isWin ? 'npm.cmd' : 'npm';
   return new Promise<NpmRun>((resolve) => {
-    execFile(npm, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({
-        ok: !err,
-        stdout: (stdout ?? '').toString().trim(),
-        stderr: (stderr ?? '').toString().trim(),
-      });
-    });
+    try {
+      execFile(
+        npm,
+        args,
+        { timeout: 120_000, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          resolve({
+            ok: !err,
+            stdout: (stdout ?? '').toString().trim(),
+            stderr: (stderr ?? '').toString().trim(),
+          });
+        },
+      );
+    } catch (e) {
+      resolve({ ok: false, stdout: '', stderr: (e as Error).message ?? String(e) });
+    }
   });
 }
 
