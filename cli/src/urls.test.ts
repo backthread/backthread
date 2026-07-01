@@ -14,7 +14,6 @@ import {
   buildRepoDeepLink,
   DEFAULT_FUNCTIONS_URL,
 } from './urls.js';
-import { browserCommand } from './browser.js';
 
 test('appBaseUrl defaults to production', () => {
   assert.equal(appBaseUrl({} as NodeJS.ProcessEnv), DEFAULT_APP_URL);
@@ -129,8 +128,5 @@ test('buildRepoDeepLink honors BACKTHREAD_APP_URL for local dev', () => {
   assert.equal(url, 'http://localhost:5173/o/r');
 });
 
-test('browserCommand maps each platform to a launcher', () => {
-  assert.deepEqual(browserCommand('darwin'), { cmd: 'open', prefixArgs: [] });
-  assert.deepEqual(browserCommand('win32'), { cmd: 'cmd', prefixArgs: ['/c', 'start', ''] });
-  assert.deepEqual(browserCommand('linux'), { cmd: 'xdg-open', prefixArgs: [] });
-});
+// (browserCommand's platform→launcher mapping is tested in browser.test.ts — its proper
+//  home. It was moved out of here as part of ARP-796's win32 rundll32 hardening.)

@@ -96,7 +96,7 @@ export async function pollForToken(
     }
     if (status === 'consumed') {
       // Someone (or a duplicate poll) already claimed this session's one-time fetch.
-      return { ok: false, reason: 'error', message: 'this login was already used — start a fresh `bt login`' };
+      return { ok: false, reason: 'error', message: 'this login was already used — start a fresh `backthread login`' };
     }
 
     // 'pending' (or an unknown transient) → keep waiting.
