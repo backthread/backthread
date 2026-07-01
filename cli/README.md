@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/backthread?logo=npm)](https://www.npmjs.com/package/backthread)
 [![license](https://img.shields.io/npm/l/backthread?label=license)](./LICENSE)
 
-**Keep the thread on what your AI agent actually shipped.**
+**Backthread keeps the thread on what your AI coding agent ships — it captures the why behind every change and turns it into a living 'How it works' view of your codebase you can actually query.**
 
 ```bash
 npx backthread
@@ -63,8 +63,9 @@ The bare command is the unified front door. Under the hood it:
 
 Then keep coding. At the end of every Claude Code session, Backthread captures
 the decisions automatically — nothing to remember. Ask *"how does X work?"* right
-inside Claude Code (the `backthread` MCP server exposes a `query` tool), or open
-the live diagram at [app.backthread.dev](https://app.backthread.dev).
+from the terminal (`backthread how "how does auth work?"`) or inside Claude Code
+(the `backthread` MCP server exposes a `query` tool + a `/backthread:how` slash
+command), or open the live diagram at [app.backthread.dev](https://app.backthread.dev).
 
 ### Claude Code plugin (alternative)
 
@@ -102,15 +103,18 @@ instead, and Codex users the [plugin](https://github.com/backthread/backthread/t
 ## Commands
 
 ```
-backthread           Set up Backthread — the unified front door (sign in + connect + capture).
-                     Idempotent: a returning user is told they're good to go.
-backthread install   Set up capture for this repo (sign in + hook + backfill)
-backthread start     First-run for the Claude Code plugin (sign in + your next step)
-backthread login     Authorize this device (opens your browser)
-backthread whoami    Show this device's config (your token is never printed)
-backthread capture   Capture a session's decisions (run automatically by the hook)
-backthread mcp       Start the MCP server — the capture + "how does X work?" query tools
-backthread help      Show usage
+backthread                     Set up Backthread — the front door (sign in + connect + capture).
+                               Idempotent: a returning user is told they're good to go.
+backthread how "<question>"    Ask how/why something works — a grounded, cited answer from your log
+backthread install             Set up capture for this repo (sign in + hook + backfill)
+backthread login / logout      Authorize this device / sign it out (drops the local token)
+backthread doctor              Diagnose your setup (auth, hook, connectivity, version, repo)
+backthread update              Update a global install to the latest (also -u)
+backthread version             Print the installed version (also --version, -v)
+backthread whoami              Show this device's config (your token is never printed)
+backthread capture             Capture a session's decisions (run automatically by the hook)
+backthread mcp                 Start the MCP server — the capture + "how does X work?" query tools
+backthread help                Show the full usage (also --help, -h)
 ```
 
 ## Requirements

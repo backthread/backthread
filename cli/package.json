@@ -1,7 +1,7 @@
 {
   "name": "backthread",
   "version": "0.7.0",
-  "description": "Backthread helps you understand your codebase while AI ships features. The CLI captures the why behind every AI session and lets you ask how your codebase works, right from the terminal.",
+  "description": "Backthread keeps the thread on what your AI coding agent ships — it captures the why behind every change and turns it into a living 'How it works' view of your codebase you can actually query.",
   "license": "MIT",
   "author": "Backthread",
   "homepage": "https://backthread.dev",
