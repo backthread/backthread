@@ -7348,6 +7348,34 @@ async function ensureAuth(opts = {}) {
   return readConfig(env);
 }
 
+// src/logout.ts
+async function runLogout(env = process.env) {
+  const where = configLocationHint3(env);
+  let cfg;
+  try {
+    cfg = await readConfig(env);
+  } catch (err) {
+    return { ok: false, cleared: false, message: `Couldn't read ${where} to sign out (${err.message ?? err}). Check its permissions and retry.` };
+  }
+  if (!cfg.device_token) {
+    return { ok: true, cleared: false, message: `Already signed out \u2014 no device token in ${where}.` };
+  }
+  const next = {};
+  if (cfg.account !== void 0) next.account = cfg.account;
+  if (cfg.repo !== void 0) next.repo = cfg.repo;
+  await writeConfig(next, env);
+  const kept = cfg.repo ? ` (kept your ${cfg.repo} link)` : "";
+  return {
+    ok: true,
+    cleared: true,
+    message: `Signed out. Removed this device's token from ${where}${kept}.
+Revoke it server-side under Account \u2192 Connected devices; \`backthread login\` re-authorizes.`
+  };
+}
+function configLocationHint3(env) {
+  return env.BACKTHREAD_CONFIG_DIR ? configPath(env) : "~/.backthread/config.json";
+}
+
 // src/capture.ts
 import { readFile as readFile9 } from "node:fs/promises";
 
@@ -9631,6 +9659,45 @@ function codexStdout(agent, status, outcome) {
   };
   if (outcome) ack.backthread.capture = outcome.status;
   return ack;
+}
+
+// src/suggest.ts
+var MAX_DISTANCE = 2;
+function editDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  let curr = new Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+function preferable(candidate, incumbent) {
+  if (candidate.length !== incumbent.length) return candidate.length < incumbent.length;
+  return candidate < incumbent;
+}
+function nearestCommand(input, commands) {
+  const needle = input.toLowerCase();
+  if (needle.length === 0) return null;
+  let best = null;
+  let bestDist = Infinity;
+  for (const cmd of commands) {
+    const d = editDistance(needle, cmd.toLowerCase());
+    if (d > MAX_DISTANCE || d >= needle.length) continue;
+    if (d < bestDist || d === bestDist && best !== null && preferable(cmd, best)) {
+      best = cmd;
+      bestDist = d;
+    }
+  }
+  return best;
 }
 
 // ../node_modules/zod/v3/helpers/util.js
@@ -34002,40 +34069,54 @@ async function runSessionStart(deps = {}) {
 }
 
 // src/bin/backthread.ts
-var USAGE = `backthread \u2014 capture the "why" of your AI-coded changes
+var USAGE = `backthread \u2014 keep the thread on what your AI agent actually shipped
 
 Usage:
-  backthread                    Set up Backthread (the unified front door \u2014 same as
-                          \`backthread start\`): trust copy + one-tap auth + your next
-                          step. Idempotent. [--claim <code>]
-  backthread start              First-run setup (backs the /backthread:start slash command):
-                          trust copy + one-tap auth + your next step. Idempotent.
+  backthread [command] [flags]
+
+Setup
+  backthread                    Set up Backthread here (the front door): sign in, connect
+                          this repo, wire up capture. Idempotent \u2014 re-run it anytime.
                           [--claim <code>]
-  backthread login              Authorize this device (opens your browser)
-  backthread login --claim <code>
-                          Authorize with a single-use claim code from the web app
-                          (no browser needed \u2014 codes expire in ~10 minutes)
-  backthread login --device     Headless / SSH login (device-code flow \u2014 coming soon)
-  backthread whoami             Show the current device's config (token is never printed)
-  backthread how <question>     Ask how/why something in this repo works \u2014 prints a
-                          grounded, cited answer from your Backthread decision log
-                          (backs the /backthread:how slash command). [--cwd <path>]
+  backthread start              Same as above, behind the /backthread:start slash command.
+  backthread login              Authorize this device (opens your browser; works over SSH \u2014
+                          the printed URL opens on any device) [--claim <code>] [--device]
+  backthread logout             Sign this device out \u2014 drop the local token, keep the repo link
+  backthread whoami             Show this device's config (the token is never printed)
+
+Ask
+  backthread how <question>     Ask how/why something here works \u2014 a grounded, cited answer
+                          from your decision log (backs /backthread:how). [--cwd <path>]
+
+Capture
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
-  backthread capture --from-hook
-                          Shared multi-agent hook entrypoint: read the hook payload off
-                          STDIN and capture the named transcript (always exits 0)
-                          [--agent <codex|cursor|gemini-cli>] [--detach]
-  backthread capture --manual   Manually capture a session now (the /backthread capture slash command)
+  backthread capture --manual   Capture the current session now (the /backthread capture command)
                           [--session <id>] [--transcript <path>] [--cwd <dir>]
   backthread mcp                Start the MCP server (capture + query tools) over stdio
-  backthread install            Set up capture for this repo (login + hook + backfill history)
-                          [--claim <code>] [--skip-auth] [--skip-hook] [--skip-backfill]
-  backthread install --agent <codex|cursor|gemini>
-                          Set up capture for another agent: write its USER-GLOBAL
-                          MCP server config + session-end capture hook (idempotent)
-  backthread help               Show this message
 
-Docs: https://app.backthread.dev`;
+Manage
+  backthread install            Set up capture for this repo (login + hook + backfill history)
+                          [--claim <code>] [--agent <codex|cursor|gemini>] [--skip-auth]
+                          [--skip-hook] [--skip-backfill]
+  backthread version            Print the installed version (also --version, -v)
+  backthread help               Show this message (also --help, -h)
+
+Your source never leaves your machine unredacted \u2014 it's checkable in this OSS repo.
+Docs:     https://app.backthread.dev
+Security: https://backthread.dev/security`;
+var KNOWN_COMMANDS = [
+  "start",
+  "login",
+  "logout",
+  "whoami",
+  "how",
+  "ask",
+  "capture",
+  "mcp",
+  "install",
+  "version",
+  "help"
+];
 function parseClaimFlag(rest) {
   const i = rest.indexOf("--claim");
   if (i === -1) return void 0;
@@ -34088,6 +34169,12 @@ async function main(argv, deps = {}) {
       ];
       console.log(lines.join("\n"));
       return cfg.device_token ? 0 : 1;
+    }
+    case "logout": {
+      const logoutImpl = deps.runLogoutImpl ?? runLogout;
+      const result = await logoutImpl();
+      console.log(result.message);
+      return result.ok ? 0 : 1;
     }
     case "capture": {
       if (rest.includes("--from-hook")) {
@@ -34165,6 +34252,11 @@ async function main(argv, deps = {}) {
     }
     case void 0:
       return onboarding(rest);
+    case "version":
+    case "--version":
+    case "-v":
+      console.log(cliVersion());
+      return 0;
     case "help":
     case "--help":
     case "-h":
@@ -34172,9 +34264,14 @@ async function main(argv, deps = {}) {
       return 0;
     default:
       if (command.startsWith("-")) return onboarding(argv);
-      console.error(`Unknown command: ${command}
-
-${USAGE}`);
+      {
+        const guess = nearestCommand(command, KNOWN_COMMANDS);
+        const didYouMean = guess ? ` Did you mean \`backthread ${guess}\`?` : "";
+        console.error(
+          `Unknown command: ${command}.${didYouMean}
+Run \`backthread help\` to see everything backthread can do.`
+        );
+      }
       return 1;
   }
 }

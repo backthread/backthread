@@ -95,17 +95,70 @@ test('usage documents the bare command as the unified front door', async () => {
   assert.match(out, /^\s*backthread\s+Set up Backthread/m);
 });
 
-// --- unknown subcommand → error + usage, exit 1, no onboarding ---------------
+// --- version → prints the bare version, no auth/network ----------------------
 
-test('an unknown subcommand errors with usage and exits 1 (no onboarding)', async () => {
+for (const arg of ['version', '--version', '-v']) {
+  test(`\`backthread ${arg}\` prints the bare version, exits 0, never onboards`, async () => {
+    const spy = onboardingSpy(0);
+    const { out, result } = await captureConsole(() => main([arg], { runOnboardingImpl: spy.impl }));
+    assert.equal(result, 0);
+    assert.match(out, /^\d+\.\d+\.\d+/, 'prints a semver and nothing else');
+    assert.doesNotMatch(out, /Usage:/, 'version is not help');
+    // `-v` / `--version` are leading-dash args — assert they are NOT swallowed by the
+    // bare-flag→onboarding fall-through (that would print nothing + run onboarding).
+    assert.equal(spy.calls.length, 0, 'version never triggers onboarding');
+  });
+}
+
+// --- logout → routes to the logout runner (seam keeps this off disk) ----------
+
+test('`backthread logout` routes to the logout runner and returns its exit code', async () => {
+  let called = 0;
+  const { out, result } = await captureConsole(() =>
+    main(['logout'], {
+      runLogoutImpl: async () => {
+        called += 1;
+        return { ok: true, cleared: true, message: 'Signed out.' };
+      },
+    }),
+  );
+  assert.equal(called, 1, 'logout ran exactly once');
+  assert.match(out, /Signed out\./, 'prints the runner message');
+  assert.equal(result, 0);
+});
+
+test('`backthread logout` propagates a non-ok result as exit 1', async () => {
+  const { result } = await captureConsole(() =>
+    main(['logout'], {
+      runLogoutImpl: async () => ({ ok: false, cleared: false, message: 'nope' }),
+    }),
+  );
+  assert.equal(result, 1);
+});
+
+// --- unknown subcommand → friendly pointer (not a usage wall), exit 1 ---------
+
+test('an unknown subcommand points at help and exits 1 (no onboarding, no usage wall)', async () => {
   const spy = onboardingSpy(0);
   const { err, result } = await captureConsole(() =>
     main(['frobnicate'], { runOnboardingImpl: spy.impl }),
   );
   assert.equal(result, 1);
   assert.match(err, /Unknown command: frobnicate/);
-  assert.match(err, /Usage:/);
+  assert.match(err, /backthread help/, 'points the user at help');
+  assert.doesNotMatch(err, /Usage:/, 'a typo gets a pointer, not the whole usage block');
+  assert.doesNotMatch(err, /Did you mean/, 'frobnicate is close to nothing');
   assert.equal(spy.calls.length, 0, 'an unknown command must not silently onboard');
+});
+
+test('a near-miss subcommand suggests the closest command', async () => {
+  const spy = onboardingSpy(0);
+  const { err, result } = await captureConsole(() =>
+    main(['lgoin'], { runOnboardingImpl: spy.impl }),
+  );
+  assert.equal(result, 1);
+  assert.match(err, /Did you mean `backthread login`\?/);
+  assert.equal(spy.calls.length, 0);
 });
 
 // --- `how` / `ask` → deterministic grounded ask (ARP-759) --------------------

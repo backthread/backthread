@@ -36,11 +36,13 @@
 import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 import { login } from '../login.js';
+import { runLogout } from '../logout.js';
 import { readConfig } from '../config.js';
 import { readHookInput, readRawHookInput, runCapture } from '../capture.js';
 import { parseManualArgs, runManualCapture } from '../captureCommand.js';
 import { parseAgent, runFromHook } from '../fromHook.js';
-import { setRequestAgent } from '../version.js';
+import { setRequestAgent, cliVersion } from '../version.js';
+import { nearestCommand } from '../suggest.js';
 import { startMcpServer, formatQueryOutcome } from '../mcp.js';
 import { queryDecisions } from '../query.js';
 import { runInstall } from '../install.js';
@@ -49,40 +51,58 @@ import { runStart } from '../firstRun.js';
 import { detectEntry } from '../entry.js';
 import { runSessionStart } from '../sessionStart.js';
 
-const USAGE = `backthread — capture the "why" of your AI-coded changes
+const USAGE = `backthread — keep the thread on what your AI agent actually shipped
 
 Usage:
-  backthread                    Set up Backthread (the unified front door — same as
-                          \`backthread start\`): trust copy + one-tap auth + your next
-                          step. Idempotent. [--claim <code>]
-  backthread start              First-run setup (backs the /backthread:start slash command):
-                          trust copy + one-tap auth + your next step. Idempotent.
+  backthread [command] [flags]
+
+Setup
+  backthread                    Set up Backthread here (the front door): sign in, connect
+                          this repo, wire up capture. Idempotent — re-run it anytime.
                           [--claim <code>]
-  backthread login              Authorize this device (opens your browser)
-  backthread login --claim <code>
-                          Authorize with a single-use claim code from the web app
-                          (no browser needed — codes expire in ~10 minutes)
-  backthread login --device     Headless / SSH login (device-code flow — coming soon)
-  backthread whoami             Show the current device's config (token is never printed)
-  backthread how <question>     Ask how/why something in this repo works — prints a
-                          grounded, cited answer from your Backthread decision log
-                          (backs the /backthread:how slash command). [--cwd <path>]
+  backthread start              Same as above, behind the /backthread:start slash command.
+  backthread login              Authorize this device (opens your browser; works over SSH —
+                          the printed URL opens on any device) [--claim <code>] [--device]
+  backthread logout             Sign this device out — drop the local token, keep the repo link
+  backthread whoami             Show this device's config (the token is never printed)
+
+Ask
+  backthread how <question>     Ask how/why something here works — a grounded, cited answer
+                          from your decision log (backs /backthread:how). [--cwd <path>]
+
+Capture
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
-  backthread capture --from-hook
-                          Shared multi-agent hook entrypoint: read the hook payload off
-                          STDIN and capture the named transcript (always exits 0)
-                          [--agent <codex|cursor|gemini-cli>] [--detach]
-  backthread capture --manual   Manually capture a session now (the /backthread capture slash command)
+  backthread capture --manual   Capture the current session now (the /backthread capture command)
                           [--session <id>] [--transcript <path>] [--cwd <dir>]
   backthread mcp                Start the MCP server (capture + query tools) over stdio
-  backthread install            Set up capture for this repo (login + hook + backfill history)
-                          [--claim <code>] [--skip-auth] [--skip-hook] [--skip-backfill]
-  backthread install --agent <codex|cursor|gemini>
-                          Set up capture for another agent: write its USER-GLOBAL
-                          MCP server config + session-end capture hook (idempotent)
-  backthread help               Show this message
 
-Docs: https://app.backthread.dev`;
+Manage
+  backthread install            Set up capture for this repo (login + hook + backfill history)
+                          [--claim <code>] [--agent <codex|cursor|gemini>] [--skip-auth]
+                          [--skip-hook] [--skip-backfill]
+  backthread version            Print the installed version (also --version, -v)
+  backthread help               Show this message (also --help, -h)
+
+Your source never leaves your machine unredacted — it's checkable in this OSS repo.
+Docs:     https://app.backthread.dev
+Security: https://backthread.dev/security`;
+
+// The user-facing subcommands "did you mean …?" suggests against (see suggest.ts). The
+// bare front door, internal hook entrypoints (session-start / capture --from-hook), and
+// pure flags are deliberately excluded — they aren't things a user types by name.
+const KNOWN_COMMANDS = [
+  'start',
+  'login',
+  'logout',
+  'whoami',
+  'how',
+  'ask',
+  'capture',
+  'mcp',
+  'install',
+  'version',
+  'help',
+] as const;
 
 // Returns an exit code, or null for a long-running command (e.g. `backthread mcp`) that
 // must keep the event loop alive instead of exiting.
@@ -154,6 +174,8 @@ export interface MainDeps {
   runOnboardingImpl?: (rest: string[]) => Promise<number>;
   /** Test seam for the `how`/`ask` grounded-ask dispatch. Defaults to queryDecisions. */
   queryDecisionsImpl?: typeof queryDecisions;
+  /** Test seam for `logout` (touches ~/.backthread on disk). Defaults to runLogout. */
+  runLogoutImpl?: typeof runLogout;
 }
 
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number | null> {
@@ -178,6 +200,16 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       ];
       console.log(lines.join('\n'));
       return cfg.device_token ? 0 : 1;
+    }
+    case 'logout': {
+      // Sign THIS device out: drop the local device token, keep the repo link + account
+      // so a later `backthread login` re-authorizes in place. Local-only (does not revoke
+      // server-side — the confirmation points at Account → Connected devices for that).
+      // Idempotent: a no-token config is a clean no-op, not an error.
+      const logoutImpl = deps.runLogoutImpl ?? runLogout;
+      const result = await logoutImpl();
+      console.log(result.message);
+      return result.ok ? 0 : 1;
     }
     case 'capture': {
       // THREE modes share `backthread capture`:
@@ -337,6 +369,14 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // for a returning user; entry-point-aware order (terminal-first by default, web-
       // initiated when a `--claim` code is present). `backthread help` still shows usage.
       return onboarding(rest);
+    case 'version':
+    case '--version':
+    case '-v':
+      // Print the installed version and nothing else — the scriptable convention (`node
+      // -v`, `npm -v`). Reads cli/package.json (the same source as the x-backthread-version
+      // header), so it NEVER needs auth or the network and can't drift from what npm ships.
+      console.log(cliVersion());
+      return 0;
     case 'help':
     case '--help':
     case '-h':
@@ -345,10 +385,18 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
     default:
       // A leading FLAG (e.g. `npx backthread --claim <code>` / `--device`) is still the
       // bare front door — the user passed an onboarding flag with no subcommand, so
-      // route the whole arg list to onboarding (help flags were handled just above).
-      // Anything else is a genuine unknown subcommand → error + usage.
+      // route the whole arg list to onboarding (version/help flags were handled just above).
       if (command.startsWith('-')) return onboarding(argv);
-      console.error(`Unknown command: ${command}\n\n${USAGE}`);
+      // A genuine unknown subcommand → a FRIENDLY pointer, never a bare stack trace or a
+      // wall of usage: name the typo, offer the nearest command when one is close, and
+      // point at `backthread help`. `backthread help` shows the full list on demand.
+      {
+        const guess = nearestCommand(command, KNOWN_COMMANDS);
+        const didYouMean = guess ? ` Did you mean \`backthread ${guess}\`?` : '';
+        console.error(
+          `Unknown command: ${command}.${didYouMean}\nRun \`backthread help\` to see everything backthread can do.`,
+        );
+      }
       return 1;
   }
 }
