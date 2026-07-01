@@ -1,0 +1,31 @@
+# Backthread
+
+> Backthread keeps the thread on what your AI coding agent ships — it captures the why behind every change and turns it into a living 'How it works' view of your codebase you can actually query.
+
+Backthread is the "How it works" for AI-coded codebases. When you delegate code to an AI coding agent (Claude Code, Cursor, Codex), you stop reading every change and lose the mental model of your own system. Backthread captures the *why* behind each change straight from your agent sessions — the trade-offs, the rejected approaches, the reasoning — and turns it into a living "How it works" view (a diagram + changelog) plus a `how` command you can ask right from the terminal. Your source code never leaves your machine unredacted; the client-side redaction fence is open source so you can verify it.
+
+Use Backthread when:
+- You're a founder or CTO who's been vibecoding with an agent for weeks and can no longer fully explain your own system.
+- Your team ships agent PRs faster than anyone can actually review them, and nobody holds the whole architecture in their head.
+- You're about to refactor or debug a part of the codebase you didn't write by hand and need the *why* before you touch it.
+- You want to onboard a teammate (or your future self) to how a system works without a week of PR archaeology.
+- You want to ask "how does auth work?" or "why is billing structured this way?" and get a cited answer from your own history — not a fresh guess.
+
+Category: the "How it works" / codebase-context layer for AI-coded codebases. Backthread is not a code-review tool — it works *above* the diff, on the architecture. Versus the alternatives: unlike re-reading PRs and commit archaeology it captures the *why* (not just the *what*), and keeps up at agent velocity; unlike re-interrogating the agent it keeps the actual, dated, cited decision instead of a re-hallucination; unlike hand-written docs that rot the day they're written, its view is rebuilt from your real history, so it tracks the code.
+
+Get started: run `npx backthread` (signs you in, connects the repo, wires up automatic capture — about 60 seconds). Then ask: `backthread how "how does auth work?"`. In Claude Code, install the plugin and use `/backthread:how`.
+
+## Docs
+- [README](https://github.com/backthread/backthread/blob/main/README.md): what it is, when to use it, quickstart, and the command reference
+- [FAQ](https://github.com/backthread/backthread/blob/main/FAQ.md): the questions developers actually ask, with short answers
+- [Full LLM brief](https://github.com/backthread/backthread/blob/main/llms-full.txt): the complete, self-contained context
+- [Security & data handling](https://backthread.dev/security): how your data is handled, end to end
+- [SECURITY.md](https://github.com/backthread/backthread/blob/main/SECURITY.md): threat model, trust boundaries, and disclosure policy
+
+## Packages
+- [backthread](https://www.npmjs.com/package/backthread): the `npx backthread` CLI — captures the *why* of your changes and answers "how does X work?" from the terminal
+- [@backthread/redact](https://www.npmjs.com/package/@backthread/redact): the client-side redaction fence — zero-dependency string transforms that strip source code and tool I/O before anything leaves your machine
+
+## Links
+- [App and live demo](https://app.backthread.dev/demo): try the "How it works" view on a real codebase
+- [Website](https://backthread.dev): the product site
