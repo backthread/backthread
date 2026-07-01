@@ -13,10 +13,10 @@
 //   backthread (no args)        the unified front door — alias of `backthread start`
 //                         (entry = terminal). Bare `npx backthread` runs onboarding.
 //   backthread start            the CC-plugin first-run: never-store-source trust
-//                         copy → one-tap auth (claim handoff / browser loopback) → the
+//                         copy → one-tap auth (claim handoff / browser poll flow) → the
 //                         unified state's next step. Idempotent (returning user not
 //                         re-onboarded). Backs the /backthread:start slash command.
-//   backthread login            browser OAuth-loopback → device token in ~/.backthread/config.json
+//   backthread login            browser poll flow → device token in ~/.backthread/config.json
 //   backthread login --device   headless device-code fallback (stubbed)
 //   backthread whoami           show what's in ~/.backthread/config.json (NEVER prints the token)
 //   backthread capture          SessionEnd/Stop hook: read transcript_path off the
@@ -286,7 +286,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // `/backthread:start` slash command — and the SAME flow a bare `npx backthread`
       // runs (see the `undefined` case). Idempotent: a returning user is short-
       // circuited (never re-onboarded). Otherwise: never-store-source trust copy →
-      // one-tap auth (claim handoff or browser loopback; `--device` is OUT OF SCOPE →
+      // one-tap auth (claim handoff or browser poll flow; `--device` is OUT OF SCOPE →
       // loud stub) → the unified state's canonical next step (the connect
       // nudge when no repo). runStart reports each step to stderr and returns a non-zero
       // exit ONLY on a genuine auth failure (capture won't run until the user acts).

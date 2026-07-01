@@ -10,6 +10,7 @@ import {
   buildGroundedAskUrl,
   buildReadDecisionsUrl,
   buildOnboardingStateUrl,
+  buildCliAuthPollUrl,
   buildRepoDeepLink,
   DEFAULT_FUNCTIONS_URL,
 } from './urls.js';
@@ -26,13 +27,39 @@ test('appBaseUrl honors BACKTHREAD_APP_URL and trims trailing slash', () => {
   );
 });
 
-test('buildCliAuthUrl encodes port + state on the /cli-auth path', () => {
-  const url = buildCliAuthUrl(54321, 'nonce-abc', {} as NodeJS.ProcessEnv);
+test('buildCliAuthUrl encodes session + CLI pubkey (k) on the /cli-auth path', () => {
+  const url = buildCliAuthUrl('sess-abc', 'PUBKEY123', {} as NodeJS.ProcessEnv);
   const u = new URL(url);
   assert.equal(u.origin, DEFAULT_APP_URL);
   assert.equal(u.pathname, '/cli-auth');
-  assert.equal(u.searchParams.get('port'), '54321');
-  assert.equal(u.searchParams.get('state'), 'nonce-abc');
+  assert.equal(u.searchParams.get('session'), 'sess-abc');
+  assert.equal(u.searchParams.get('k'), 'PUBKEY123');
+  // No loopback params — poll flow only.
+  assert.equal(u.searchParams.get('port'), null);
+});
+
+test('buildCliAuthUrl forwards an optional device label', () => {
+  const url = buildCliAuthUrl('sess', 'K', {} as NodeJS.ProcessEnv, 'jb-mbp.local');
+  assert.equal(new URL(url).searchParams.get('label'), 'jb-mbp.local');
+  // A blank/absent label is omitted (never sent empty).
+  const bare = buildCliAuthUrl('sess', 'K', {} as NodeJS.ProcessEnv, '   ');
+  assert.equal(new URL(bare).searchParams.get('label'), null);
+});
+
+test('buildCliAuthUrl honors BACKTHREAD_APP_URL for local dev', () => {
+  const url = buildCliAuthUrl('sess', 'K', { BACKTHREAD_APP_URL: 'http://localhost:5173' } as NodeJS.ProcessEnv);
+  assert.equal(new URL(url).origin, 'http://localhost:5173');
+});
+
+test('buildCliAuthPollUrl points at /cli-auth-poll on the functions origin', () => {
+  assert.equal(buildCliAuthPollUrl({} as NodeJS.ProcessEnv), `${DEFAULT_FUNCTIONS_URL}/cli-auth-poll`);
+});
+
+test('buildCliAuthPollUrl honors BACKTHREAD_FUNCTIONS_URL override', () => {
+  const url = buildCliAuthPollUrl({
+    BACKTHREAD_FUNCTIONS_URL: 'http://localhost:54321/functions/v1/',
+  } as NodeJS.ProcessEnv);
+  assert.equal(url, 'http://localhost:54321/functions/v1/cli-auth-poll');
 });
 
 test('workerBaseUrl defaults to the production ingest Worker', () => {

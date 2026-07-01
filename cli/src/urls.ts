@@ -1,10 +1,10 @@
-// urls.ts — web-app endpoint construction for the loopback flow.
+// urls.ts — web-app + Functions endpoint construction for the poll-based login flow.
 //
 // The CLI opens the web app's one-click authorize page. The default origin is
 // production; BACKTHREAD_APP_URL overrides it for local dev against `vite dev`
-// (http://localhost:5173). The page itself (src/cli-auth/) reads `port` + `state`
-// from the query string, mints the token via mint-device-token, and redirects
-// back to the loopback.
+// (http://localhost:5173). The page (src/cli-auth/) reads `session` + `k` from the
+// query string, mints the token, ENCRYPTS it in the browser to `k`, and stashes only
+// the ciphertext — which the CLI then polls for and decrypts locally (no loopback).
 
 // Production web app origin. Mirrors the diagram app's deployed host.
 export const DEFAULT_APP_URL = 'https://app.backthread.dev';
@@ -15,17 +15,20 @@ export function appBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   return DEFAULT_APP_URL;
 }
 
-// Build the /cli-auth URL the browser opens. The loopback `port` + CSRF `state`
-// nonce are passed so the page can redirect back to 127.0.0.1:<port>/callback with
-// the minted token + the same state.
+// Build the /cli-auth URL the browser opens for the POLL flow: the high-entropy
+// `session` id + the CLI's ephemeral public key `k` (raw P-256 point, base64url) so the
+// page can encrypt the minted token to us. An optional `label` (the device hostname) is
+// forwarded so mint-device-token names + rotates-in-place the token for this machine.
 export function buildCliAuthUrl(
-  port: number,
-  state: string,
+  session: string,
+  clientPubKey: string,
   env: NodeJS.ProcessEnv = process.env,
+  label?: string,
 ): string {
   const u = new URL('/cli-auth', appBaseUrl(env));
-  u.searchParams.set('port', String(port));
-  u.searchParams.set('state', state);
+  u.searchParams.set('session', session);
+  u.searchParams.set('k', clientPubKey);
+  if (label && label.trim().length > 0) u.searchParams.set('label', label.trim());
   return u.toString();
 }
 
@@ -87,6 +90,14 @@ export function buildReadDecisionsUrl(env: NodeJS.ProcessEnv = process.env): str
 // booleans + the canonical next step) the future plugin first-run consumes.
 export function buildOnboardingStateUrl(env: NodeJS.ProcessEnv = process.env): string {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, '')}/onboarding-state`).toString();
+}
+
+// Build the cli-auth-poll URL the poll-flow login POSTs `{ session_id }` to (ARP-773).
+// PUBLIC endpoint (no device token yet — that's what we're fetching): confidentiality is
+// ECDH, so the CLI just posts the session id and decrypts the returned ciphertext locally.
+// Same Functions origin + override seam as ingest/read.
+export function buildCliAuthPollUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL(`${functionsBaseUrl(env).replace(/\/+$/, '')}/cli-auth-poll`).toString();
 }
 
 // Build the web-app deep-link into a repo's "How it works" diagram. The query tool
