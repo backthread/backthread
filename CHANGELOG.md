@@ -5,6 +5,13 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.9.0
+
+**Grounded answers got sturdier: a 45-second ceiling with one automatic retry, and an honest note when the answer is newer than your checkout.** The `query` tool's server side also learned a lot this release (better retrieval, rename-aware answers, flow walk-throughs) — those improvements arrive with no CLI change; these two are the client's half.
+
+- **No more one-shot timeouts.** The grounded-ask round-trip now allows up to 45s per attempt (was 30s) and automatically retries once on a timeout, network error, or server 5xx before telling you anything went wrong — the request is read-only and idempotent, so retrying is always safe. Auth and not-found errors still fail immediately (they're not transient).
+- **The staleness note.** Answers come from the tracked branch's merged history; your checkout may be behind. When at least one decision cited in an answer landed in a merge your local checkout doesn't contain, the answer gains one line: *"Note: N of the decisions cited above landed after your checkout — this answer reflects the tracked branch."* It's computed entirely locally (two quick git checks per cited anchor), never phones anywhere, and stays silent on any git error, non-repo directory, or when everything cited is already in your history.
+
 ## 0.8.0
 
 **The commands you reflexively reach for — `version`, `update`, `doctor`, `logout` — now exist, plus a friendlier CLI, a Windows login fix, and a hardened supply chain.** This release rounds out the standard command surface and gets the package ready for wider use.
