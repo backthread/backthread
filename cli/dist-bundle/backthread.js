@@ -34093,7 +34093,8 @@ var StdioServerTransport = class {
 
 // src/query.ts
 var DEFAULT_QUESTION = "How does this project work?";
-var GROUNDED_ASK_TIMEOUT_MS = 3e4;
+var GROUNDED_ASK_TIMEOUT_MS = 45e3;
+var GROUNDED_ASK_ATTEMPTS = 2;
 function parseSlug2(slug) {
   const parts = slug.trim().replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
   if (parts.length !== 2) return null;
@@ -34140,33 +34141,46 @@ async function queryDecisions(input, deps = {}) {
     }
     const deepLink = buildRepoDeepLink(repo.owner, repo.name, env);
     const question = typeof input.question === "string" && input.question.trim().length > 0 ? input.question.trim() : DEFAULT_QUESTION;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
     let res;
-    try {
-      res = await doFetch(buildGroundedAskUrl(env), {
-        method: "POST",
-        headers: {
-          // Bearer device token — never logged.
-          Authorization: `Bearer ${config2.device_token}`,
-          "Content-Type": "application/json",
-          ...versionHeaders()
-          // x-backthread-version — server-side compat guard
-        },
-        // The server accepts `repo` as an "owner/name" slug (it re-resolves + gates).
-        body: JSON.stringify({ question, repo: `${repo.owner}/${repo.name}` }),
-        signal: ac.signal
-      });
-    } catch (e) {
-      const aborted2 = e.name === "AbortError";
+    let failDetail = "";
+    for (let attempt = 1; attempt <= GROUNDED_ASK_ATTEMPTS; attempt++) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
+      try {
+        res = await doFetch(buildGroundedAskUrl(env), {
+          method: "POST",
+          headers: {
+            // Bearer device token — never logged.
+            Authorization: `Bearer ${config2.device_token}`,
+            "Content-Type": "application/json",
+            ...versionHeaders()
+            // x-backthread-version — server-side compat guard
+          },
+          // The server accepts `repo` as an "owner/name" slug (it re-resolves + gates).
+          body: JSON.stringify({ question, repo: `${repo.owner}/${repo.name}` }),
+          signal: ac.signal
+        });
+        if (res.status >= 500 && attempt < GROUNDED_ASK_ATTEMPTS) {
+          failDetail = `grounded-ask rejected (${res.status})`;
+          res = void 0;
+          continue;
+        }
+        break;
+      } catch (e) {
+        const aborted2 = e.name === "AbortError";
+        failDetail = aborted2 ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1e3}s` : `grounded-ask request failed: ${e.message}`;
+        res = void 0;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (!res) {
       return {
         status: "read-failed",
-        detail: aborted2 ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1e3}s \u2014 try again.` : `grounded-ask request failed: ${e.message}`,
+        detail: `${failDetail} (after ${GROUNDED_ASK_ATTEMPTS} attempts) \u2014 try again.`,
         repo,
         deepLink
       };
-    } finally {
-      clearTimeout(timer);
     }
     let payload;
     try {

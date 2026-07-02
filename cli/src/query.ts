@@ -24,8 +24,12 @@ import { versionHeaders } from './version.js';
 const DEFAULT_QUESTION = 'How does this project work?';
 
 // Client-side bound on the grounded-ask round-trip (two server-side Flash-Lite
-// calls). Comfortably above the typical few seconds; abort → a clean read-failed.
-const GROUNDED_ASK_TIMEOUT_MS = 30_000;
+// calls). ARP-839 grilled budget: ~45s ceiling + ONE automatic retry on
+// timeout/5xx (the request is read-only/idempotent — safe to repeat); the user
+// sees a failure only when the retry also fails. p50 (seconds) is unchanged —
+// the ceiling only matters on the slow tail.
+const GROUNDED_ASK_TIMEOUT_MS = 45_000;
+const GROUNDED_ASK_ATTEMPTS = 2;
 
 // --- response contract (mirrors the worker /grounded-ask answer contract) -----
 // Kept structural (not imported from worker/) so the cli package never crosses into
@@ -188,35 +192,51 @@ export async function queryDecisions(
     // Unlike the old read-decisions hop, /grounded-ask does two Flash-Lite calls
     // server-side, so a response is seconds — bound it with a client-side timeout so
     // a hung/slow worker yields a clean read-failed instead of stalling the tool
-    // (the MCP host timeout would be the only backstop otherwise).
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
-    let res: Response;
-    try {
-      res = await doFetch(buildGroundedAskUrl(env), {
-        method: 'POST',
-        headers: {
-          // Bearer device token — never logged.
-          Authorization: `Bearer ${config.device_token}`,
-          'Content-Type': 'application/json',
-          ...versionHeaders(), // x-backthread-version — server-side compat guard
-        },
-        // The server accepts `repo` as an "owner/name" slug (it re-resolves + gates).
-        body: JSON.stringify({ question, repo: `${repo.owner}/${repo.name}` }),
-        signal: ac.signal,
-      });
-    } catch (e) {
-      const aborted = (e as Error).name === 'AbortError';
+    // (the MCP host timeout would be the only backstop otherwise). ARP-839: one
+    // automatic retry on timeout / network error / 5xx — read-only + idempotent, so
+    // repeating is safe; 4xx (auth, bad repo, too-old client) never retries.
+    let res: Response | undefined;
+    let failDetail = '';
+    for (let attempt = 1; attempt <= GROUNDED_ASK_ATTEMPTS; attempt++) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
+      try {
+        res = await doFetch(buildGroundedAskUrl(env), {
+          method: 'POST',
+          headers: {
+            // Bearer device token — never logged.
+            Authorization: `Bearer ${config.device_token}`,
+            'Content-Type': 'application/json',
+            ...versionHeaders(), // x-backthread-version — server-side compat guard
+          },
+          // The server accepts `repo` as an "owner/name" slug (it re-resolves + gates).
+          body: JSON.stringify({ question, repo: `${repo.owner}/${repo.name}` }),
+          signal: ac.signal,
+        });
+        if (res.status >= 500 && attempt < GROUNDED_ASK_ATTEMPTS) {
+          failDetail = `grounded-ask rejected (${res.status})`;
+          res = undefined;
+          continue; // transient server failure — retry once
+        }
+        break;
+      } catch (e) {
+        const aborted = (e as Error).name === 'AbortError';
+        failDetail = aborted
+          ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1000}s`
+          : `grounded-ask request failed: ${(e as Error).message}`;
+        res = undefined;
+        // timeout / network error — retry once, then surface
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (!res) {
       return {
         status: 'read-failed',
-        detail: aborted
-          ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1000}s — try again.`
-          : `grounded-ask request failed: ${(e as Error).message}`,
+        detail: `${failDetail} (after ${GROUNDED_ASK_ATTEMPTS} attempts) — try again.`,
         repo,
         deepLink,
       };
-    } finally {
-      clearTimeout(timer);
     }
 
     let payload: unknown;

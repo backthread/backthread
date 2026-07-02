@@ -214,6 +214,63 @@ test('queryDecisions: a timeout (AbortError) surfaces a clean read-failed', asyn
   assert.match(out.detail, /timed out/);
 });
 
+// --- ARP-839: one automatic retry on timeout / network error / 5xx ------------
+
+/** A fetch stub that fails the first N attempts, then succeeds. */
+function flakyFetch(failures: Array<'abort' | 'network' | 500>, okBody: unknown): {
+  fetch: typeof fetch;
+  calls: () => number;
+} {
+  let n = 0;
+  const fetchImpl = (async () => {
+    const mode = failures[n];
+    n += 1;
+    if (mode === 'abort') {
+      const e = new Error('aborted');
+      e.name = 'AbortError';
+      throw e;
+    }
+    if (mode === 'network') throw new Error('ECONNRESET');
+    if (mode === 500) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) } as Response;
+    return { ok: true, status: 200, json: async () => okBody } as Response;
+  }) as typeof fetch;
+  return { fetch: fetchImpl, calls: () => n };
+}
+
+test('queryDecisions: a 5xx first attempt retries once and succeeds (ARP-839)', async () => {
+  const { fetch, calls } = flakyFetch([500], OK_BODY);
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  assert.equal(out.status, 'ok');
+  assert.equal(calls(), 2, 'exactly one retry');
+});
+
+test('queryDecisions: a timed-out first attempt retries once and succeeds (ARP-839)', async () => {
+  const { fetch, calls } = flakyFetch(['abort'], OK_BODY);
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  assert.equal(out.status, 'ok');
+  assert.equal(calls(), 2);
+});
+
+test('queryDecisions: two failing attempts surface read-failed with the attempt count', async () => {
+  const { fetch, calls } = flakyFetch(['network', 'network'], OK_BODY);
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  assert.equal(out.status, 'read-failed');
+  assert.match(out.detail, /after 2 attempts/);
+  assert.equal(calls(), 2, 'never more than one retry');
+});
+
+test('queryDecisions: 4xx rejections do NOT retry (auth/bad-repo are not transient)', async () => {
+  let n = 0;
+  const fetchImpl = (async () => {
+    n += 1;
+    return { ok: false, status: 403, json: async () => ({ error: 'not authorized' }) } as Response;
+  }) as typeof fetch;
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl }));
+  assert.equal(out.status, 'read-failed');
+  assert.match(out.detail, /403/);
+  assert.equal(n, 1, '4xx must not be retried');
+});
+
 test('queryDecisions: 200 with no answer degrades to read-failed (never an empty result)', async () => {
   const { fetch } = stubFetch({ status: 200, body: { ok: true, answer: '' } });
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
