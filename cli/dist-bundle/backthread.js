@@ -34092,9 +34092,49 @@ var StdioServerTransport = class {
 };
 
 // src/query.ts
+import { execFileSync as execFileSync3 } from "node:child_process";
 var DEFAULT_QUESTION = "How does this project work?";
 var GROUNDED_ASK_TIMEOUT_MS = 45e3;
 var GROUNDED_ASK_ATTEMPTS = 2;
+var defaultGitRunner2 = (args, cwd) => {
+  try {
+    execFileSync3("git", args, { cwd, stdio: ["ignore", "ignore", "ignore"], timeout: 3e3 });
+    return 0;
+  } catch (e) {
+    const status = e.status;
+    return typeof status === "number" ? status : 128;
+  }
+};
+var SHA_RE = /^[0-9a-f]{7,40}$/i;
+function countCitationsAfterCheckout(citations, cwd, runGit = defaultGitRunner2) {
+  const stale = /* @__PURE__ */ new Map();
+  for (const c of citations) {
+    if (c.anchorSha && SHA_RE.test(c.anchorSha)) stale.set(c.anchorSha, false);
+  }
+  if (stale.size === 0) return 0;
+  for (const sha of stale.keys()) {
+    const exists = runGit(["rev-parse", "--quiet", "--verify", `${sha}^{commit}`], cwd);
+    if (exists === 1) {
+      stale.set(sha, true);
+      continue;
+    }
+    if (exists !== 0) return 0;
+    const contained = runGit(["merge-base", "--is-ancestor", sha, "HEAD"], cwd);
+    if (contained === 1) {
+      stale.set(sha, true);
+      continue;
+    }
+    if (contained !== 0) return 0;
+  }
+  let n = 0;
+  for (const c of citations) {
+    if (c.anchorSha && stale.get(c.anchorSha)) n += 1;
+  }
+  return n;
+}
+function stalenessNote(n) {
+  return `Note: ${n} of the decisions cited above landed after your checkout \u2014 this answer reflects the tracked branch.`;
+}
 function parseSlug2(slug) {
   const parts = slug.trim().replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
   if (parts.length !== 2) return null;
@@ -34208,13 +34248,22 @@ async function queryDecisions(input, deps = {}) {
       };
     }
     const upgrade = typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
+    const citations = normalizeCitations(rec.citations);
+    let renderedAnswer = answer;
+    try {
+      const n = countCitationsAfterCheckout(citations, input.cwd ?? process.cwd(), deps.runGitImpl);
+      if (n > 0) renderedAnswer = `${answer}
+
+${stalenessNote(n)}`;
+    } catch {
+    }
     return {
       status: "ok",
       detail: `grounded answer (${typeof rec.coverage === "string" ? rec.coverage : "partial"} coverage)`,
       repo,
-      answer,
+      answer: renderedAnswer,
       coverage: typeof rec.coverage === "string" ? rec.coverage : void 0,
-      citations: normalizeCitations(rec.citations),
+      citations,
       inferredSpans: Array.isArray(rec.inferredSpans) ? rec.inferredSpans.map(String) : [],
       // Prefer the server's deepLink; fall back to the locally-built one.
       deepLink: typeof rec.deepLink === "string" && rec.deepLink.length > 0 ? rec.deepLink : deepLink,
@@ -34234,7 +34283,8 @@ function normalizeCitations(raw) {
       title: String(r.title ?? ""),
       url: String(r.url ?? ""),
       moduleIds: Array.isArray(r.moduleIds) ? r.moduleIds.map(String) : [],
-      decidedAt: typeof r.decidedAt === "string" ? r.decidedAt : null
+      decidedAt: typeof r.decidedAt === "string" ? r.decidedAt : null,
+      anchorSha: typeof r.anchorSha === "string" ? r.anchorSha : null
     };
   });
 }

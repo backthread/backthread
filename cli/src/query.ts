@@ -14,6 +14,7 @@
 // a fake config (WITH a device_token), a mocked fetch, and a git-remote reader — no
 // live network, no browser, no real auth.
 
+import { execFileSync } from 'node:child_process';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildGroundedAskUrl, buildRepoDeepLink } from './urls.js';
@@ -44,6 +45,11 @@ export interface QueryCitation {
   url: string;
   moduleIds: string[];
   decidedAt: string | null;
+  /** ARP-840 — the tracked-branch commit that landed this decision (the release
+   * squash/merge commit, or the PR merge commit for git-derived decisions). Null
+   * when the server couldn't resolve one — such citations can't trigger the
+   * staleness note. Additive server field; absent from older responses. */
+  anchorSha: string | null;
 }
 
 /** A terse machine-readable status for the MCP tool layer + tests. */
@@ -104,6 +110,78 @@ export interface QueryDeps {
   readConfigImpl?: (env: NodeJS.ProcessEnv) => Promise<BackthreadConfig>;
   /** Test seam: the git-remote reader threaded into resolveRepo. */
   readRemoteImpl?: RemoteReader;
+  /** Test seam: the exit-code git runner for the ARP-840 staleness check. */
+  runGitImpl?: GitExitRunner;
+}
+
+// --- ARP-840: cited-decision staleness note ------------------------------------
+//
+// Grounded Ask answers from MERGED MAIN; the local checkout may be behind. When a
+// decision cited in THIS answer is anchored to a merge the checkout does not
+// contain, one note line is appended so the user knows why the answer may
+// "disagree with their code". Deterministic + offline (two local git checks per
+// distinct anchor), and FAIL-SILENT: any git error, non-repo cwd, or missing
+// anchors → no note. Mere commit-count divergence never fires it.
+
+/** Exit-code git runner (test seam): 0 = yes, 1 = clean no, anything else = error. */
+export type GitExitRunner = (args: string[], cwd: string) => number;
+
+const defaultGitRunner: GitExitRunner = (args, cwd) => {
+  try {
+    execFileSync('git', args, { cwd, stdio: ['ignore', 'ignore', 'ignore'], timeout: 3_000 });
+    return 0;
+  } catch (e) {
+    const status = (e as { status?: unknown }).status;
+    return typeof status === 'number' ? status : 128;
+  }
+};
+
+// Anchor shas come from the server; validate the shape before handing to git —
+// belt-and-braces against a malformed payload reaching argv.
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+/**
+ * How many cited decisions landed AFTER the local checkout: their anchor sha is
+ * absent from the local object store (`git rev-parse -q --verify <sha>^{commit}`
+ * — exit 1 is a clean "missing", unlike cat-file -e's 128) or present but not an
+ * ancestor of HEAD (`git merge-base --is-ancestor`). Returns 0 on ANY git error
+ * (exit ≥ 2 anywhere: not a repo, detached weirdness, git absent) — the note only
+ * fires on provable facts. Pure given the injected runner; unit-tested.
+ */
+export function countCitationsAfterCheckout(
+  citations: QueryCitation[],
+  cwd: string,
+  runGit: GitExitRunner = defaultGitRunner,
+): number {
+  const stale = new Map<string, boolean>(); // distinct anchor sha → landed-after?
+  for (const c of citations) {
+    if (c.anchorSha && SHA_RE.test(c.anchorSha)) stale.set(c.anchorSha, false);
+  }
+  if (stale.size === 0) return 0;
+  for (const sha of stale.keys()) {
+    const exists = runGit(['rev-parse', '--quiet', '--verify', `${sha}^{commit}`], cwd);
+    if (exists === 1) {
+      stale.set(sha, true); // not in the local object store → landed after
+      continue;
+    }
+    if (exists !== 0) return 0; // git error / not a repo → whole check silent
+    const contained = runGit(['merge-base', '--is-ancestor', sha, 'HEAD'], cwd);
+    if (contained === 1) {
+      stale.set(sha, true); // fetched but not merged into the checkout's history
+      continue;
+    }
+    if (contained !== 0) return 0;
+  }
+  let n = 0;
+  for (const c of citations) {
+    if (c.anchorSha && stale.get(c.anchorSha)) n += 1;
+  }
+  return n;
+}
+
+/** The one appended line (grilled wording). */
+export function stalenessNote(n: number): string {
+  return `Note: ${n} of the decisions cited above landed after your checkout — this answer reflects the tracked branch.`;
 }
 
 /** Parse a `owner/name` slug into a RepoHandle, or null if malformed. */
@@ -277,13 +355,26 @@ export async function queryDecisions(
     }
 
     const upgrade = typeof rec.upgrade === 'string' && rec.upgrade.length > 0 ? rec.upgrade : undefined;
+    const citations = normalizeCitations(rec.citations);
+
+    // ARP-840 — append ONE staleness line when ≥1 cited decision is anchored to a
+    // merge the local checkout doesn't contain. Fail-silent by construction (any
+    // git error → count 0); the verbatim-relay contract is otherwise unchanged.
+    let renderedAnswer = answer;
+    try {
+      const n = countCitationsAfterCheckout(citations, input.cwd ?? process.cwd(), deps.runGitImpl);
+      if (n > 0) renderedAnswer = `${answer}\n\n${stalenessNote(n)}`;
+    } catch {
+      /* never let the note break the answer */
+    }
+
     return {
       status: 'ok',
       detail: `grounded answer (${typeof rec.coverage === 'string' ? rec.coverage : 'partial'} coverage)`,
       repo,
-      answer,
+      answer: renderedAnswer,
       coverage: typeof rec.coverage === 'string' ? rec.coverage : undefined,
-      citations: normalizeCitations(rec.citations),
+      citations,
       inferredSpans: Array.isArray(rec.inferredSpans) ? rec.inferredSpans.map(String) : [],
       // Prefer the server's deepLink; fall back to the locally-built one.
       deepLink: typeof rec.deepLink === 'string' && rec.deepLink.length > 0 ? rec.deepLink : deepLink,
@@ -308,6 +399,7 @@ function normalizeCitations(raw: unknown): QueryCitation[] {
       url: String(r.url ?? ''),
       moduleIds: Array.isArray(r.moduleIds) ? r.moduleIds.map(String) : [],
       decidedAt: typeof r.decidedAt === 'string' ? r.decidedAt : null,
+      anchorSha: typeof r.anchorSha === 'string' ? r.anchorSha : null,
     };
   });
 }

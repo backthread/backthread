@@ -82,7 +82,7 @@ test('handleQueryTool: renders the server-synthesized answer VERBATIM', async ()
     repo: { owner: 'acme', name: 'app' },
     answer,
     coverage: 'partial',
-    citations: [{ n: 1, decisionId: 'd1', title: 'Use a queue', url: 'https://app.backthread.dev/acme/app', moduleIds: [], decidedAt: null }],
+    citations: [{ n: 1, decisionId: 'd1', title: 'Use a queue', url: 'https://app.backthread.dev/acme/app', moduleIds: [], decidedAt: null, anchorSha: null }],
     inferredSpans: [],
     deepLink: 'https://app.backthread.dev/acme/app',
   };

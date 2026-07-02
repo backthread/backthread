@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queryDecisions, resolveQueryRepo, type QueryDeps } from './query.js';
+import {
+  queryDecisions,
+  resolveQueryRepo,
+  countCitationsAfterCheckout,
+  stalenessNote,
+  type GitExitRunner,
+  type QueryCitation,
+  type QueryDeps,
+} from './query.js';
 import type { BackthreadConfig } from './config.js';
 
 // GUARDRAIL: every test injects a config WITH a device_token + a mocked fetch +
@@ -293,4 +301,101 @@ test('queryDecisions: BACKTHREAD_APP_URL override flows into the fallback deep-l
     deps({ fetchImpl: fetch, env: { BACKTHREAD_APP_URL: 'http://localhost:5173' } as NodeJS.ProcessEnv }),
   );
   assert.equal(out.deepLink, 'http://localhost:5173/acme/app');
+});
+
+
+// --- ARP-840: cited-decision staleness note -------------------------------------
+
+const SHA_A = 'a'.repeat(40); // contained in the checkout
+const SHA_B = 'b'.repeat(40); // exists locally but not an ancestor (fetched, unmerged)
+const SHA_C = 'c'.repeat(40); // absent from the object store (landed after)
+
+function cite(n: number, anchorSha: string | null): QueryCitation {
+  return { n, decisionId: `d${n}`, title: `T${n}`, url: '', moduleIds: [], decidedAt: null, anchorSha };
+}
+
+/** A git stub over a tiny world: which shas exist, which are ancestors of HEAD. */
+function gitWorld(world: { exists: string[]; ancestors: string[]; broken?: boolean }): GitExitRunner {
+  return (args) => {
+    if (world.broken) return 128; // not a repo / git exploded
+    if (args[0] === 'rev-parse') {
+      const sha = String(args[3]).replace(/\^\{commit\}$/, '');
+      return world.exists.includes(sha) ? 0 : 1;
+    }
+    if (args[0] === 'merge-base') {
+      return world.ancestors.includes(String(args[2])) ? 0 : 1;
+    }
+    return 128;
+  };
+}
+
+test('countCitationsAfterCheckout: counts CITATIONS whose anchor is missing or unmerged', () => {
+  const run = gitWorld({ exists: [SHA_A, SHA_B], ancestors: [SHA_A] });
+  const citations = [cite(1, SHA_A), cite(2, SHA_B), cite(3, SHA_C), cite(4, SHA_C), cite(5, null)];
+  // B (not ancestor) + two C citations (absent) = 3; A contained + null-anchor never count.
+  assert.equal(countCitationsAfterCheckout(citations, '/tmp', run), 3);
+});
+
+test('countCitationsAfterCheckout: all anchors contained → 0 (silent)', () => {
+  const run = gitWorld({ exists: [SHA_A], ancestors: [SHA_A] });
+  assert.equal(countCitationsAfterCheckout([cite(1, SHA_A), cite(2, SHA_A)], '/tmp', run), 0);
+});
+
+test('countCitationsAfterCheckout: no anchors at all → 0 without ever invoking git', () => {
+  const run: GitExitRunner = () => {
+    throw new Error('git must not run');
+  };
+  assert.equal(countCitationsAfterCheckout([cite(1, null), cite(2, 'not-a-sha!')], '/tmp', run), 0);
+});
+
+test('countCitationsAfterCheckout: any git error (non-repo cwd) → 0, note stays silent', () => {
+  const run = gitWorld({ exists: [], ancestors: [], broken: true });
+  assert.equal(countCitationsAfterCheckout([cite(1, SHA_C)], '/tmp', run), 0);
+});
+
+test('queryDecisions: appends the staleness note when a cited anchor landed after the checkout', async () => {
+  const body = {
+    ...OK_BODY,
+    citations: [
+      { n: 1, decisionId: 'd1', title: 'A', url: '', moduleIds: [], decidedAt: null, anchorSha: SHA_A },
+      { n: 2, decisionId: 'd2', title: 'B', url: '', moduleIds: [], decidedAt: null, anchorSha: SHA_C },
+    ],
+  };
+  const { fetch } = stubFetch({ status: 200, body });
+  const out = await queryDecisions(
+    { question: 'q', repo: 'acme/app', cwd: '/tmp' },
+    deps({ fetchImpl: fetch, runGitImpl: gitWorld({ exists: [SHA_A], ancestors: [SHA_A] }) }),
+  );
+  assert.equal(out.status, 'ok');
+  assert.ok(out.answer!.endsWith(stalenessNote(1)), `note appended once: ${out.answer!.slice(-140)}`);
+  // the note references the checkout, never breaks the verbatim prose above it
+  assert.ok(out.answer!.startsWith(String(OK_BODY.answer)));
+});
+
+test('queryDecisions: in-sync checkout → verbatim answer, no note', async () => {
+  const body = {
+    ...OK_BODY,
+    citations: [{ n: 1, decisionId: 'd1', title: 'A', url: '', moduleIds: [], decidedAt: null, anchorSha: SHA_A }],
+  };
+  const { fetch } = stubFetch({ status: 200, body });
+  const out = await queryDecisions(
+    { question: 'q', repo: 'acme/app', cwd: '/tmp' },
+    deps({ fetchImpl: fetch, runGitImpl: gitWorld({ exists: [SHA_A], ancestors: [SHA_A] }) }),
+  );
+  assert.equal(out.status, 'ok');
+  assert.equal(out.answer, OK_BODY.answer, 'verbatim relay unchanged');
+});
+
+test('queryDecisions: non-git cwd (runner errors) → verbatim answer, no note', async () => {
+  const body = {
+    ...OK_BODY,
+    citations: [{ n: 1, decisionId: 'd1', title: 'A', url: '', moduleIds: [], decidedAt: null, anchorSha: SHA_C }],
+  };
+  const { fetch } = stubFetch({ status: 200, body });
+  const out = await queryDecisions(
+    { question: 'q', repo: 'acme/app', cwd: '/tmp' },
+    deps({ fetchImpl: fetch, runGitImpl: gitWorld({ exists: [], ancestors: [], broken: true }) }),
+  );
+  assert.equal(out.status, 'ok');
+  assert.equal(out.answer, OK_BODY.answer);
 });
