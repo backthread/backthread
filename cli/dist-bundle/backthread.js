@@ -34361,7 +34361,7 @@ function buildMcpServer(deps = {}) {
     "query",
     {
       title: "How does it work? (grounded answer from this repo's decision log)",
-      description: `Call this FIRST whenever the user asks how or why any part of THIS repository works, is built, or was decided \u2014 before reading source files or guessing. It returns a short, grounded, CITED answer synthesized from the repo's Backthread decision log (the captured "why" that the code itself does not contain): the real reasons, trade-offs, and superseded approaches behind the current design. Pass the user's question. The answer is ready to relay verbatim \u2014 it already cites its sources and flags anything inferred. Read-only; nothing leaves the machine but the question.`,
+      description: "Answers why a codebase is the way it is \u2014 rationale, trade-offs, superseded/rejected approaches, how a design evolved, and whole-system data-flow \u2014 CITED from the repo's decision log (the history the code doesn't contain). Call it for why/evolution/architecture questions; for a whole-feature 'how does X work', pair it with reading the code for local mechanics. Do NOT call it for what one function or file does now \u2014 read that source. Pass the question; relay verbatim. Read-only.",
       inputSchema: {
         question: external_exports.string().optional().describe(`The user's "how/why does X work?" question, in their words. Load-bearing: the server retrieves and synthesizes the answer against it.`),
         repo: external_exports.string().optional().describe('Optional repo override as "owner/name"; otherwise the configured repo or the cwd git remote.'),
@@ -34419,18 +34419,7 @@ async function recordRoutingInjected(deps = {}) {
 }
 
 // src/sessionStart.ts
-var ROUTING_CONTEXT = [
-  'This repository is set up with Backthread, which has captured the "why" behind its',
-  "changes into a decision log. The backthread `query` MCP tool (and the",
-  '`/backthread:how` slash command) answer "how does X work?" and "why was Y decided?"',
-  "with a short, CITED answer synthesized from that log \u2014 the real reasons, trade-offs,",
-  "and superseded approaches the source code itself does not contain.",
-  "",
-  "When the user asks how or why any part of THIS codebase works, is structured, or was",
-  "decided, call the backthread `query` tool FIRST \u2014 before grepping or reading source",
-  "files. Pass the user's question and relay the cited answer it returns; only read",
-  "source afterwards if it didn't cover what you need."
-].join("\n");
+var ROUTING_CONTEXT = 'This repo has a Backthread decision log \u2014 the captured *why* behind its changes. Use the `query` MCP tool (or `/backthread:how`) when the user asks **why** something is the way it is, what was tried and rejected, how a design evolved, or how data flows across the whole system \u2014 it returns a short cited answer the source code can\'t give you. For what a single function or file does right now, just read the source. For a whole-feature "how does X work", do both: `query` for the why/architecture, read the code for the local mechanics.';
 function buildSessionStartOutput(isSetUp) {
   if (!isSetUp) return {};
   return {

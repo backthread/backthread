@@ -13,9 +13,13 @@ test('buildSessionStartOutput: set up → injects the routing instruction', () =
   const out = buildSessionStartOutput(true);
   assert.equal(out.hookSpecificOutput?.hookEventName, 'SessionStart');
   assert.equal(out.hookSpecificOutput?.additionalContext, ROUTING_CONTEXT);
-  // the instruction tells Claude to call the query tool first, before grepping
-  assert.match(ROUTING_CONTEXT, /call the backthread `query` tool FIRST/);
-  assert.match(ROUTING_CONTEXT, /before grepping/);
+  // ARP-854 — the instruction ROUTES BY QUESTION-TYPE: query for why/evolution/topology,
+  // read the source for single-module mechanics, both for a whole-feature "how".
+  assert.match(ROUTING_CONTEXT, /`query` MCP tool \(or `\/backthread:how`\)/);
+  assert.match(ROUTING_CONTEXT, /For what a single function or file does right now, just read the source/);
+  assert.match(ROUTING_CONTEXT, /whole-feature "how does X work", do both/);
+  // the retired "call FIRST for any how/why" framing must be gone from every surface
+  assert.doesNotMatch(ROUTING_CONTEXT, /call the backthread `query` tool FIRST/);
 });
 
 test('buildSessionStartOutput: not set up → no injection (empty object)', () => {
