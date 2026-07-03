@@ -1,10 +1,12 @@
 // sessionStart.ts — the SessionStart hook (ARP-763): AMBIENT ROUTING.
 //
-// The `query` tool answers "how does X work?" from the captured decision log, but
-// Claude Code routes to it only PROBABILISTICALLY from the tool description. This
-// SessionStart hook injects a one-time instruction into the session context that
-// tells Claude to reach for `query` FIRST on how/why questions, before grepping —
-// turning a plain "how does X work?" into a grounded answer with no new user habit.
+// The `query` tool answers from the captured decision log, but Claude Code routes to
+// it only PROBABILISTICALLY from the tool description. This SessionStart hook injects
+// a one-time instruction into the session context that ROUTES BY QUESTION-TYPE
+// (ARP-854): reach for `query` on why/evolution/topology (and whole-system data-flow)
+// questions, read the source for single-module current-code mechanics, do both for a
+// whole-feature "how does X work" — so the log's real add lands without misrouting the
+// questions the code answers better.
 //
 // THE HOOK IS SYNCHRONOUS, NOT detached: Claude Code reads this command's STDOUT for
 // the `hookSpecificOutput.additionalContext`, so we must print it here (a detached
@@ -28,19 +30,18 @@
 import { readConfig as defaultReadConfig, type BackthreadConfig } from './config.js';
 import { recordRoutingInjected as defaultRecordRoutingInjected } from './routingStats.js';
 
-/** The instruction injected into the session context when Backthread is set up. */
-export const ROUTING_CONTEXT = [
-  'This repository is set up with Backthread, which has captured the "why" behind its',
-  'changes into a decision log. The backthread `query` MCP tool (and the',
-  '`/backthread:how` slash command) answer "how does X work?" and "why was Y decided?"',
-  'with a short, CITED answer synthesized from that log — the real reasons, trade-offs,',
-  'and superseded approaches the source code itself does not contain.',
-  '',
-  'When the user asks how or why any part of THIS codebase works, is structured, or was',
-  'decided, call the backthread `query` tool FIRST — before grepping or reading source',
-  'files. Pass the user\'s question and relay the cited answer it returns; only read',
-  'source afterwards if it didn\'t cover what you need.',
-].join('\n');
+/** The instruction injected into the session context when Backthread is set up.
+ * ARP-854 — ROUTES BY QUESTION-TYPE (no longer "call FIRST for any how/why"): the
+ * log owns why/evolution/topology; single-module current-code mechanics is read
+ * straight from source; a whole-feature "how" pairs both. Shipped verbatim. */
+export const ROUTING_CONTEXT =
+  'This repo has a Backthread decision log — the captured *why* behind its changes. ' +
+  'Use the `query` MCP tool (or `/backthread:how`) when the user asks **why** something ' +
+  'is the way it is, what was tried and rejected, how a design evolved, or how data flows ' +
+  'across the whole system — it returns a short cited answer the source code can\'t give ' +
+  'you. For what a single function or file does right now, just read the source. For a ' +
+  'whole-feature "how does X work", do both: `query` for the why/architecture, read the ' +
+  'code for the local mechanics.';
 
 /** A Claude Code SessionStart hook result. An empty object = no injection. */
 export interface SessionStartHookOutput {

@@ -5,6 +5,12 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.10.0
+
+**`query` now routes by question-type — it's no longer "call it first for anything."** A head-to-head against a flagship model reading your source drew a clean line: the decision log's real, unique value is the *why* (rationale, trade-offs, superseded/rejected approaches), how a design *evolved*, and whole-system *data-flow* — the history your code doesn't contain. What a single function or file does *right now* is answered better by just reading that source. So the tool description and the session-start hint now say exactly that.
+
+- **Routed guidance.** `query` (and `/backthread:how`) are pointed at why / evolution / architecture / whole-system-flow questions; for a whole-feature "how does X work" you pair a grounded answer with reading the code for local mechanics; for "what does this one function do now," you read the source. No more reflexively routing single-module mechanics questions to the log (where they'd surface change-history instead of current behavior). Server-side changes ship alongside this — flow ("walk me through…") answers are now grounded on the diagram's own spine, and a single-module-mechanics question gets a read-the-source handoff instead of change-log soup — all with no CLI change; this release is the client's half (the routing copy).
+
 ## 0.9.0
 
 **Grounded answers got sturdier: a 45-second ceiling with one automatic retry, and an honest note when the answer is newer than your checkout.** The `query` tool's server side also learned a lot this release (better retrieval, rename-aware answers, flow walk-throughs) — those improvements arrive with no CLI change; these two are the client's half.

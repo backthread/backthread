@@ -1,5 +1,5 @@
 ---
-description: Ask how or why something in THIS repo works — get a short, grounded, cited answer synthesized from your Backthread "How it works" decision log (the captured "why" the code doesn't contain), instead of digging through PRs or guessing.
+description: Ask how a feature works or why it was built this way — returns a cited answer from the codebase's decision log (the why/architecture the source doesn't contain), best paired with reading the code for local mechanics.
 argument-hint: "<your question, e.g. how does auth work?>"
 disable-model-invocation: true
 ---
