@@ -33,15 +33,22 @@ import { recordRoutingInjected as defaultRecordRoutingInjected } from './routing
 /** The instruction injected into the session context when Backthread is set up.
  * ARP-854 — ROUTES BY QUESTION-TYPE (no longer "call FIRST for any how/why"): the
  * log owns why/evolution/topology; single-module current-code mechanics is read
- * straight from source; a whole-feature "how" pairs both. Shipped verbatim. */
+ * straight from source; a whole-feature "how" pairs both. ARP-1009 — the blindspot
+ * pass is positioned as a fast cited PRE-READ that precedes and aims the agent's
+ * own code pass (it surfaces the recorded deliberation the code doesn't contain);
+ * a complement, never a substitute. Shipped verbatim. */
 export const ROUTING_CONTEXT =
   'This repo has a Backthread decision log — the captured *why* behind its changes. ' +
   'Use the `query` MCP tool (or `/backthread:how`) when the user asks **why** something ' +
   'is the way it is, what was tried and rejected, how a design evolved, or how data flows ' +
   'across the whole system — it returns a short cited answer the source code can\'t give ' +
-  'you. For what a single function or file does right now, just read the source. For a ' +
-  'whole-feature "how does X work", do both: `query` for the why/architecture, read the ' +
-  'code for the local mechanics.';
+  'you. Before working in an unfamiliar area ("what am I missing", a **blindspot pass**, ' +
+  'unknown unknowns), call it FIRST — a seconds-cheap cited pre-read of what\'s on record: ' +
+  'the trade-offs knowingly accepted, standing assumptions, known limitations, and ' +
+  'rejected approaches. Then do your own pass through the code — the pre-read aims your ' +
+  'deep dive, it doesn\'t replace it. For what a single function or file does right now, ' +
+  'just read the source. For a whole-feature "how does X work", do both: `query` for the ' +
+  'why/architecture, read the code for the local mechanics.';
 
 /** A Claude Code SessionStart hook result. An empty object = no injection. */
 export interface SessionStartHookOutput {

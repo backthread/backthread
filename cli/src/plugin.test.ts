@@ -80,7 +80,7 @@ test('the SessionStart routing hook runs the bundled bin SYNCHRONOUSLY (ARP-763)
 });
 
 test('slash commands prefer the bundled bin (npx only as a fallback)', () => {
-  for (const name of ['capture.md', 'start.md', 'how.md']) {
+  for (const name of ['capture.md', 'start.md', 'how.md', 'blindspots.md']) {
     const md = readFileSync(join(cliRoot, 'commands', name), 'utf8');
     assert.ok(md.includes(BUNDLE_REF), `${name} references the bundled bin via \${CLAUDE_PLUGIN_ROOT}`);
     // npx is allowed ONLY as the else-branch fallback, never the sole invocation.
@@ -92,6 +92,14 @@ test('/backthread:how invokes the `how` subcommand and disables model invocation
   const md = readFileSync(join(cliRoot, 'commands', 'how.md'), 'utf8');
   assert.match(md, /node "\$BT" how --cwd/, 'how.md runs the deterministic `how` subcommand');
   assert.match(md, /disable-model-invocation:\s*true/, 'how.md is user-typed (model routes via the query tool instead)');
+});
+
+test('/backthread:blindspots routes a blindspot-framed question through the `how` subcommand (ARP-1009)', () => {
+  const md = readFileSync(join(cliRoot, 'commands', 'blindspots.md'), 'utf8');
+  assert.match(md, /node "\$BT" how --cwd/, 'blindspots.md reuses the deterministic `how` subcommand');
+  assert.match(md, /What am I missing about \$ARGUMENTS/, 'the area is framed as a blindspot question');
+  assert.match(md, /blindspot pass/i, "Thariq's vocabulary rides in the framed question");
+  assert.match(md, /disable-model-invocation:\s*true/, 'blindspots.md is user-typed');
 });
 
 test('the self-contained bundle is committed and is a node script', () => {

@@ -18,6 +18,16 @@ test('buildSessionStartOutput: set up → injects the routing instruction', () =
   assert.match(ROUTING_CONTEXT, /`query` MCP tool \(or `\/backthread:how`\)/);
   assert.match(ROUTING_CONTEXT, /For what a single function or file does right now, just read the source/);
   assert.match(ROUTING_CONTEXT, /whole-feature "how does X work", do both/);
+  // ARP-1009 — the blindspot pass is a PRE-READ: call FIRST, sequenced before (and
+  // aiming) the agent's own code pass — a complement, never a substitute (eval-driven
+  // repositioning; Thariq's vocabulary: "what am I missing" / "blindspot pass" /
+  // unknown unknowns).
+  assert.match(ROUTING_CONTEXT, /blindspot pass/);
+  assert.match(ROUTING_CONTEXT, /what am I missing/);
+  assert.match(ROUTING_CONTEXT, /unknown unknowns/);
+  assert.match(ROUTING_CONTEXT, /call it FIRST — a seconds-cheap cited pre-read/);
+  assert.match(ROUTING_CONTEXT, /Then do your own pass through the code/);
+  assert.match(ROUTING_CONTEXT, /aims your deep dive, it doesn't replace it/);
   // the retired "call FIRST for any how/why" framing must be gone from every surface
   assert.doesNotMatch(ROUTING_CONTEXT, /call the backthread `query` tool FIRST/);
 });
