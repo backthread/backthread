@@ -33,15 +33,19 @@ import { recordRoutingInjected as defaultRecordRoutingInjected } from './routing
 /** The instruction injected into the session context when Backthread is set up.
  * ARP-854 — ROUTES BY QUESTION-TYPE (no longer "call FIRST for any how/why"): the
  * log owns why/evolution/topology; single-module current-code mechanics is read
- * straight from source; a whole-feature "how" pairs both. Shipped verbatim. */
+ * straight from source; a whole-feature "how" pairs both. ARP-1009 — the log also
+ * owns the blindspot pass (unknown unknowns from captured risk items +
+ * deliberation). Shipped verbatim. */
 export const ROUTING_CONTEXT =
   'This repo has a Backthread decision log — the captured *why* behind its changes. ' +
   'Use the `query` MCP tool (or `/backthread:how`) when the user asks **why** something ' +
   'is the way it is, what was tried and rejected, how a design evolved, or how data flows ' +
   'across the whole system — it returns a short cited answer the source code can\'t give ' +
-  'you. For what a single function or file does right now, just read the source. For a ' +
-  'whole-feature "how does X work", do both: `query` for the why/architecture, read the ' +
-  'code for the local mechanics.';
+  'you. Also use it for a **blindspot pass** — "what am I missing", unknown unknowns, ' +
+  'gotchas before changing an area — it briefs from the captured trade-offs, assumptions, ' +
+  'limitations, and rejected alternatives. For what a single function or file does right ' +
+  'now, just read the source. For a whole-feature "how does X work", do both: `query` for ' +
+  'the why/architecture, read the code for the local mechanics.';
 
 /** A Claude Code SessionStart hook result. An empty object = no injection. */
 export interface SessionStartHookOutput {

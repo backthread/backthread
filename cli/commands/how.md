@@ -1,5 +1,5 @@
 ---
-description: Ask how a feature works or why it was built this way — returns a cited answer from the codebase's decision log (the why/architecture the source doesn't contain), best paired with reading the code for local mechanics.
+description: Ask how a feature works, why it was built this way, or what you're missing about an area (a blindspot pass — unknown unknowns) — returns a cited answer from the codebase's decision log (the why/architecture the source doesn't contain), best paired with reading the code for local mechanics.
 argument-hint: "<your question, e.g. how does auth work?>"
 disable-model-invocation: true
 ---

@@ -210,7 +210,7 @@ export function buildMcpServer(deps: BuildServerDeps = {}): McpServer {
     {
       title: 'How does it work? (grounded answer from this repo\'s decision log)',
       description:
-        'Answers why a codebase is the way it is — rationale, trade-offs, superseded/rejected approaches, how a design evolved, and whole-system data-flow — CITED from the repo\'s decision log (the history the code doesn\'t contain). Call it for why/evolution/architecture questions; for a whole-feature \'how does X work\', pair it with reading the code for local mechanics. Do NOT call it for what one function or file does now — read that source. Pass the question; relay verbatim. Read-only.',
+        'Answers why a codebase is the way it is — rationale, trade-offs, superseded/rejected approaches, how a design evolved, and whole-system data-flow — CITED from the repo\'s decision log (the history the code doesn\'t contain). Call it for why/evolution/architecture questions, and for a blindspot pass before touching an area ("what am I missing?", unknown unknowns) — it briefs from the captured trade-offs, assumptions, limitations, and rejected alternatives. For a whole-feature \'how does X work\', pair it with reading the code for local mechanics. Do NOT call it for what one function or file does now — read that source. Pass the question; relay verbatim. Read-only.',
       inputSchema: {
         question: z
           .string()

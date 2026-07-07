@@ -18,6 +18,12 @@ test('buildSessionStartOutput: set up → injects the routing instruction', () =
   assert.match(ROUTING_CONTEXT, /`query` MCP tool \(or `\/backthread:how`\)/);
   assert.match(ROUTING_CONTEXT, /For what a single function or file does right now, just read the source/);
   assert.match(ROUTING_CONTEXT, /whole-feature "how does X work", do both/);
+  // ARP-1009 — the blindspot question type routes to `query` (Thariq's vocabulary
+  // verbatim: "what am I missing" / "blindspot pass" / unknown unknowns).
+  assert.match(ROUTING_CONTEXT, /blindspot pass/);
+  assert.match(ROUTING_CONTEXT, /what am I missing/);
+  assert.match(ROUTING_CONTEXT, /unknown unknowns/);
+  assert.match(ROUTING_CONTEXT, /trade-offs, assumptions,\s*limitations, and rejected alternatives/);
   // the retired "call FIRST for any how/why" framing must be gone from every surface
   assert.doesNotMatch(ROUTING_CONTEXT, /call the backthread `query` tool FIRST/);
 });
