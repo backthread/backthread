@@ -5,6 +5,14 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.11.0
+
+**`query` learned the blindspot pre-read — "what am I missing about X?" is now a routed question type.** Before you work in an unfamiliar area, call it FIRST: a seconds-cheap, cited briefing of what's already on record — the trade-offs knowingly accepted, standing assumptions, known limitations, and rejected approaches — then do your own pass through the code. The pre-read aims your deep dive; it doesn't replace it.
+
+- **Routed guidance.** The tool description, the session-start hint, and `/backthread:how` now name the blindspot question type ("what am I missing", a "blindspot pass", "unknown unknowns") with the pre-read sequencing. The server-side half — a retrieval leg over the recorded trade-offs/assumptions/limitations with a relevance floor, plus a sectioned briefing format — shipped worker-side and needs no CLI change; this release is the client's half (the routing copy).
+- **New `/backthread:blindspots <area>` command.** A thin wrapper that asks the blindspot question for the area you name and renders the cited briefing. It reads what was captured, nothing more — sparse capture in an area means a thin, honestly-flagged briefing.
+- **Gemini extension description fixed.** `GEMINI.md` still described the pre-0.6.0 "salience-ranked decision log" contract; it now matches the cited-answer contract and carries the same pre-read guidance.
+
 ## 0.10.0
 
 **`query` now routes by question-type — it's no longer "call it first for anything."** A head-to-head against a flagship model reading your source drew a clean line: the decision log's real, unique value is the *why* (rationale, trade-offs, superseded/rejected approaches), how a design *evolved*, and whole-system *data-flow* — the history your code doesn't contain. What a single function or file does *right now* is answered better by just reading that source. So the tool description and the session-start hint now say exactly that.
