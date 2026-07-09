@@ -62,11 +62,25 @@ test('the SessionEnd hook runs the bundled bin, not npx, and detaches', () => {
   assert.ok(cmd.includes('--detach'), 'hook detaches so a slow capture is not SIGTERMd (ARP-682)');
 });
 
-test('the manifest registers SessionStart + SessionEnd only (Stop fires per-turn — intentionally absent)', () => {
+test('the manifest registers SessionStart + SessionEnd + Stop (Stop = per-turn capture)', () => {
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
-  // ARP-763 added SessionStart (ambient routing); Stop stays out (would capture
-  // every turn). Order doesn't matter to CC, so compare as a set.
-  assert.deepEqual([...Object.keys(hooks.hooks)].sort(), ['SessionEnd', 'SessionStart']);
+  // SessionStart (ambient routing); SessionEnd (session-end backstop); Stop (per-turn
+  // capture — the incremental capture watermark makes each fire cheap, so it's no longer
+  // "too aggressive"). Order doesn't matter to CC, so compare as a set.
+  assert.deepEqual([...Object.keys(hooks.hooks)].sort(), ['SessionEnd', 'SessionStart', 'Stop']);
+});
+
+test('the Stop hook runs the bundled bin, detaches, and matches the SessionEnd capture command', () => {
+  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
+  const stopCmd: string = hooks.hooks.Stop[0].hooks[0].command;
+  assert.ok(stopCmd.includes(BUNDLE_REF), 'Stop hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
+  assert.ok(!/\bnpx\b/.test(stopCmd), 'Stop hook must NOT use npx (the stale-resolution bug)');
+  assert.ok(stopCmd.includes('capture --from-hook'), 'Stop hook routes through the shared --from-hook entrypoint');
+  assert.ok(stopCmd.includes('--agent claude-code'), 'Stop hook selects the claude-code payload shape');
+  assert.ok(stopCmd.includes('--detach'), 'Stop hook detaches so a slow per-turn capture is not SIGTERMd');
+  // Per-turn Stop + once-per-session SessionEnd use the SAME command: the shared entrypoint
+  // + the per-session_id watermark make repeated fires incremental + de-duplicated.
+  assert.equal(stopCmd, hooks.hooks.SessionEnd[0].hooks[0].command, 'Stop + SessionEnd run the identical capture command');
 });
 
 test('the SessionStart routing hook runs the bundled bin SYNCHRONOUSLY (ARP-763)', () => {

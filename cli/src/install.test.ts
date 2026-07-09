@@ -4,6 +4,7 @@ import {
   HOOK_COMMAND,
   TRUST_COPY,
   mergeSessionEndHook,
+  mergeStopHook,
   registerHook,
   runInstall,
   stripSessionEndHook,
@@ -148,6 +149,47 @@ test('mergeSessionEndHook keeps a foreign hook while migrating the retired comma
   assert.equal(se[1].hooks[0].command, HOOK_COMMAND); // migrated in place
 });
 
+// --- mergeStopHook (pure) — per-turn capture ---------------------------------
+
+test('mergeStopHook adds the Stop hook to empty settings', () => {
+  const out = mergeStopHook({});
+  assert.ok(out);
+  const stop = (out!.hooks as any).Stop;
+  assert.equal(stop[0].hooks[0].command, HOOK_COMMAND);
+  assert.equal(stop[0].hooks[0].type, 'command');
+});
+
+test('mergeStopHook preserves other settings + other hook events (incl. SessionEnd)', () => {
+  const existing = {
+    permissions: { allow: ['Bash'] },
+    hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }] },
+  };
+  const out = mergeStopHook(existing)!;
+  assert.deepEqual((out as any).permissions, { allow: ['Bash'] });
+  assert.equal((out.hooks as any).SessionEnd[0].hooks[0].command, HOOK_COMMAND); // untouched
+  assert.equal((out.hooks as any).Stop[0].hooks[0].command, HOOK_COMMAND);
+  // never mutates the input
+  assert.equal((existing.hooks as any).Stop, undefined);
+});
+
+test('mergeStopHook is idempotent: returns null when our Stop hook is already present', () => {
+  const existing = {
+    hooks: { Stop: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }] },
+  };
+  assert.equal(mergeStopHook(existing), null);
+});
+
+test('mergeStopHook appends alongside a foreign Stop hook (never clobbers)', () => {
+  const existing = {
+    hooks: { Stop: [{ hooks: [{ type: 'command', command: 'other-tool' }] }] },
+  };
+  const out = mergeStopHook(existing)!;
+  const stop = (out.hooks as any).Stop;
+  assert.equal(stop.length, 2);
+  assert.equal(stop[0].hooks[0].command, 'other-tool'); // foreign kept
+  assert.equal(stop[1].hooks[0].command, HOOK_COMMAND); // ours appended
+});
+
 // --- registerHook (I/O seams) -----------------------------------------------
 
 test('registerHook writes merged settings to the USER-GLOBAL ~/.claude/settings.json', async () => {
@@ -169,18 +211,42 @@ test('registerHook writes merged settings to the USER-GLOBAL ~/.claude/settings.
   const parsed = JSON.parse(written!.data);
   assert.equal(parsed.hooks.SessionEnd[0].hooks[0].command, HOOK_COMMAND);
   assert.equal(parsed.hooks.SessionEnd[0].hooks[0].type, 'command');
+  // registerHook now also writes the per-turn Stop hook (same command).
+  assert.equal(parsed.hooks.Stop[0].hooks[0].command, HOOK_COMMAND);
+  assert.equal(parsed.hooks.Stop[0].hooks[0].type, 'command');
 });
 
-test('registerHook is a no-op (no write) when already present', async () => {
+test('registerHook is a no-op (no write) only when BOTH SessionEnd + Stop are already present', async () => {
   let wrote = false;
   const res = await registerHook({ home: HOME,
     readFileImpl: async () =>
-      JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }] } }),
+      JSON.stringify({
+        hooks: {
+          SessionEnd: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }],
+          Stop: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }],
+        },
+      }),
     writeFileImpl: async () => void (wrote = true),
     mkdirImpl: async () => {},
   });
   assert.equal(res.wrote, false);
   assert.equal(wrote, false);
+});
+
+test('registerHook ADDS the missing Stop hook to a legacy SessionEnd-only install', async () => {
+  let data = '';
+  const res = await registerHook({ home: HOME,
+    // Pre-per-turn install: only SessionEnd is registered.
+    readFileImpl: async () =>
+      JSON.stringify({ hooks: { SessionEnd: [{ hooks: [{ type: 'command', command: HOOK_COMMAND }] }] } }),
+    writeFileImpl: async (_p, d) => void (data = d),
+    mkdirImpl: async () => {},
+  });
+  assert.equal(res.wrote, true); // wrote because Stop was missing
+  const parsed = JSON.parse(data);
+  // SessionEnd untouched (still one entry), Stop added.
+  assert.equal(parsed.hooks.SessionEnd.length, 1);
+  assert.equal(parsed.hooks.Stop[0].hooks[0].command, HOOK_COMMAND);
 });
 
 test('registerHook merges into an existing valid settings.json (preserves keys)', async () => {
@@ -193,6 +259,7 @@ test('registerHook merges into an existing valid settings.json (preserves keys)'
   const parsed = JSON.parse(data);
   assert.deepEqual(parsed.permissions, { allow: ['Bash'] });
   assert.equal(parsed.hooks.SessionEnd[0].hooks[0].command, HOOK_COMMAND);
+  assert.equal(parsed.hooks.Stop[0].hooks[0].command, HOOK_COMMAND); // per-turn hook also written
 });
 
 test('registerHook REFUSES to overwrite a corrupt (unparseable) settings.json', async () => {

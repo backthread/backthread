@@ -1,6 +1,6 @@
 {
   "name": "backthread",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Backthread helps you understand your codebase while AI ships features. It captures the why behind every Gemini CLI session so you can ask \"how does X work?\" without digging through PRs.",
   "contextFileName": "GEMINI.md",
   "mcpServers": {

@@ -9024,12 +9024,20 @@ async function registerHook(deps = {}) {
       );
     }
   }
-  const merged = mergeSessionEndHook(settings);
-  if (merged === null) {
+  let next = settings;
+  let changed = false;
+  for (const merge2 of [mergeSessionEndHook, mergeStopHook]) {
+    const merged = merge2(next);
+    if (merged !== null) {
+      next = merged;
+      changed = true;
+    }
+  }
+  if (!changed) {
     return { wrote: false, path: settingsPath };
   }
   await doMkdir(settingsDir);
-  await doWriteFile(settingsPath, JSON.stringify(merged, null, 2) + "\n");
+  await doWriteFile(settingsPath, JSON.stringify(next, null, 2) + "\n");
   return { wrote: true, path: settingsPath };
 }
 function isNotFound3(err) {
@@ -9049,6 +9057,14 @@ function mergeSessionEndHook(settings) {
     nextSessionEnd.push({ hooks: [{ type: "command", command: HOOK_COMMAND }] });
   }
   hooks.SessionEnd = nextSessionEnd;
+  return { ...settings, hooks };
+}
+function mergeStopHook(settings) {
+  const hooks = settings.hooks && typeof settings.hooks === "object" && !Array.isArray(settings.hooks) ? { ...settings.hooks } : {};
+  const stop = Array.isArray(hooks.Stop) ? [...hooks.Stop] : [];
+  if (stop.some((g) => groupHasCommand(g, HOOK_COMMAND))) return null;
+  stop.push({ hooks: [{ type: "command", command: HOOK_COMMAND }] });
+  hooks.Stop = stop;
   return { ...settings, hooks };
 }
 function groupHasCommand(group, command) {
@@ -9193,7 +9209,7 @@ Backthread is set up for ${targetAgent}. New sessions are captured automatically
       const { wrote, path } = await registerHook(deps);
       hookRegistered = true;
       log(
-        wrote ? `[2/3] Hook: SessionEnd capture hook added to ${path}.` : `[2/3] Hook: SessionEnd capture hook already present in ${path} (no change).`
+        wrote ? `[2/3] Hook: capture hooks (per-turn Stop + SessionEnd) added to ${path}.` : `[2/3] Hook: capture hooks already present in ${path} (no change).`
       );
     } catch (e) {
       log(`[2/3] Hook: not registered \u2014 ${e.message}`);
