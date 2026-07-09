@@ -48,9 +48,13 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
-      # OIDC trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.x.
+      # OIDC trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.x. Pinned to
+      # 11.18.0 (the last 11.x) instead of @latest: npm 12.0.0 regressed
+      # `npm publish --provenance` with "Cannot find module 'sigstore'" (its bundled
+      # libnpmpublish can't resolve sigstore). 0.11.0 published cleanly on 11.18.0.
+      # Revisit the pin once a fixed 12.x ships.
       - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
-        run: npm install -g npm@latest
+        run: npm install -g npm@11.18.0
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
