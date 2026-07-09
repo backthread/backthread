@@ -6,7 +6,8 @@
 //   1. AUTH HANDSHAKE — `ensureAuth`: if there's already a device token we
 //      reuse it; otherwise run `backthread login` (the browser OAuth-loopback) once so the
 //      device is authorized and `~/.backthread/config.json` is written at 0600.
-//   2. REGISTER THE HOOK — wire the `SessionEnd` capture hook so the log stays
+//   2. REGISTER THE HOOKS — wire the per-turn `Stop` capture hook (decisions surface
+//      mid-session, once merged) + the `SessionEnd` backstop so the log stays
 //      self-maintaining. SEE the hook-mechanism note below.
 //   3. CHAIN BACKFILL — `runBackfill` (this PR): walk the repo's past Claude Code
 //      transcripts and run each through `runCapture`, so the decision log is
@@ -22,7 +23,7 @@
 //     hooks/hooks.json, `command` type, exec form with `${CLAUDE_PLUGIN_ROOT}`.)
 //   • FALLBACK = writing the USER-GLOBAL `~/.claude/settings.json`. For the bare
 //     `npx backthread` (non-plugin) install path there is no manifest doing the
-//     wiring, so `backthread install` writes the SessionEnd entry itself. It writes
+//     wiring, so `backthread install` writes the Stop + SessionEnd entries itself. It writes
 //     the USER scope (`~/.claude/settings.json`), NOT the project `.claude/settings.json`
 //     (ARP-680): a per-project hook is gitignored + absent from git worktrees, so
 //     worktree/multi-repo sessions silently never capture — the exact bug that froze
@@ -162,7 +163,7 @@ export interface InstallResult {
   exitCode: number;
   /** Whether the device ended up authorized. */
   authed: boolean;
-  /** Whether the SessionEnd hook is registered in settings.json (false when skipped for the plugin path). */
+  /** Whether the capture hooks (Stop + SessionEnd) are registered in settings.json (false when skipped for the plugin path). */
   hookRegistered: boolean;
   /** The backfill summary (null when skipped). */
   backfill: BackfillSummary | null;
@@ -173,14 +174,17 @@ export interface InstallResult {
 }
 
 /**
- * Register the SessionEnd capture hook in the USER-GLOBAL `~/.claude/settings.json`
- * (the bare-`npx backthread` fallback — the plugin path declares it in the manifest).
- * USER scope on purpose (ARP-680): a project `.claude/settings.json` hook is gitignored
- * + absent from git worktrees, so it silently never captures there; the user-scope hook
- * follows the user across every repo + worktree. Pure merge: reads the existing settings,
- * adds our `SessionEnd → {@link HOOK_COMMAND}` entry ONLY if an identical one isn't already
- * present (and upgrades a retired command in place), preserving every other key/hook.
- * Idempotent. Returns whether a write happened (false = already present / no change).
+ * Register the capture hooks in the USER-GLOBAL `~/.claude/settings.json` (the bare-`npx
+ * backthread` fallback — the plugin path declares them in the manifest): the once-per-
+ * session `SessionEnd` backstop AND the per-turn `Stop` hook (so merged decisions surface
+ * mid-session, not only at session end — the incremental capture watermark makes each
+ * per-turn fire cheap). USER scope on purpose: a project `.claude/settings.json` hook is
+ * gitignored + absent from git worktrees, so it silently never captures there; the
+ * user-scope hook follows the user across every repo + worktree. Pure merge: reads the
+ * existing settings, adds each `event → {@link HOOK_COMMAND}` entry ONLY if an identical one
+ * isn't already present (and upgrades a retired SessionEnd command in place), preserving
+ * every other key/hook. Idempotent. Returns whether a write happened (false = both already
+ * present / no change).
  */
 export async function registerHook(
   deps: InstallDeps = {},
@@ -229,13 +233,25 @@ export async function registerHook(
     }
   }
 
-  const merged = mergeSessionEndHook(settings);
-  if (merged === null) {
-    return { wrote: false, path: settingsPath }; // already registered — no-op (idempotent)
+  // Register BOTH the SessionEnd backstop AND the per-turn Stop hook: apply each merge in
+  // turn, threading the result, so a single write lands both. Each merge is a no-op when
+  // its event is already present, so re-running is idempotent — and an existing
+  // SessionEnd-only install (pre-per-turn) gains the Stop hook on its next `backthread install`.
+  let next = settings;
+  let changed = false;
+  for (const merge of [mergeSessionEndHook, mergeStopHook]) {
+    const merged = merge(next);
+    if (merged !== null) {
+      next = merged;
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return { wrote: false, path: settingsPath }; // both already registered — no-op (idempotent)
   }
 
   await doMkdir(settingsDir);
-  await doWriteFile(settingsPath, JSON.stringify(merged, null, 2) + '\n');
+  await doWriteFile(settingsPath, JSON.stringify(next, null, 2) + '\n');
   return { wrote: true, path: settingsPath };
 }
 
@@ -285,6 +301,37 @@ export function mergeSessionEndHook(
   }
 
   hooks.SessionEnd = nextSessionEnd;
+  return { ...settings, hooks };
+}
+
+/**
+ * Pure merge of our per-turn `Stop` capture hook into a settings object — the SAME
+ * command as SessionEnd ({@link HOOK_COMMAND}), under the `Stop` event, so the bare-npx
+ * CC path captures PER TURN like the plugin (and like Codex/Cursor). A Stop fire is
+ * incremental — the shared `--from-hook` entrypoint's per-session_id watermark infers
+ * only the turns added since the last capture — so per-turn is not "re-capture
+ * everything". Returns the new settings, or `null` when our Stop hook is already present
+ * (idempotent, so re-running install is safe and an existing SessionEnd-only install
+ * gains this on the next run). NO legacy migration: `Stop` was never registered before,
+ * so there's nothing to rewrite — append if absent, preserving foreign Stop hooks + every
+ * other key. Never mutates `settings`. Exported for unit testing.
+ */
+export function mergeStopHook(
+  settings: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const hooks: Record<string, unknown> =
+    settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+      ? { ...(settings.hooks as Record<string, unknown>) }
+      : {};
+
+  const stop: unknown[] = Array.isArray(hooks.Stop) ? [...(hooks.Stop as unknown[])] : [];
+
+  // Already on our command anywhere → no-op (re-running install / hand-added).
+  if (stop.some((g) => groupHasCommand(g, HOOK_COMMAND))) return null;
+
+  // Append a fresh group, preserving any foreign Stop hooks.
+  stop.push({ hooks: [{ type: 'command', command: HOOK_COMMAND }] });
+  hooks.Stop = stop;
   return { ...settings, hooks };
 }
 
@@ -498,8 +545,8 @@ export async function runInstall(
       hookRegistered = true;
       log(
         wrote
-          ? `[2/3] Hook: SessionEnd capture hook added to ${path}.`
-          : `[2/3] Hook: SessionEnd capture hook already present in ${path} (no change).`,
+          ? `[2/3] Hook: capture hooks (per-turn Stop + SessionEnd) added to ${path}.`
+          : `[2/3] Hook: capture hooks already present in ${path} (no change).`,
       );
     } catch (e) {
       // Includes the 'refusing to overwrite a corrupt settings.json' case — we
