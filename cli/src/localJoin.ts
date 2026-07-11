@@ -193,7 +193,10 @@ function clampText(text: string, maxChars: number): string {
 }
 
 function renderContext(term: string, modules: JoinModule[], decisions: JoinDecision[], budget: number): string {
-  const lines: string[] = [`Backthread — local context for "${term}":`];
+  // The term is a raw grep PATTERN (may carry newlines / regex metachars); collapse
+  // + truncate it so it can't break the single-line header the agent reads.
+  const shownTerm = term.replace(/\s+/g, ' ').trim().slice(0, 80);
+  const lines: string[] = [`Backthread — local context for "${shownTerm}":`];
   if (modules.length) {
     lines.push('Structure:');
     for (const m of modules) {
