@@ -1,0 +1,33 @@
+{
+  "comment": "Build config for @backthread/extractor. `module: preserve` uses bundler-style resolution (matching the host app's ingest typecheck) while still emitting ESM .js + .d.ts to dist/. Imports carry explicit .js extensions, so the output is Node-ESM runnable and bundler-friendly. Tests (*.test.ts) + the testkit shim are excluded from the published build; they run under `node --test` (see tsconfig.test.json for their typecheck).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2023"
+    ],
+    "module": "preserve",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*fixture*.ts",
+    "src/testkit.ts",
+    "dist",
+    "node_modules"
+  ]
+}

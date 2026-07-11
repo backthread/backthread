@@ -2,7 +2,7 @@
   "name": "backthread-oss",
   "version": "0.1.0",
   "private": true,
-  "description": "Backthread open-source monorepo — the `backthread` CLI and the `@backthread/redact` fence.",
+  "description": "Backthread open-source monorepo — the `backthread` CLI, the `@backthread/redact` fence, and the `@backthread/extractor` structural extractor.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,9 +14,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w backthread",
-    "test": "npm test -w backthread",
-    "typecheck": "npm run typecheck -w backthread",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
     "bump": "node scripts/bump-version.mjs"
   }
 }

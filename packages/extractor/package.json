@@ -1,0 +1,65 @@
+{
+  "name": "@backthread/extractor",
+  "version": "0.1.0",
+  "description": "Deterministic, install-free structural extraction for TypeScript and Python codebases — AST → communities → god-nodes → framework & infra adapters, zero LLM/DB/network.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Backthread",
+  "homepage": "https://github.com/backthread/backthread/tree/main/packages/extractor#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backthread/backthread.git",
+    "directory": "packages/extractor"
+  },
+  "bugs": "https://github.com/backthread/backthread/issues",
+  "keywords": [
+    "ast",
+    "code-graph",
+    "static-analysis",
+    "typescript",
+    "python",
+    "louvain",
+    "architecture"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "node --import tsx --test --test-force-exit \"src/**/*.test.ts\" && npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@zzzen/pyright-internal": "1.2.0-dev.20251207",
+    "graphology": "^0.25.4",
+    "graphology-communities-louvain": "^2.0.2",
+    "smol-toml": "^1.7.0",
+    "ts-morph": "^23.0.0",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "expect": "^29.7.0",
+    "jest-mock": "^29.7.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.6.0"
+  }
+}
