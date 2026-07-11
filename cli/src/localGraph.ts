@@ -14,10 +14,12 @@
 // mcp never touch it and stay light (verified: the esbuild bundle marks
 // `@backthread/extractor` external, so the light commands carry none of it).
 // The package is resolved at RUNTIME from wherever node can find it — the OSS
-// workspace symlink today; when it's published + promoted from devDependencies
-// to dependencies, npx/plugin installs light it up too. When it can't be
-// resolved (published fleet, pre-publish) we return `unavailable` and write
-// nothing — never an error, never a crash.
+// workspace symlink in dev/dogfood; the published package pulled in by an
+// npx/plugin install, where it rides as an OPTIONAL dependency (best-effort
+// installed, so the fleet lights up in the common case without the CLI's install
+// hinging on the extractor's heavy tree). When it can't be resolved (best-effort
+// install skipped/failed) we return `unavailable` and write nothing — never an
+// error, never a crash.
 //
 // INCREMENTAL. A first run does a full extract and serializes the extractor's
 // file-graph state into the cache. A re-run stat-signatures every tracked file

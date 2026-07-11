@@ -1,6 +1,6 @@
 {
   "name": "backthread",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Backthread keeps the thread on what your AI coding agent ships — it captures the why behind every change and turns it into a living 'How it works' view of your codebase you can actually query.",
   "license": "MIT",
   "author": "Backthread",
@@ -52,8 +52,10 @@
   "engines": {
     "node": ">=22.18"
   },
+  "optionalDependencies": {
+    "@backthread/extractor": "^0.1.0"
+  },
   "devDependencies": {
-    "@backthread/extractor": "^0.1.0",
     "@backthread/redact": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^22.19.19",
