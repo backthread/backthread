@@ -38,6 +38,10 @@ Run `npx backthread` in your repo. One command signs you in (one browser click),
 
 `backthread how "how does auth work?"` from the terminal, or `/backthread:how` in Claude Code (the `backthread` MCP server also exposes a `query` tool). You get a grounded, cited answer synthesized from your own decision log — and a link to the live "How it works" view.
 
+## Do I have to ask? Does context show up automatically?
+
+Yes — for the common case you don't ask at all. When your agent runs a search (Grep/Glob), Backthread injects a short pointer for that term **before** the search runs: the relevant local modules **and** the recorded *why* (trade-offs, assumptions, rejected approaches). It's local, offline, and free — no network or LLM per search — and it's keyed off the **search term**, so it stays right even when your working tree has diverged from what's merged. `backthread how "…"` is the deeper tier: it reconciles your whole decision log into a cited answer for hard whole-system questions. The context comes from a repo-local cache (`.backthread/cache.json`, git-ignored) that refreshes in the background at session start.
+
 ## What is the "How it works" view?
 
 A living diagram + changelog of your system at [app.backthread.dev](https://app.backthread.dev): the modules and how they connect, with the decisions ("why") attached, flow by flow, rebuilt from your real history so it tracks the code instead of drifting. Try the [live demo](https://app.backthread.dev/demo).
