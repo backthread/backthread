@@ -29,6 +29,9 @@
 //   backthread graph            refresh the repo-local STRUCTURE cache (the grep-time
 //                         context hook's local tier) by running @backthread/extractor
 //                         on the working tree, incrementally. Offline + fail-open.
+//   backthread sync             sync the repo's MERGED decision log ("why") into the
+//                         repo-local cache (device-token auth, hours-TTL) — the grep
+//                         hook's why tier. Best-effort + fail-soft.
 //   backthread install          onboarding: auth handshake + register the SessionEnd
 //                         hook (settings.json fallback; the plugin manifest does it
 //                         when installed as a plugin) + chain a one-shot backfill so
@@ -56,6 +59,7 @@ import { runStart } from '../firstRun.js';
 import { detectEntry } from '../entry.js';
 import { runSessionStart } from '../sessionStart.js';
 import { refreshStructure } from '../localGraph.js';
+import { syncDecisions } from '../localDecisions.js';
 
 const USAGE = `backthread — keep the thread on what your AI agent actually shipped
 
@@ -83,6 +87,8 @@ Capture
   backthread mcp                Start the MCP server (capture + query tools) over stdio
   backthread graph              Refresh the local structure cache for this repo (offline,
                           incremental). Powers the grep-time context hook. [--cwd <path>] [--force]
+  backthread sync               Sync this repo's merged decision log into the local cache
+                          (hours-TTL; the why half of the grep hook). [--cwd <path>] [--force]
 
 Manage
   backthread install            Set up capture for this repo (login + hook + backfill history)
@@ -112,6 +118,7 @@ const KNOWN_COMMANDS = [
   'capture',
   'mcp',
   'graph',
+  'sync',
   'install',
   'update',
   'doctor',
@@ -352,6 +359,17 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       const outcome = await refreshStructure({ cwd, force: rest.includes('--force') });
       console.error(`backthread graph: ${outcome.status} — ${outcome.detail}`);
       return outcome.status === 'error' ? 1 : 0;
+    }
+    case 'sync': {
+      // Pull the repo's MERGED decision log into the local cache (the grep-hook's
+      // "why" tier). Device-token auth; server gates by membership; hours-TTL
+      // (skips a fresh cache). Best-effort + fail-soft: an auth/repo/network
+      // problem returns a clear status. Exits 0 when it synced or was already
+      // fresh; non-zero on a genuine problem so an explicit `sync` shows it.
+      const cwd = flagValue(rest, '--cwd') ?? process.cwd();
+      const outcome = await syncDecisions({ cwd, force: rest.includes('--force') });
+      console.error(`backthread sync: ${outcome.status} — ${outcome.detail}`);
+      return outcome.status === 'synced' || outcome.status === 'fresh' ? 0 : 1;
     }
     case 'start': {
       // The CC-plugin FIRST-RUN experience, behind the
