@@ -23,6 +23,15 @@
 // CONFIG SHAPES are from the ARP-481 spike (verified against each agent's docs).
 // Cursor's stop payload / hooks.json shape is confirmed-pending a live install
 // (ARP-507) — flagged where used.
+//
+// PreToolUse grep-context hook (the two-tier grep-time context hook): NOT wired for
+// codex/cursor/gemini here. It is a SYNCHRONOUS pre-tool context injection — Claude
+// Code's PreToolUse `hookSpecificOutput.additionalContext` is the surface it needs,
+// and the non-CC agents don't expose an equivalent synchronous pre-search
+// context-injection point in these writers' config shapes. So the grep hook ships
+// Claude-Code-plugin-only for now (cli/hooks/hooks.json); a codex/cursor/gemini
+// equivalent is a follow-up if/when their hook surfaces gain one. (These agents
+// still get capture + the local stdio `mcp` server, unchanged.)
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';

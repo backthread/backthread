@@ -60,6 +60,7 @@ import { detectEntry } from '../entry.js';
 import { runSessionStart } from '../sessionStart.js';
 import { refreshStructure } from '../localGraph.js';
 import { syncDecisions } from '../localDecisions.js';
+import { runGrepContext } from '../grepContext.js';
 
 const USAGE = `backthread — keep the thread on what your AI agent actually shipped
 
@@ -336,6 +337,20 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       setRequestAgent(ssAgent === 'unknown' ? 'claude-code' : ssAgent);
       await readRawHookInput().catch(() => '');
       const output = await runSessionStart();
+      console.log(JSON.stringify(output));
+      return 0;
+    }
+    case 'grep-context': {
+      // The PreToolUse grep hook (the two-tier local context hook). CC is about to
+      // run Grep/Glob; we read the search term off the stdin payload, join it
+      // against the repo-local cache (structure + merged decision "why"), and print
+      // `hookSpecificOutput.additionalContext` so CC injects it BEFORE the grep.
+      // SYNCHRONOUS (CC reads this stdout), FAST (a local cache read + pure join —
+      // no extractor, no network), and FAIL-OPEN: an empty `{}` (no cache / no
+      // match / any hiccup) means no injection and the grep proceeds. ALWAYS exit 0;
+      // it must never block or delay the grep.
+      const raw = await readRawHookInput().catch(() => '');
+      const output = await runGrepContext(raw);
       console.log(JSON.stringify(output));
       return 0;
     }

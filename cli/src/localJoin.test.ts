@@ -86,6 +86,23 @@ test('divergence-robust: a decision matches by its own text even with no local m
   assert.ok(ctx.decisions.some((d) => d.title.includes('invoices')));
 });
 
+test('a term containing a common word as a substring does NOT spuriously match', () => {
+  // "zzznotathing" contains "not"/"thing"; a substring-based stem would wrongly
+  // surface every decision that says "not". A shared-PREFIX stem must not.
+  const ctx = buildLocalContext('zzznotathing', cache());
+  assert.equal(ctx.empty, true, 'no field shares a strong prefix with the term');
+});
+
+test('stem still matches real morphological kin (invoice↔invoicing, auth↔authenticate)', () => {
+  // invoicing module id vs the term "invoice" (not a substring of "invoicing").
+  const inv = buildLocalContext('invoice', cache());
+  assert.ok(inv.modules.some((m) => m.id === 'invoicing'), 'invoice → invoicing (shared stem)');
+  const c = cache();
+  c.decisions!.items.push({ id: 'da', title: 'Authenticate partner callbacks', why: null, problem: null, moduleIds: [], flowNames: [], decidedAt: null, significance: null, tradeoffs: [], assumptions: [], limitations: [] });
+  const au = buildLocalContext('auth', c);
+  assert.ok(au.decisions.some((d) => d.title.includes('Authenticate')), 'auth → Authenticate (shared stem)');
+});
+
 test('no match → empty (the hook injects nothing)', () => {
   const ctx = buildLocalContext('kubernetes', cache());
   assert.equal(ctx.empty, true);

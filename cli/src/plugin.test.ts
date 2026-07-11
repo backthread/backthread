@@ -62,12 +62,24 @@ test('the SessionEnd hook runs the bundled bin, not npx, and detaches', () => {
   assert.ok(cmd.includes('--detach'), 'hook detaches so a slow capture is not SIGTERMd (ARP-682)');
 });
 
-test('the manifest registers SessionStart + SessionEnd + Stop (Stop = per-turn capture)', () => {
+test('the manifest registers PreToolUse + SessionStart + SessionEnd + Stop', () => {
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
-  // SessionStart (ambient routing); SessionEnd (session-end backstop); Stop (per-turn
-  // capture — the incremental capture watermark makes each fire cheap, so it's no longer
-  // "too aggressive"). Order doesn't matter to CC, so compare as a set.
-  assert.deepEqual([...Object.keys(hooks.hooks)].sort(), ['SessionEnd', 'SessionStart', 'Stop']);
+  // PreToolUse (grep-time local context); SessionStart (ambient routing); SessionEnd
+  // (session-end backstop); Stop (per-turn capture — the incremental capture watermark
+  // makes each fire cheap). Order doesn't matter to CC, so compare as a set.
+  assert.deepEqual([...Object.keys(hooks.hooks)].sort(), ['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop']);
+});
+
+test('the PreToolUse grep hook runs the bundled bin SYNCHRONOUSLY, matches Grep|Glob, never detaches', () => {
+  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
+  const entry = hooks.hooks.PreToolUse[0];
+  assert.equal(entry.matcher, 'Grep|Glob', 'matches the Grep + Glob tools');
+  const cmd: string = entry.hooks[0].command;
+  assert.ok(cmd.includes(BUNDLE_REF), 'hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
+  assert.ok(!/\bnpx\b/.test(cmd), 'hook must NOT use npx (a sync grep hook would block every grep on the resolve)');
+  assert.ok(cmd.includes('grep-context'), 'hook routes through the grep-context command');
+  assert.ok(cmd.includes('--agent claude-code'), 'hook stamps the claude-code provider');
+  assert.ok(!cmd.includes('--detach'), 'PreToolUse must NOT detach — CC reads stdout for the additionalContext');
 });
 
 test('the Stop hook runs the bundled bin, detaches, and matches the SessionEnd capture command', () => {

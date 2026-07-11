@@ -106,12 +106,17 @@ function commonPrefixLen(a: string, b: string): number {
 
 /** Does a haystack WORD match a token? Stem-aware so a term surfaces its
  * morphological kin (invoice↔invoicing, auth↔authenticate) that a bare substring
- * would miss — the recall the whole join exists for. Matches on equality, the
- * token containing the word (≥3 chars), or a strong shared prefix (≥4 chars AND
- * covering all-but-two of the shorter word). */
+ * would miss — the recall the whole join exists for. Matches on equality or a
+ * STRONG SHARED PREFIX (≥4 chars AND covering all-but-two of the shorter word).
+ *
+ * The shared-prefix rule (not a plain `token.includes(word)`) is deliberate: a
+ * substring rule would match any common short word buried in the token — e.g. the
+ * word "not" inside a grep term like "zzznotathing" — surfacing unrelated
+ * decisions. A shared prefix requires the two words to actually START the same,
+ * which is what a stem match should mean. (A token that is a plain substring of a
+ * FIELD is already caught by the whole-field fast path in `matches`.) */
 function wordMatch(word: string, token: string): boolean {
   if (word === token) return true;
-  if (word.length >= 3 && token.includes(word)) return true;
   const n = commonPrefixLen(word, token);
   return n >= 4 && n >= Math.min(word.length, token.length) - 2;
 }
