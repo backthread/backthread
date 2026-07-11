@@ -34437,20 +34437,50 @@ async function recordRoutingInjected(deps = {}) {
   }
 }
 
+// src/localRefresh.ts
+import { spawn as spawn3 } from "node:child_process";
+function spawnCacheRefresh(cwd, deps = {}) {
+  const doSpawn = deps.spawnImpl ?? spawn3;
+  const execPath = deps.execPath ?? process.execPath;
+  const scriptPath = deps.scriptPath ?? process.argv[1];
+  const env = deps.env ?? process.env;
+  if (!scriptPath) return false;
+  let launched = false;
+  for (const args of [
+    ["sync", "--cwd", cwd],
+    ["graph", "--cwd", cwd]
+  ]) {
+    try {
+      const child = doSpawn(execPath, [scriptPath, ...args], {
+        detached: true,
+        stdio: "ignore",
+        env
+      });
+      child.unref();
+      child.on?.("error", () => {
+      });
+      launched = true;
+    } catch {
+    }
+  }
+  return launched;
+}
+
 // src/sessionStart.ts
-var ROUTING_CONTEXT = 'This repo has a Backthread decision log \u2014 the captured *why* behind its changes. Use the `query` MCP tool (or `/backthread:how`) when the user asks **why** something is the way it is, what was tried and rejected, how a design evolved, or how data flows across the whole system \u2014 it returns a short cited answer the source code can\'t give you. Before working in an unfamiliar area ("what am I missing", a **blindspot pass**, unknown unknowns), call it FIRST \u2014 a seconds-cheap cited pre-read of what\'s on record: the trade-offs knowingly accepted, standing assumptions, known limitations, and rejected approaches. Then do your own pass through the code \u2014 the pre-read aims your deep dive, it doesn\'t replace it. For what a single function or file does right now, just read the source. For a whole-feature "how does X work", do both: `query` for the why/architecture, read the code for the local mechanics.';
+var SESSION_START_CONTEXT = 'This repo has a Backthread decision log \u2014 the captured *why* behind its changes. When you Grep or Glob, the relevant local structure + the recorded why are injected automatically, so a plain search already carries the on-record context (trade-offs knowingly accepted, standing assumptions, known limitations, rejected approaches) \u2014 no action needed. For a hard whole-system question that needs reconciled SYNTHESIS across the full history \u2014 "how does the whole X work", how a design evolved, or a deliberate blindspot pass \u2014 use the `query` MCP tool (or `/backthread:how`): the hosted depth tier that reconciles the merged decision log into a short, cited answer the raw local context can\'t produce. For what a single function or file does right now, just read the source.';
 function buildSessionStartOutput(isSetUp) {
   if (!isSetUp) return {};
   return {
     hookSpecificOutput: {
       hookEventName: "SessionStart",
-      additionalContext: ROUTING_CONTEXT
+      additionalContext: SESSION_START_CONTEXT
     }
   };
 }
-async function runSessionStart(deps = {}) {
+async function runSessionStart(input = {}, deps = {}) {
   const readConfig2 = deps.readConfig ?? readConfig;
   const record2 = deps.recordRoutingInjected ?? recordRoutingInjected;
+  const spawnRefresh = deps.spawnCacheRefresh ?? spawnCacheRefresh;
   let isSetUp = false;
   try {
     const cfg = await readConfig2();
@@ -34458,14 +34488,17 @@ async function runSessionStart(deps = {}) {
   } catch {
     isSetUp = false;
   }
-  const output = buildSessionStartOutput(isSetUp);
-  if (output.hookSpecificOutput) {
+  if (isSetUp) {
+    try {
+      spawnRefresh(input.cwd ?? process.cwd());
+    } catch {
+    }
     try {
       await record2();
     } catch {
     }
   }
-  return output;
+  return buildSessionStartOutput(isSetUp);
 }
 
 // src/localGraph.ts
@@ -35250,8 +35283,14 @@ async function main(argv, deps = {}) {
     case "session-start": {
       const ssAgent = parseAgent(flagValue(rest, "--agent"));
       setRequestAgent(ssAgent === "unknown" ? "claude-code" : ssAgent);
-      await readRawHookInput().catch(() => "");
-      const output = await runSessionStart();
+      const ssRaw = await readRawHookInput().catch(() => "");
+      let ssCwd;
+      try {
+        const p = JSON.parse(ssRaw);
+        if (typeof p.cwd === "string" && p.cwd) ssCwd = p.cwd;
+      } catch {
+      }
+      const output = await runSessionStart({ cwd: ssCwd });
       console.log(JSON.stringify(output));
       return 0;
     }

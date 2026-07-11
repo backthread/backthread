@@ -1,54 +1,55 @@
-// sessionStart.ts — the SessionStart hook (ARP-763): AMBIENT ROUTING.
+// sessionStart.ts — the SessionStart hook. TWO jobs (the two-tier grep-hook flip):
 //
-// The `query` tool answers from the captured decision log, but Claude Code routes to
-// it only PROBABILISTICALLY from the tool description. This SessionStart hook injects
-// a one-time instruction into the session context that ROUTES BY QUESTION-TYPE
-// (ARP-854): reach for `query` on why/evolution/topology (and whole-system data-flow)
-// questions, read the source for single-module current-code mechanics, do both for a
-// whole-feature "how does X work" — so the log's real add lands without misrouting the
-// questions the code answers better.
+//   1. REFRESH THE LOCAL CACHE. Fire a DETACHED, fire-and-forget refresh of the
+//      repo-local cache — `backthread sync` (the merged decision "why") + `backthread
+//      graph` (the structural graph) — so the session's grep hook has fresh local
+//      context. Detached because this hook is synchronous (see below) and both
+//      refreshes are slow (a network read; the heavy extractor); running them inline
+//      would block session start. Best-effort; never blocks, never throws.
+//
+//   2. INJECT THE DEPTH-TIER POINTER. Inject a one-time instruction that positions
+//      the hosted `query` / `/backthread:how` synthesis path as the DEPTH TIER for
+//      hard whole-system questions. It no longer tells the agent to "call query FIRST
+//      / before grepping / per-question" — that proactive pre-read is now DETERMINISTIC:
+//      the PreToolUse grep hook injects the relevant local structure + why on every
+//      Grep/Glob (grepContext.ts). What survives here is the pointer to the hosted
+//      synthesis the raw local cache CAN'T produce (reconciling the full merged log
+//      into a cited answer).
 //
 // THE HOOK IS SYNCHRONOUS, NOT detached: Claude Code reads this command's STDOUT for
-// the `hookSpecificOutput.additionalContext`, so we must print it here (a detached
-// re-spawn — the capture hook's pattern — would print an ack instead, and CC would
-// inject that). It does only a FAST LOCAL read (~/.backthread/config.json), never a
-// network call, so it can't slow session start. It ALWAYS exits 0 with valid JSON.
+// the `hookSpecificOutput.additionalContext`, so we print it here. It does only a FAST
+// LOCAL read (~/.backthread/config.json) + a detached spawn — never an inline network
+// call — so it can't slow session start. It ALWAYS exits 0 with valid JSON.
 //
 // PLUGIN-ONLY (by design): registered in the plugin manifest (cli/hooks/hooks.json),
-// which runs the shipped self-contained bundle — fast, offline, no npm resolve. The
-// bare-npx `backthread install` fallback does NOT register it: a synchronous
-// `npx backthread session-start` would block every session start on npm's resolve
-// (the capture hook only gets away with `@latest` because it's `--detach`ed). Those
-// users still get the `query` tool's imperative description. Ambient routing rides
-// the plugin — the recommended Claude Code path — and reaches the fleet on publish.
+// which runs the shipped self-contained bundle. The bare-npx `backthread install`
+// fallback does NOT register it (a synchronous `npx backthread session-start` would
+// block every session start on npm's resolve).
 //
-// GATED ON SET-UP: we inject the routing instruction ONLY when a device token is
-// present (the user is logged in, so `query` can actually answer). A not-set-up
-// session gets no injection — we never tell Claude to call a tool that would just
-// return "not logged in". Onboarding nudges already handle setup on the capture path.
+// GATED ON SET-UP: we refresh + inject ONLY when a device token is present (the user
+// is logged in, so `sync` can authenticate and `query` can answer). A not-set-up
+// session gets neither — we never sync without auth or point at a tool that would
+// just return "not logged in".
 
 import { readConfig as defaultReadConfig, type BackthreadConfig } from './config.js';
 import { recordRoutingInjected as defaultRecordRoutingInjected } from './routingStats.js';
+import { spawnCacheRefresh as defaultSpawnCacheRefresh } from './localRefresh.js';
 
 /** The instruction injected into the session context when Backthread is set up.
- * ARP-854 — ROUTES BY QUESTION-TYPE (no longer "call FIRST for any how/why"): the
- * log owns why/evolution/topology; single-module current-code mechanics is read
- * straight from source; a whole-feature "how" pairs both. ARP-1009 — the blindspot
- * pass is positioned as a fast cited PRE-READ that precedes and aims the agent's
- * own code pass (it surfaces the recorded deliberation the code doesn't contain);
- * a complement, never a substitute. Shipped verbatim. */
-export const ROUTING_CONTEXT =
+ * FLIPPED for the two-tier grep hook: the per-grep local pre-read is now automatic
+ * (the PreToolUse grep hook), so this no longer says "call query FIRST" — it points
+ * at the hosted `query` / `/backthread:how` SYNTHESIS tier for the hard whole-system
+ * questions the raw local cache can't answer. Shipped verbatim. */
+export const SESSION_START_CONTEXT =
   'This repo has a Backthread decision log — the captured *why* behind its changes. ' +
-  'Use the `query` MCP tool (or `/backthread:how`) when the user asks **why** something ' +
-  'is the way it is, what was tried and rejected, how a design evolved, or how data flows ' +
-  'across the whole system — it returns a short cited answer the source code can\'t give ' +
-  'you. Before working in an unfamiliar area ("what am I missing", a **blindspot pass**, ' +
-  'unknown unknowns), call it FIRST — a seconds-cheap cited pre-read of what\'s on record: ' +
-  'the trade-offs knowingly accepted, standing assumptions, known limitations, and ' +
-  'rejected approaches. Then do your own pass through the code — the pre-read aims your ' +
-  'deep dive, it doesn\'t replace it. For what a single function or file does right now, ' +
-  'just read the source. For a whole-feature "how does X work", do both: `query` for the ' +
-  'why/architecture, read the code for the local mechanics.';
+  'When you Grep or Glob, the relevant local structure + the recorded why are injected ' +
+  'automatically, so a plain search already carries the on-record context (trade-offs ' +
+  'knowingly accepted, standing assumptions, known limitations, rejected approaches) — no ' +
+  'action needed. For a hard whole-system question that needs reconciled SYNTHESIS across ' +
+  'the full history — "how does the whole X work", how a design evolved, or a deliberate ' +
+  'blindspot pass — use the `query` MCP tool (or `/backthread:how`): the hosted depth tier ' +
+  'that reconciles the merged decision log into a short, cited answer the raw local context ' +
+  "can't produce. For what a single function or file does right now, just read the source.";
 
 /** A Claude Code SessionStart hook result. An empty object = no injection. */
 export interface SessionStartHookOutput {
@@ -59,52 +60,69 @@ export interface SessionStartHookOutput {
 }
 
 /**
- * Decide the hook output from set-up state. Pure. Set up → inject the routing
- * instruction; not set up → `{}` (no injection). Exported for unit testing the
- * decision apart from the config read.
+ * Decide the hook output from set-up state. Pure. Set up → inject the depth-tier
+ * pointer; not set up → `{}` (no injection). Exported for unit testing the decision
+ * apart from the config read + the refresh spawn.
  */
 export function buildSessionStartOutput(isSetUp: boolean): SessionStartHookOutput {
   if (!isSetUp) return {};
   return {
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
-      additionalContext: ROUTING_CONTEXT,
+      additionalContext: SESSION_START_CONTEXT,
     },
   };
+}
+
+export interface RunSessionStartInput {
+  /** The session cwd (from the SessionStart payload) — the repo to refresh. */
+  cwd?: string;
 }
 
 export interface RunSessionStartDeps {
   readConfig?: () => Promise<BackthreadConfig>;
   recordRoutingInjected?: () => Promise<void>;
+  /** The detached cache-refresh spawner. Injectable so tests don't fork processes. */
+  spawnCacheRefresh?: (cwd: string) => boolean;
 }
 
 /**
- * Run the SessionStart hook: read the local config (fast, no network), inject the
- * routing instruction when set up, and record the injection for the hit-rate
- * measurement (best-effort). NEVER throws — a read/record hiccup degrades to "no
- * injection" rather than breaking session start.
+ * Run the SessionStart hook: read the local config (fast, no network); when set up,
+ * fire a DETACHED cache refresh (sync + graph — best-effort, non-blocking) and inject
+ * the depth-tier pointer + record the injection. NEVER throws — any hiccup degrades to
+ * "no injection" rather than breaking session start.
  */
-export async function runSessionStart(deps: RunSessionStartDeps = {}): Promise<SessionStartHookOutput> {
+export async function runSessionStart(
+  input: RunSessionStartInput = {},
+  deps: RunSessionStartDeps = {},
+): Promise<SessionStartHookOutput> {
   const readConfig = deps.readConfig ?? defaultReadConfig;
   const record = deps.recordRoutingInjected ?? defaultRecordRoutingInjected;
+  const spawnRefresh = deps.spawnCacheRefresh ?? defaultSpawnCacheRefresh;
 
   let isSetUp = false;
   try {
     const cfg = await readConfig();
     isSetUp = !!cfg.device_token;
   } catch {
-    isSetUp = false; // unreadable config → treat as not set up (no injection)
+    isSetUp = false; // unreadable config → treat as not set up (no injection, no refresh)
   }
 
-  const output = buildSessionStartOutput(isSetUp);
-  if (output.hookSpecificOutput) {
-    // The "opportunity" half of the routing hit-rate (the "conversion" half is the
-    // server-side grounded_ask_logs row each query writes). Best-effort.
+  if (isSetUp) {
+    // Kick the background cache refresh (detached; never blocks / throws) so this
+    // session's grep hook has fresh local context.
+    try {
+      spawnRefresh(input.cwd ?? process.cwd());
+    } catch {
+      /* a spawn hiccup must never affect the injection */
+    }
+    // Record the injection opportunity (best-effort).
     try {
       await record();
     } catch {
       /* a stats hiccup must never affect the injection */
     }
   }
-  return output;
+
+  return buildSessionStartOutput(isSetUp);
 }
