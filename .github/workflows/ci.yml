@@ -47,9 +47,16 @@ jobs:
       # deterministic for the lockfile-pinned version).
       - name: Committed bundle is in sync with src
         run: git diff --exit-code cli/dist-bundle/backthread.js
-      # Regression guard: the release workflow must keep npm build provenance on, so the
+      # Regression guard: every release workflow must keep npm build provenance on, so each
       # published package always carries a verifiable, tamper-evident build attestation.
-      - name: Release keeps npm provenance on
+      - name: Releases keep npm provenance on
         # Anchor to the `npm publish … --provenance` line (not just any occurrence), so a
-        # flag left behind in a comment can't mask a publish step that dropped it.
-        run: grep -Eq 'npm publish[^#]*--provenance' .github/workflows/release.yml || { echo "::error::release.yml's npm publish must keep --provenance"; exit 1; }
+        # flag left behind in a comment can't mask a publish step that dropped it. Globs
+        # every release workflow (release.yml = the CLI, release-extractor.yml = the
+        # extractor lib, and any future release-*.yml) so a new publish path can't escape
+        # the guard by simply not being listed here.
+        run: |
+          for wf in .github/workflows/release*.yml; do
+            grep -Eq 'npm publish[^#]*--provenance' "$wf" \
+              || { echo "::error::$wf's npm publish must keep --provenance"; exit 1; }
+          done
