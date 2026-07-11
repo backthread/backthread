@@ -2984,7 +2984,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve.call(this, root, ref);
+      let _sch = resolve2.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3011,7 +3011,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve(root, ref) {
+    function resolve2(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3642,7 +3642,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve(baseURI, relativeURI, options) {
+    function resolve2(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -3900,7 +3900,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve,
+      resolve: resolve2,
       resolveComponent,
       equal,
       serialize,
@@ -6955,10 +6955,10 @@ function browserCommand(platform) {
   }
 }
 function openBrowser(url2, platform = process.platform) {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     const launcher = browserCommand(platform);
     if (!launcher) {
-      resolve(false);
+      resolve2(false);
       return;
     }
     try {
@@ -6966,11 +6966,11 @@ function openBrowser(url2, platform = process.platform) {
         stdio: "ignore",
         detached: true
       });
-      child.on("error", () => resolve(false));
+      child.on("error", () => resolve2(false));
       child.unref();
-      setTimeout(() => resolve(true), 0);
+      setTimeout(() => resolve2(true), 0);
     } catch {
-      resolve(false);
+      resolve2(false);
     }
   });
 }
@@ -7450,14 +7450,14 @@ import { execFile } from "node:child_process";
 function runNpm(args) {
   const isWin = process.platform === "win32";
   const npm = isWin ? "npm.cmd" : "npm";
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     try {
       execFile(
         npm,
         args,
         { timeout: 12e4, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
         (err, stdout, stderr) => {
-          resolve({
+          resolve2({
             ok: !err,
             stdout: (stdout ?? "").toString().trim(),
             stderr: (stderr ?? "").toString().trim()
@@ -7465,7 +7465,7 @@ function runNpm(args) {
         }
       );
     } catch (e) {
-      resolve({ ok: false, stdout: "", stderr: e.message ?? String(e) });
+      resolve2({ ok: false, stdout: "", stderr: e.message ?? String(e) });
     }
   });
 }
@@ -9576,11 +9576,11 @@ function parseHookInput(raw) {
   return {};
 }
 function readStream(stream) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     let data = "";
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => data += chunk);
-    stream.on("end", () => resolve(data));
+    stream.on("end", () => resolve2(data));
     stream.on("error", reject);
   });
 }
@@ -16715,13 +16715,13 @@ var $ZodObject = /* @__PURE__ */ $constructor("$ZodObject", (inst, def) => {
     }
     return propValues;
   });
-  const isObject2 = isObject;
+  const isObject3 = isObject;
   const catchall = def.catchall;
   let value;
   inst._zod.parse = (payload, ctx) => {
     value ?? (value = _normalized.value);
     const input = payload.value;
-    if (!isObject2(input)) {
+    if (!isObject3(input)) {
       payload.issues.push({
         expected: "object",
         code: "invalid_type",
@@ -16848,7 +16848,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
     return (payload, ctx) => fn(shape, payload, ctx);
   };
   let fastpass;
-  const isObject2 = isObject;
+  const isObject3 = isObject;
   const jit = !globalConfig.jitless;
   const allowsEval2 = allowsEval;
   const fastEnabled = jit && allowsEval2.value;
@@ -16857,7 +16857,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
   inst._zod.parse = (payload, ctx) => {
     value ?? (value = _normalized.value);
     const input = payload.value;
-    if (!isObject2(input)) {
+    if (!isObject3(input)) {
       payload.issues.push({
         expected: "object",
         code: "invalid_type",
@@ -31986,7 +31986,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error51) {
@@ -32003,7 +32003,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const earlyReject = (error51) => {
         reject(error51);
       };
@@ -32081,7 +32081,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve(parseResult.data);
+            resolve2(parseResult.data);
           }
         } catch (error51) {
           reject(error51);
@@ -32342,12 +32342,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve, interval);
+      const timeoutId = setTimeout(resolve2, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -33447,7 +33447,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -34096,12 +34096,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve) => {
+    return new Promise((resolve2) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve();
+        resolve2();
       } else {
-        this._stdout.once("drain", resolve);
+        this._stdout.once("drain", resolve2);
       }
     });
   }
@@ -34465,6 +34465,279 @@ async function runSessionStart(deps = {}) {
   return output;
 }
 
+// src/localGraph.ts
+import { statSync } from "node:fs";
+import { readdirSync } from "node:fs";
+import { join as join15 } from "node:path";
+
+// src/localCache.ts
+import { mkdir as mkdir10, readFile as readFile13, writeFile as writeFile10, rename } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { execFileSync as execFileSync4 } from "node:child_process";
+import { join as join14, resolve } from "node:path";
+var CACHE_SCHEMA_VERSION = 1;
+var CACHE_DIR = ".backthread";
+var CACHE_FILE = "cache.json";
+function cacheDir(repoRoot) {
+  return join14(repoRoot, CACHE_DIR);
+}
+function cachePath(repoRoot) {
+  return join14(cacheDir(repoRoot), CACHE_FILE);
+}
+var defaultTopLevelReader = (cwd) => {
+  try {
+    return execFileSync4("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+  } catch {
+    return null;
+  }
+};
+function resolveRepoRoot(cwd, readTopLevel = defaultTopLevelReader) {
+  const top = readTopLevel(cwd);
+  return top && top.length > 0 ? resolve(top) : resolve(cwd);
+}
+function emptyCache() {
+  return { schemaVersion: CACHE_SCHEMA_VERSION, repo: null, structure: null, decisions: null };
+}
+async function readCache(repoRoot) {
+  let raw;
+  try {
+    raw = await readFile13(cachePath(repoRoot), "utf8");
+  } catch {
+    return null;
+  }
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+  const rec = obj;
+  if (rec.schemaVersion !== CACHE_SCHEMA_VERSION) return null;
+  return {
+    schemaVersion: CACHE_SCHEMA_VERSION,
+    repo: typeof rec.repo === "string" ? rec.repo : null,
+    // Sections are trusted structurally-shallow here; each consumer defends its
+    // own fields. A wholesale-malformed section is tolerated as present-but-junk
+    // (the join filters at use). Absent/non-object → null.
+    structure: isObject2(rec.structure) ? rec.structure : null,
+    decisions: isObject2(rec.decisions) ? rec.decisions : null
+  };
+}
+function isObject2(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+async function ensureCacheDir(repoRoot) {
+  const dir = cacheDir(repoRoot);
+  await mkdir10(dir, { recursive: true });
+  const ignore = join14(dir, ".gitignore");
+  if (!existsSync(ignore)) {
+    await writeFile10(ignore, "*\n").catch(() => {
+    });
+  }
+}
+async function writeCacheSection(repoRoot, patch) {
+  await ensureCacheDir(repoRoot);
+  const current = await readCache(repoRoot) ?? emptyCache();
+  const next = {
+    schemaVersion: CACHE_SCHEMA_VERSION,
+    repo: "repo" in patch ? patch.repo ?? null : current.repo,
+    structure: "structure" in patch ? patch.structure ?? null : current.structure,
+    decisions: "decisions" in patch ? patch.decisions ?? null : current.decisions
+  };
+  const finalPath = cachePath(repoRoot);
+  const tmpPath = `${finalPath}.${process.pid}.tmp`;
+  await writeFile10(tmpPath, JSON.stringify(next, null, 2) + "\n");
+  await rename(tmpPath, finalPath);
+  return next;
+}
+
+// src/localGraph.ts
+async function defaultLoadExtractor() {
+  const mod = await import("@backthread/extractor");
+  return mod;
+}
+function fileSignature(abs) {
+  try {
+    const st = statSync(abs);
+    if (!st.isFile()) return null;
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
+}
+function scanInvalidators(root, ext, layout) {
+  const dirs = /* @__PURE__ */ new Set([""]);
+  for (const pkg of layout.packages) if (pkg.root) dirs.add(pkg.root);
+  const out = [];
+  for (const rel of dirs) {
+    const abs = rel ? join15(root, rel) : root;
+    let entries;
+    try {
+      entries = readdirSync(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      if (!ent.isFile()) continue;
+      if (!ext.isConfigInvalidatorPath(ent.name)) continue;
+      out.push(rel ? `${rel}/${ent.name}` : ent.name);
+    }
+  }
+  return out;
+}
+function collectSignatures(root, ext, layout) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const lang of ext.detectRepoLanguages(root)) {
+    for (const id of ext.listSourceFiles(root, lang)) ids.add(id);
+  }
+  for (const id of scanInvalidators(root, ext, layout)) ids.add(id);
+  const sigs = {};
+  for (const id of ids) {
+    const sig = fileSignature(join15(root, id));
+    if (sig !== null) sigs[id] = sig;
+  }
+  return sigs;
+}
+function computeDiff(prev, curr) {
+  const diff = [];
+  for (const [path, sig] of Object.entries(curr)) {
+    const before = prev[path];
+    if (before === void 0) diff.push({ status: "A", path });
+    else if (before !== sig) diff.push({ status: "M", path });
+  }
+  for (const path of Object.keys(prev)) {
+    if (!(path in curr)) diff.push({ status: "D", path });
+  }
+  return diff;
+}
+function buildStructureModulesEdges(cluster, subsystems) {
+  const modules = cluster.modules.map((m) => {
+    const sub = subsystems.get(m.id);
+    return {
+      id: m.id,
+      kind: m.kind,
+      godNode: m.godNode,
+      loc: m.loc,
+      fileCount: m.fileCount,
+      fileIds: m.fileIds,
+      subsystem: sub ? { id: sub.id, name: sub.name } : null,
+      ...m.externalSpecifier !== void 0 ? { externalSpecifier: m.externalSpecifier } : {},
+      ...m.packageName !== void 0 ? { packageName: m.packageName ?? null } : {}
+    };
+  });
+  const edges = cluster.moduleEdges.map((e) => ({
+    source: e.source,
+    target: e.target,
+    kinds: [...e.kinds]
+  }));
+  return { modules, edges };
+}
+function headLabel(root, runGit) {
+  const ctx = resolveGitContext(root, runGit);
+  return ctx.headSha ?? "worktree";
+}
+async function refreshStructure(opts = {}, deps = {}) {
+  const load = deps.loadExtractor ?? defaultLoadExtractor;
+  const resolveRoot = deps.resolveRepoRootImpl ?? resolveRepoRoot;
+  const readCacheImpl = deps.readCacheImpl ?? readCache;
+  const writeSection = deps.writeCacheSectionImpl ?? writeCacheSection;
+  const now = deps.now ?? (() => /* @__PURE__ */ new Date());
+  const cwd = opts.cwd ?? process.cwd();
+  const repoRoot = resolveRoot(cwd);
+  let ext;
+  try {
+    ext = await load();
+  } catch {
+    return {
+      status: "unavailable",
+      detail: 'the structural extractor is not available here \u2014 local structure is skipped (the decision "why" cache still works).',
+      repoRoot
+    };
+  }
+  try {
+    const prior = await readCacheImpl(repoRoot).catch(() => null);
+    const layout = ext.detectWorkspaceLayout(repoRoot);
+    const signatures = collectSignatures(repoRoot, ext, layout);
+    const priorStructure = opts.force ? null : prior?.structure ?? null;
+    const canIncrement = priorStructure !== null && priorStructure.extractorVersion === ext.EXTRACTOR_PACKAGE_VERSION && priorStructure.fileGraph != null;
+    let graph;
+    let inc;
+    let mode;
+    let changedFiles = 0;
+    const head = headLabel(repoRoot, deps.runGit);
+    if (canIncrement) {
+      const diff = computeDiff(priorStructure.fileHashes ?? {}, signatures);
+      const cls = ext.classifyDiff(diff);
+      const sourceChanged = cls.sourceAdded.length + cls.sourceModified.length + cls.sourceDeleted.length;
+      if (cls.invalidators.length > 0) {
+        inc = new ext.IncrementalExtractor();
+        graph = inc.seedFull(repoRoot, head).graph;
+        mode = "full";
+        changedFiles = diff.length;
+      } else if (sourceChanged === 0) {
+        return {
+          status: "unchanged",
+          detail: "no tracked files changed since the last refresh.",
+          repoRoot,
+          moduleCount: priorStructure.modules?.length,
+          edgeCount: priorStructure.edges?.length,
+          changedFiles: 0
+        };
+      } else {
+        inc = new ext.IncrementalExtractor();
+        if (!inc.adoptCache(priorStructure.fileGraph)) {
+          graph = inc.seedFull(repoRoot, head).graph;
+          mode = "full";
+        } else {
+          graph = inc.patchTo(repoRoot, head, diff).graph;
+          mode = "incremental";
+        }
+        changedFiles = sourceChanged;
+      }
+    } else {
+      inc = new ext.IncrementalExtractor();
+      graph = inc.seedFull(repoRoot, head).graph;
+      mode = "full";
+      changedFiles = Object.keys(signatures).length;
+    }
+    await ext.detectFrameworkStack(repoRoot);
+    const priorModules = mode === "incremental" ? (priorStructure.modules ?? []).map((m) => ({ id: m.id, kind: m.kind, fileIds: m.fileIds })) : void 0;
+    const cluster = ext.clusterGraph(graph, {}, { layout, priorModules });
+    await ext.contributeFrameworkGraph({ repoDir: repoRoot, graph, cluster });
+    const subsystems = ext.computeSubsystems(cluster.modules);
+    const { modules, edges } = buildStructureModulesEdges(cluster, subsystems);
+    const structure = {
+      refreshedAt: now().toISOString(),
+      root: repoRoot,
+      extractorVersion: ext.EXTRACTOR_PACKAGE_VERSION,
+      fileHashes: signatures,
+      fileGraph: inc.toCachePayload(),
+      modules,
+      edges
+    };
+    await writeSection(repoRoot, { structure, repo: prior?.repo ?? null });
+    return {
+      status: mode === "full" ? "refreshed-full" : "refreshed-incremental",
+      detail: mode === "full" ? `full extract \u2014 ${modules.length} modules, ${edges.length} edges.` : `incremental \u2014 ${changedFiles} file(s) changed; ${modules.length} modules, ${edges.length} edges.`,
+      repoRoot,
+      moduleCount: modules.length,
+      edgeCount: edges.length,
+      changedFiles
+    };
+  } catch (e) {
+    return {
+      status: "error",
+      detail: `structure refresh failed (swallowed): ${e.message}`,
+      repoRoot
+    };
+  }
+}
+
 // src/bin/backthread.ts
 var USAGE = `backthread \u2014 keep the thread on what your AI agent actually shipped
 
@@ -34490,6 +34763,8 @@ Capture
   backthread capture --manual   Capture the current session now (the /backthread capture command)
                           [--session <id>] [--transcript <path>] [--cwd <dir>]
   backthread mcp                Start the MCP server (capture + query tools) over stdio
+  backthread graph              Refresh the local structure cache for this repo (offline,
+                          incremental). Powers the grep-time context hook. [--cwd <path>] [--force]
 
 Manage
   backthread install            Set up capture for this repo (login + hook + backfill history)
@@ -34514,6 +34789,7 @@ var KNOWN_COMMANDS = [
   "ask",
   "capture",
   "mcp",
+  "graph",
   "install",
   "update",
   "doctor",
@@ -34631,6 +34907,12 @@ async function main(argv, deps = {}) {
       await startMcpServer();
       return null;
     }
+    case "graph": {
+      const cwd = flagValue(rest, "--cwd") ?? process.cwd();
+      const outcome = await refreshStructure({ cwd, force: rest.includes("--force") });
+      console.error(`backthread graph: ${outcome.status} \u2014 ${outcome.detail}`);
+      return outcome.status === "error" ? 1 : 0;
+    }
     case "start": {
       return onboarding(rest);
     }
@@ -34697,14 +34979,14 @@ function isEntryPoint() {
     const entry = process.argv[1];
     if (!entry) return false;
     const self = fileURLToPath2(import.meta.url);
-    const resolve = (p) => {
+    const resolve2 = (p) => {
       try {
         return realpathSync2(p);
       } catch {
         return p;
       }
     };
-    return resolve(self) === resolve(entry);
+    return resolve2(self) === resolve2(entry);
   } catch {
     return true;
   }

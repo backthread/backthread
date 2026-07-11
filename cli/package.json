@@ -53,6 +53,7 @@
     "node": ">=22.18"
   },
   "devDependencies": {
+    "@backthread/extractor": "^0.1.0",
     "@backthread/redact": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^22.19.19",

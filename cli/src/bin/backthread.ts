@@ -26,6 +26,9 @@
 //   backthread mcp              start the MCP server over stdio — exposes the
 //                         `capture` + `query` ("how does X work?") tools to Claude
 //                         Code. Long-running: serves until stdin closes.
+//   backthread graph            refresh the repo-local STRUCTURE cache (the grep-time
+//                         context hook's local tier) by running @backthread/extractor
+//                         on the working tree, incrementally. Offline + fail-open.
 //   backthread install          onboarding: auth handshake + register the SessionEnd
 //                         hook (settings.json fallback; the plugin manifest does it
 //                         when installed as a plugin) + chain a one-shot backfill so
@@ -52,6 +55,7 @@ import { parseInstallAgent } from '../installAgent.js';
 import { runStart } from '../firstRun.js';
 import { detectEntry } from '../entry.js';
 import { runSessionStart } from '../sessionStart.js';
+import { refreshStructure } from '../localGraph.js';
 
 const USAGE = `backthread — keep the thread on what your AI agent actually shipped
 
@@ -77,6 +81,8 @@ Capture
   backthread capture --manual   Capture the current session now (the /backthread capture command)
                           [--session <id>] [--transcript <path>] [--cwd <dir>]
   backthread mcp                Start the MCP server (capture + query tools) over stdio
+  backthread graph              Refresh the local structure cache for this repo (offline,
+                          incremental). Powers the grep-time context hook. [--cwd <path>] [--force]
 
 Manage
   backthread install            Set up capture for this repo (login + hook + backfill history)
@@ -105,6 +111,7 @@ const KNOWN_COMMANDS = [
   'ask',
   'capture',
   'mcp',
+  'graph',
   'install',
   'update',
   'doctor',
@@ -334,6 +341,17 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // diagnostics go to stderr only.
       await startMcpServer();
       return null;
+    }
+    case 'graph': {
+      // Refresh the repo-local STRUCTURE cache (the two-tier grep-hook's local
+      // tier). Runs @backthread/extractor on the working tree, incrementally.
+      // Fail-open: a missing extractor / any hiccup returns a non-'error' status
+      // and writes nothing, so a hook that chains this can never be disrupted.
+      // Exits 0 for every outcome except a genuine 'error'.
+      const cwd = flagValue(rest, '--cwd') ?? process.cwd();
+      const outcome = await refreshStructure({ cwd, force: rest.includes('--force') });
+      console.error(`backthread graph: ${outcome.status} — ${outcome.detail}`);
+      return outcome.status === 'error' ? 1 : 0;
     }
     case 'start': {
       // The CC-plugin FIRST-RUN experience, behind the
