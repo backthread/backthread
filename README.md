@@ -69,7 +69,23 @@ Not sure what's wired up? `npx backthread doctor` tells you exactly what's set u
 | `backthread version` | Print the installed version (also `--version`, `-v`). |
 | `backthread whoami` | Show this device's config (never prints the token). |
 | `backthread mcp` | Start the MCP server (the `capture` + `how`/`query` tools) over stdio. |
+| `backthread graph` | Refresh the repo-local **structure** cache (offline, incremental) — the local tier of the grep-time context hook. |
+| `backthread sync` | Sync this repo's merged decision **"why"** into the local cache (device-token auth, hours-TTL). |
 | `backthread help` | The full list (also `--help`, `-h`). |
+
+## Two tiers: grep-time context vs. hosted synthesis
+
+Backthread answers "what's going on here?" at two depths, so you pay for depth only when you need it:
+
+- **Local, per-grep (free, offline, automatic).** When your agent runs Grep/Glob, a PreToolUse hook injects a ~300-token pointer for the search term — the relevant local modules **and** the recorded *why* (trade-offs, assumptions, rejected approaches) — before the search runs. No network, no LLM, no billing. It's keyed off the **search term, not node identity**, so it stays right even when your working tree has diverged from what's merged: a brand-new local module still gets the on-record why by keyword match, with nothing mis-attributed.
+- **Hosted synthesis (on demand).** For a hard whole-system question — *"how does the whole X work?"*, how a design evolved, a deliberate blindspot pass — `backthread how "…"` (or the `query` MCP tool / `/backthread:how`) reconciles the full merged decision log into a short, cited answer the raw local cache can't produce.
+
+**The cache** lives at `.backthread/cache.json` in your repo root (self-ignored — it never touches your tracked `.gitignore`), with two sections:
+
+- `structure` — computed **locally** from your working tree by `backthread graph` (exact, offline, zero-LLM), refreshed **incrementally** (only changed files are re-parsed).
+- `decisions` — the **merged** decision log synced down by `backthread sync`. Decisions are merge-gated, so they rarely change mid-session.
+
+**Freshness.** SessionStart refreshes both in the background (a decision sync + a structure re-extract), and the decision sync also carries an hours-TTL fallback. You can refresh either on demand with `backthread graph` / `backthread sync`. No action needed beyond installing the plugin and staying on the latest version.
 
 ## Packages
 
@@ -77,12 +93,13 @@ Not sure what's wired up? `npx backthread doctor` tells you exactly what's set u
 |---|---|---|
 | [`cli`](./cli) | [`backthread`](https://www.npmjs.com/package/backthread) | The `npx backthread` CLI — captures the *why* of your changes from your agent sessions and answers "how does X work?" from the terminal. |
 | [`packages/redact`](./packages/redact) | [`@backthread/redact`](https://www.npmjs.com/package/@backthread/redact) | The redaction fence — pure, zero-dependency string transforms that strip source code and tool I/O out of a session transcript before anything leaves your machine. |
+| [`packages/extractor`](./packages/extractor) | `@backthread/extractor` *(not yet published)* | Deterministic, install-free structural extraction (AST → communities → god-nodes → framework & infra adapters) for TypeScript + Python — zero LLM/DB/network. Powers the local structure cache. |
 
 ## Why these are open source
 
 The redaction fence and the CLI are the parts of Backthread that run **on your machine and see your code**. The trust claim — *"source code and tool I/O never leave your machine unredacted"* — is only worth as much as your ability to verify it. So this code is public: read it, audit it, run it. **Verify us, don't trust us.**
 
-The structural extractor that derives the architecture view will join this repo as `@backthread/extractor` (not yet published) — polyglot by design (TypeScript today, more languages behind a pluggable adapter seam).
+The structural extractor that derives the architecture view lives in this repo as [`@backthread/extractor`](./packages/extractor) — polyglot by design (TypeScript + Python today, more languages behind a pluggable adapter seam), and it's the same engine that powers the local structure cache above. (Not yet published to npm; the CLI resolves it from this workspace for now.)
 
 ## Security
 

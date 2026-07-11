@@ -114,6 +114,8 @@ backthread version             Print the installed version (also --version, -v)
 backthread whoami              Show this device's config (your token is never printed)
 backthread capture             Capture a session's decisions (run automatically by the hook)
 backthread mcp                 Start the MCP server — the capture + "how does X work?" query tools
+backthread graph               Refresh the repo-local structure cache (offline, incremental)
+backthread sync                Sync this repo's merged decision "why" into the local cache (hours-TTL)
 backthread help                Show the full usage (also --help, -h)
 ```
 
