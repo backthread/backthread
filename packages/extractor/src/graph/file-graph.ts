@@ -1,0 +1,567 @@
+// Stage A — the PURE file-level graph model behind diff-driven
+// incremental extraction.
+//
+// The per-merge walk used to run a FULL ts-morph extract of the whole
+// repo at EVERY checkpoint — O(repo) per merge, which blew the 10-min container
+// watchdog on a busy repo. Stage A makes the walk carry a FILE-LEVEL
+// graph in memory: seed it once (full extract, or the extraction_cache's
+// serialized copy), then per checkpoint patch it from `git diff --name-status`
+// — re-running the EXPENSIVE extraction (ts-morph symbol resolution for call
+// edges) only on the files the merge actually touched (+ the dependents that
+// can observe the change; see computeCallPatchUnit).
+//
+// This module is deliberately PURE (no git, no ts-morph, no fs): the state
+// shape, the NormalizedGraph assembly, the diff classification, the dependents
+// closure, and the (de)serialization that rides in extraction_cache. The impure
+// engine that owns the ts-morph Project lives in incremental.ts.
+//
+// EQUIVALENCE CONTRACT (load-bearing): a patched state at commit N must produce
+// the SAME NormalizedGraph a full extract at N would — guarded by the fixture
+// test in incremental-equivalence.test.ts. If you change edge semantics here or
+// in the adapter, change BOTH sides and re-run that test.
+
+import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
+
+// ---------------------------------------------------------------------------
+// Source-path policy — MUST mirror each language adapter's glob semantics.
+
+/**
+ * The extractor languages the pipeline supports. The dispatch (graph/extract.ts)
+ * picks ONE per repo; every source-path predicate below is parameterized by it so
+ * a single implementation serves both the ts-morph (TS) and Pyright (Python,
+ * ) adapters. `ts` is the default everywhere the caller can't yet supply a
+ * language (the incremental diff classifier is TS-only today).
+ */
+export type SourceLang = 'ts' | 'python';
+
+/** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
+export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
+
+/** Python source extensions the Pyright adapter parses (module + stub files). */
+export const PYTHON_SOURCE_EXTENSIONS = ['py', 'pyi'] as const;
+
+/** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
+export const EXCLUDE_DIRS = [
+  'node_modules',
+  'dist',
+  'build',
+  'out',
+  'coverage',
+  '.git',
+  '.next',
+  '.vite',
+  '.turbo',
+] as const;
+
+/**
+ * Directories the Python adapter's walk excludes: virtualenvs, tool caches, egg
+ * builds, and vendored deps. Mirrors the TS EXCLUDE_DIRS role — none of these
+ * hold first-party source, and walking them would (a) misclassify installed deps
+ * as internal and (b) blow the install-free promise. `.`-prefixed dirs (`.venv`,
+ * `.tox`, `.mypy_cache`) are also caught by the dot-segment skip below, but are
+ * listed explicitly so the policy is self-contained.
+ */
+export const PYTHON_EXCLUDE_DIRS = [
+  '__pycache__',
+  '.venv',
+  'venv',
+  'env',
+  '.tox',
+  '.nox',
+  '.mypy_cache',
+  '.pytest_cache',
+  '.ruff_cache',
+  '.eggs',
+  'site-packages',
+  '.git',
+  'build',
+  'dist',
+  'node_modules',
+] as const;
+
+const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXTENSIONS.join('|')})$`);
+const PYTHON_SOURCE_EXT_RE = new RegExp(`\\.(${PYTHON_SOURCE_EXTENSIONS.join('|')})$`);
+const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
+const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
+
+/**
+ * Does a repo-relative posix path denote a file the extractor would include?
+ * For `ts` this mirrors the ts-morph adapter's glob EXACTLY (verified empirically
+ * + by the equivalence fixture): matching extension, no excluded-dir segment, and
+ * NO dotted segment — ts-morph's globbing skips dot-directories AND dot-files by
+ * default (`.storybook/x.ts`, `src/.hidden.ts` are not added), so the diff
+ * classifier must skip them too or a patched graph would diverge from a full
+ * extract. For `python` the same shape holds with `.py`/`.pyi` + the Python
+ * exclude set; the dot-segment skip drops `.venv`/`.tox`/… while keeping
+ * `__init__.py` (a `_`-prefixed name, not a dotted one).
+ */
+export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean {
+  const extRe = lang === 'python' ? PYTHON_SOURCE_EXT_RE : SOURCE_EXT_RE;
+  const excludes = lang === 'python' ? PYTHON_EXCLUDE_SET : EXCLUDE_SET;
+  if (!extRe.test(path)) return false;
+  for (const seg of path.split('/')) {
+    if (seg.startsWith('.')) return false;
+    if (excludes.has(seg)) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Config invalidators (the correctness valve).
+//
+// These files change MODULE RESOLUTION for the INSTALL-FREE extractor
+// (tsconfig/jsconfig paths/baseUrl feed the Project's compilerOptions;
+// package.json's `type`/`imports`/`exports` fields affect ts-morph's Bundler
+// resolution). A diff touching any of them forces a FULL re-extract at that
+// checkpoint — conservative and rare.
+//
+// NARROWED ( item 3a): lockfiles (package-lock.json, npm-shrinkwrap
+// .json, yarn.lock, pnpm-lock.yaml, bun.lockb/bun.lock, deno.lock), deno.json/
+// deno.jsonc, and pnpm-workspace.yaml PROVABLY cannot affect the extractor's
+// output — it never resolves into node_modules (a bare specifier that doesn't
+// resolve from source is an external by design) and it ignores deno config
+// entirely, so what a lockfile pins is invisible to it. Treating them as
+// invalidators cost a needless full extract on every lockfile-touching merge
+// (~10-15% of merges on dep-heavy repos).
+
+// TS side: tsconfig/jsconfig paths+baseUrl and package.json type/imports/exports.
+// Python side: pyproject.toml / setup.cfg / setup.py declare package-dir
+// + src-layout + namespace-package settings that steer Pyright's first-party
+// resolution, so a diff touching them forces a full re-extract. requirements*.txt
+// / Pipfile are deliberately NOT invalidators — like TS lockfiles they only pin
+// third-party deps we never install, which are invisible to the extractor. The
+// basenames are language-distinct, so matching all of them unconditionally never
+// changes single-language behavior.
+const INVALIDATOR_BASENAME_RE =
+  /^(tsconfig[^/]*\.json|jsconfig[^/]*\.json|package\.json|pyproject\.toml|setup\.cfg|setup\.py)$/;
+
+/** Does a repo-relative path name a resolution-affecting config file? */
+export function isConfigInvalidatorPath(path: string): boolean {
+  const base = path.split('/').pop() ?? path;
+  return INVALIDATOR_BASENAME_RE.test(base);
+}
+
+/**
+ * Stage B — the blob-cache KEY COMPONENT. A `file_parse_cache` row is
+ * keyed (repo_id, blob_sha, extractor_version): blob-identical content can
+ * only be reused while the per-file extraction SEMANTICS are unchanged. Bump
+ * this whenever per-file extraction OUTPUT can change for the same blob:
+ * adapter edge semantics (extractFileImportsRecord/extractFileCalls), the
+ * source globs / EXCLUDE_DIRS policy, an invalidator-policy change that alters
+ * output, or the FileRecord shape itself. A bump cleanly orphans every cached
+ * row (all lookups miss → re-parse — the once-per-version cost; saveParseCache
+ * GCs the orphaned versions best-effort). Version 1 is RESERVED for the
+ * implicit Stage-A semantics and is never written to the table.
+ */
+export const EXTRACTOR_VERSION = 2;
+
+// ---------------------------------------------------------------------------
+// State shape.
+
+/** A resolved internal edge out of a file (target = repo-relative file id). */
+export interface FileEdgeRef {
+  to: string;
+  weight: number;
+}
+
+/** An external dependency referenced by a file (unresolved bare specifier). */
+export interface FileExternalRef {
+  id: string; // `ext:<package>`
+  specifier: string;
+  weight: number;
+}
+
+/** Everything the extractor derives from ONE source file (+ tree resolution). */
+export interface FileRecord {
+  loc: number;
+  language: string;
+  /** Resolved internal import/export-from targets (kind 'import'). */
+  imports: FileEdgeRef[];
+  /** External packages referenced (kind 'import', external). */
+  externals: FileExternalRef[];
+  /** Resolved internal call/new targets (kind 'call') — the EXPENSIVE part. */
+  calls: FileEdgeRef[];
+  /**
+   * Resolved internal targets of `export … from` declarations — the re-export
+   * surface a change can propagate THROUGH (see computeCallPatchUnit). Subset
+   * of `imports` targets.
+   */
+  reexports: string[];
+  /** Git blob sha at the state's head (serialization only; Stage-B cache key). */
+  blobSha?: string;
+}
+
+/** The carried graph: a full-commit-sha head + one record per source file. */
+export interface FileGraphState {
+  /** FULL commit sha the state corresponds to (diff base for the next patch). */
+  headSha: string;
+  files: Record<string, FileRecord>;
+}
+
+// ---------------------------------------------------------------------------
+// NormalizedGraph assembly (shared by the batch adapter + the engine, so a
+// patched state and a full extract produce byte-identical downstream input).
+
+/**
+ * Assemble the NormalizedGraph the clustering layer consumes from a file-graph
+ * state. Files are emitted in SORTED path order — deterministic across
+ * platforms and identical between the batch and incremental paths (Louvain's
+ * seeded RNG consumes node insertion order, so ordering is part of output
+ * stability).
+ */
+export function graphFromState(root: string, state: FileGraphState): NormalizedGraph {
+  const paths = Object.keys(state.files).sort();
+  const files = paths.map((id) => ({
+    id,
+    loc: state.files[id].loc,
+    language: state.files[id].language,
+  }));
+
+  const externals = new Map<string, ExternalNode>();
+  const edges: GraphEdge[] = [];
+  for (const id of paths) {
+    const rec = state.files[id];
+    for (const e of rec.imports) {
+      edges.push({ from: id, to: e.to, kind: 'import', external: false, weight: e.weight });
+    }
+    for (const x of rec.externals) {
+      externals.set(x.id, { id: x.id, specifier: x.specifier });
+      edges.push({ from: id, to: x.id, kind: 'import', external: true, weight: x.weight });
+    }
+    for (const c of rec.calls) {
+      edges.push({ from: id, to: c.to, kind: 'call', external: false, weight: c.weight });
+    }
+  }
+
+  return { root, files, edges, externals: [...externals.values()] };
+}
+
+// ---------------------------------------------------------------------------
+// Diff classification.
+
+/** One `git diff --name-status --no-renames` entry (renames arrive as D+A). */
+export interface DiffEntry {
+  /** A=added, M=modified, D=deleted, T=type-change; anything else is rare. */
+  status: string;
+  path: string;
+}
+
+export interface ClassifiedDiff {
+  /** Source files added at this checkpoint. */
+  sourceAdded: string[];
+  /** Source files whose content changed. */
+  sourceModified: string[];
+  /** Source files removed. */
+  sourceDeleted: string[];
+  /** Resolution-affecting config paths touched → force a FULL extract. */
+  invalidators: string[];
+  /**
+   * Did the SOURCE-FILE SHAPE of the tree change (adds/deletes/type-changes)?
+   * Shape changes can flip OTHER files' specifier resolution (a new file an
+   * existing `./util` import now resolves to; a deleted target), so the engine
+   * rebuilds its Project + re-resolves every file's imports. Content-only
+   * (M) diffs can't move resolution and take the cheap refresh path.
+   */
+  shapeChanged: boolean;
+}
+
+/** Classify a checkpoint's diff entries into the engine's decision inputs. */
+export function classifyDiff(entries: readonly DiffEntry[]): ClassifiedDiff {
+  const sourceAdded: string[] = [];
+  const sourceModified: string[] = [];
+  const sourceDeleted: string[] = [];
+  const invalidators: string[] = [];
+  let oddStatus = false;
+
+  for (const e of entries) {
+    if (isConfigInvalidatorPath(e.path)) invalidators.push(e.path);
+    if (!isSourceFilePath(e.path)) continue;
+    switch (e.status) {
+      case 'A':
+        sourceAdded.push(e.path);
+        break;
+      case 'M':
+        sourceModified.push(e.path);
+        break;
+      case 'D':
+        sourceDeleted.push(e.path);
+        break;
+      default:
+        // T (type change: file↔symlink) or an exotic status — treat as a shape
+        // change so the engine rebuilds rather than guessing.
+        oddStatus = true;
+        sourceModified.push(e.path);
+        break;
+    }
+  }
+
+  return {
+    sourceAdded,
+    sourceModified,
+    sourceDeleted,
+    invalidators,
+    shapeChanged: oddStatus || sourceAdded.length > 0 || sourceDeleted.length > 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The dependents closure — WHICH files need their (expensive) call edges
+// re-extracted after a diff.
+//
+// STEP-1 finding: per-file IMPORT extraction is per-file-independent
+// given tree resolution (a file's specifiers + the tree decide its import
+// edges), but CALL-edge extraction is NOT — it resolves each call site's symbol
+// through the type checker, so a file's call edges can change when a file it
+// imports changes its exports (and, through `export … from` chains, when a
+// transitively re-exported file changes). The patch unit is therefore:
+//
+//   (a) the changed files themselves (added + modified),
+//   (b) any file whose freshly-resolved import TARGETS differ from the carried
+//       state (its specifiers now bind elsewhere — covers added/deleted targets
+//       and resolution shadowing uniformly, no path heuristics), and
+//   (c) any file that imports a member of the REEXPORT CLOSURE of the changed/
+//       deleted set (a barrel re-exporting a changed file propagates the
+//       change one hop further; the closure follows those chains to fixpoint).
+//
+// KNOWN RESIDUAL (documented, accepted for Stage A): a call edge that resolves
+// through a TYPE returned by an intermediary (f calls a method declared in h,
+// reached via a type that g returns) can change when h changes without f
+// importing h or any re-export chain connecting them. Healed by the config
+// invalidators (full extract) and Stage B's periodic full-extract
+// reconciliation; not representable in the import graph without a full
+// type-dependency graph.
+
+/**
+ * Expand `seeds` (changed/deleted paths) through re-export chains: any file
+ * whose `reexports` include a member of the closure joins it, to fixpoint.
+ */
+export function reexportClosure(
+  seeds: ReadonlySet<string>,
+  reexportsByFile: ReadonlyMap<string, readonly string[]>,
+): Set<string> {
+  const closure = new Set(seeds);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [file, targets] of reexportsByFile) {
+      if (closure.has(file)) continue;
+      if (targets.some((t) => closure.has(t))) {
+        closure.add(file);
+        grew = true;
+      }
+    }
+  }
+  return closure;
+}
+
+function importTargetsKey(edges: readonly FileEdgeRef[]): string {
+  return edges
+    .map((e) => `${e.to}|${e.weight}`)
+    .sort()
+    .join('\n');
+}
+
+/**
+ * The set of files whose CALL edges must be re-extracted at this checkpoint.
+ * All inputs reflect the CURRENT tree (post-diff): `freshImports` are the
+ * just-re-resolved import edges, `prevImports` the carried ones (absent for
+ * new files), `reexports` the fresh re-export targets per file.
+ */
+export function computeCallPatchUnit(args: {
+  added: readonly string[];
+  modified: readonly string[];
+  deleted: readonly string[];
+  /** Current files → freshly resolved import edges. */
+  freshImports: ReadonlyMap<string, readonly FileEdgeRef[]>;
+  /** Carried state's import edges (pre-diff), keyed by file. */
+  prevImports: ReadonlyMap<string, readonly FileEdgeRef[]>;
+  /** Current files → fresh re-export targets. */
+  reexports: ReadonlyMap<string, readonly string[]>;
+}): Set<string> {
+  const unit = new Set<string>([...args.added, ...args.modified]);
+
+  // (b) resolution moved — the file's specifiers bind to different targets now.
+  for (const [file, fresh] of args.freshImports) {
+    if (unit.has(file)) continue;
+    const prev = args.prevImports.get(file);
+    if (prev === undefined) {
+      unit.add(file); // not in the carried state → treat as new
+      continue;
+    }
+    if (importTargetsKey(fresh) !== importTargetsKey(prev)) unit.add(file);
+  }
+
+  // (c) imports a member of the re-export closure of the changed/deleted set.
+  const seeds = new Set<string>([...args.added, ...args.modified, ...args.deleted]);
+  const closure = reexportClosure(seeds, args.reexports as ReadonlyMap<string, readonly string[]>);
+  for (const [file, fresh] of args.freshImports) {
+    if (unit.has(file)) continue;
+    if (fresh.some((e) => closure.has(e.to))) unit.add(file);
+  }
+
+  return unit;
+}
+
+// ---------------------------------------------------------------------------
+// Serialization — the `fileGraph` payload extension of extraction_cache
+// ( Stage A item 7). Written at the end of each boot, read as the next
+// boot's seed (zero full extract when the head commit is still reachable).
+//
+// NOTE: this rides inside the existing jsonb `extraction_cache.payload` — fine
+// at current scale (~100s of KB for a ~400-file repo). Stage B ADDS the
+// content-addressed per-blob parse cache (`file_parse_cache`, keyed
+// (repo_id, blob_sha, extractor_version)) as the fallback seed when this
+// graph's head commit is unreachable in the clone — the two are complementary:
+// this payload is the zero-parse fast path, the blob cache the O(misses)
+// cold-boot path.
+
+export const FILE_GRAPH_VERSION = 1;
+
+export interface SerializedFileGraph {
+  version: number;
+  /** FULL commit sha the graph corresponds to. */
+  headSha: string;
+  files: Record<string, FileRecord>;
+  /**
+   * Stage B: boots since the last full-extract reconciliation pass
+   * (container.ts), riding the fileGraph payload because it shares the graph's
+   * exact lifecycle — persist_snapshot overwrites the whole extraction_cache
+   * payload mid-boot, and the boot-end fileGraph save re-adds both together.
+   * Optional + tolerated by deserializeFileGraph (older payloads lack it; the
+   * container reads it off the RAW serialized object, defaulting 0).
+   */
+  bootsSinceReconcile?: number;
+}
+
+export function serializeFileGraph(
+  state: FileGraphState,
+  blobShaByPath?: ReadonlyMap<string, string>,
+): SerializedFileGraph {
+  const files: Record<string, FileRecord> = {};
+  for (const [path, rec] of Object.entries(state.files)) {
+    const blobSha = blobShaByPath?.get(path);
+    files[path] = blobSha ? { ...rec, blobSha } : { ...rec };
+  }
+  return { version: FILE_GRAPH_VERSION, headSha: state.headSha, files };
+}
+
+function isEdgeRefArray(v: unknown): v is FileEdgeRef[] {
+  return Array.isArray(v) && v.every((e) => e && typeof e.to === 'string' && typeof e.weight === 'number');
+}
+
+function isExternalRefArray(v: unknown): v is FileExternalRef[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (e) =>
+        e && typeof e.id === 'string' && typeof e.specifier === 'string' && typeof e.weight === 'number',
+    )
+  );
+}
+
+/**
+ * Validate ONE untrusted jsonb value as a FileRecord — the per-record half of
+ * deserializeFileGraph's shape guard, exported ( Stage B) so the blob
+ * parse-cache reader (assemble/parse-cache.ts) applies the SAME rigor per row
+ * without duplicating it. A row failing this is treated as a cache miss, never
+ * an error: a corrupt cached record must degrade to a re-parse.
+ */
+export function isValidFileRecord(v: unknown): v is FileRecord {
+  if (!v || typeof v !== 'object') return false;
+  const r = v as Record<string, unknown>;
+  if (typeof r.loc !== 'number' || typeof r.language !== 'string') return false;
+  if (!isEdgeRefArray(r.imports) || !isEdgeRefArray(r.calls)) return false;
+  if (!isExternalRefArray(r.externals)) return false;
+  if (!Array.isArray(r.reexports) || !r.reexports.every((t) => typeof t === 'string')) return false;
+  return true;
+}
+
+/**
+ * Validate + adopt a serialized file graph. Returns null for anything not
+ * usable as a seed (wrong version, missing head, malformed records) — the
+ * caller then seeds with a full extract instead. NEVER throws: a corrupt cache
+ * must degrade to a full extract, not fail the ingest. Unknown extra fields
+ * (e.g. the Stage-B `bootsSinceReconcile` counter) are TOLERATED — older and
+ * newer payloads must round-trip through each other's readers.
+ */
+export function deserializeFileGraph(v: unknown): FileGraphState | null {
+  if (!v || typeof v !== 'object') return null;
+  const g = v as Record<string, unknown>;
+  if (g.version !== FILE_GRAPH_VERSION) return null;
+  if (typeof g.headSha !== 'string' || g.headSha.length < 7) return null;
+  if (!g.files || typeof g.files !== 'object' || Array.isArray(g.files)) return null;
+
+  const files: Record<string, FileRecord> = {};
+  for (const [path, raw] of Object.entries(g.files as Record<string, unknown>)) {
+    if (!isValidFileRecord(raw)) return null;
+    const r = raw as FileRecord & { blobSha?: unknown };
+    files[path] = {
+      loc: r.loc,
+      language: r.language,
+      imports: r.imports,
+      externals: r.externals,
+      calls: r.calls,
+      reexports: r.reexports,
+      ...(typeof r.blobSha === 'string' ? { blobSha: r.blobSha } : {}),
+    };
+  }
+  return { headSha: g.headSha, files };
+}
+
+// ---------------------------------------------------------------------------
+// State diffing — the Stage-B RECONCILIATION comparator ( Stage B).
+//
+// The walk's carried state is provably equivalent to a full extract EXCEPT for
+// the documented residual (deep type-dispatch chains — see the dependents-
+// closure block above). Every ~N boots the container runs a fresh full extract
+// at the carried head and compares states with this helper; any drifted path
+// is healed by adopting the ground truth + re-upserting its blob-cache row.
+
+// Explicit field-by-field keys (NOT JSON.stringify of the objects): Postgres
+// jsonb normalizes object key order, so a round-tripped record could stringify
+// differently from a fresh one despite being identical.
+function edgeRefsKey(v: readonly FileEdgeRef[]): string {
+  return v
+    .map((e) => `${e.to}|${e.weight}`)
+    .sort()
+    .join('\n');
+}
+
+function externalRefsKey(v: readonly FileExternalRef[]): string {
+  return v
+    .map((e) => `${e.id}|${e.specifier}|${e.weight}`)
+    .sort()
+    .join('\n');
+}
+
+/**
+ * Paths whose records DIFFER between two states (union of both key sets — a
+ * path present in only one side counts as drifted). Comparison is ORDER-
+ * INSENSITIVE over the imports/externals/calls/reexports arrays (extraction
+ * order is not semantics) and IGNORES blobSha (a serialization tag, not
+ * extractor output). Pure; never throws.
+ */
+export function diffFileGraphStates(a: FileGraphState, b: FileGraphState): string[] {
+  const recordKey = (rec: FileRecord): string =>
+    [
+      `loc:${rec.loc}`,
+      `lang:${rec.language}`,
+      `imports:${edgeRefsKey(rec.imports)}`,
+      `externals:${externalRefsKey(rec.externals)}`,
+      `calls:${edgeRefsKey(rec.calls)}`,
+      `reexports:${[...rec.reexports].sort().join(',')}`,
+    ].join('\x1f');
+
+  const drifted: string[] = [];
+  const allPaths = new Set([...Object.keys(a.files), ...Object.keys(b.files)]);
+  for (const path of [...allPaths].sort()) {
+    const ra = a.files[path];
+    const rb = b.files[path];
+    if (!ra || !rb) {
+      drifted.push(path);
+      continue;
+    }
+    if (recordKey(ra) !== recordKey(rb)) drifted.push(path);
+  }
+  return drifted;
+}

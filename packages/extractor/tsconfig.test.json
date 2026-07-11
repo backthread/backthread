@@ -1,0 +1,9 @@
+{
+  "comment": "Typecheck-only config for the test suite + the node:test/expect shim (testkit.ts). Run via `npm run typecheck`; the tests execute through tsx (no emit).",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src"],
+  "exclude": ["dist", "node_modules"]
+}
