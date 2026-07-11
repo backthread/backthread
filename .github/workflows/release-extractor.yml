@@ -1,0 +1,86 @@
+# Release @backthread/extractor — on an `extractor-v*` tag: test → verify the tag
+# matches packages/extractor/package.json → publish `@backthread/extractor` to npm via
+# OIDC TRUSTED PUBLISHING → cut a GitHub Release with auto-generated notes.
+#
+# This is the LIBRARY sibling of release.yml (which ships the `backthread` CLI on `v*`).
+# The extractor is consumed in three places — the hosted ingest container, the OSS CLI's
+# optional structure tier, and directly — so it gets its own tag namespace + Trusted
+# Publisher rather than riding the CLI's release. The extractor version is a SINGLE file
+# (packages/extractor/package.json); it is NOT part of the CLI's four-file lockstep.
+#
+# SETUP (founder, one-time, NO TOKEN): on npmjs.com → the @backthread/extractor package
+# (or the backthread org) → Settings → Trusted Publisher, add a GitHub Actions publisher:
+#   Organization or user: backthread   Repository: backthread
+#   Workflow filename:    release-extractor.yml   Environment name: release-extractor
+#   Allowed actions:      Allow npm publish
+# Trusted publishing exchanges THIS workflow's short-lived OIDC token for an npm
+# credential at publish time — no NPM_TOKEN secret, no 2FA OTP, nothing to rotate.
+#
+# To cut a release:
+#   1. bump packages/extractor/package.json version, commit, merge.
+#   2. `git tag extractor-v<version> && git push origin extractor-v<version>`
+#      (tag MUST match the version).
+name: Release extractor
+
+on:
+  push:
+    tags: ['extractor-v*']
+
+# id-token: write → the OIDC token that trusted publishing + provenance need.
+# contents: write → create the GitHub Release.
+permissions:
+  contents: write
+  id-token: write
+
+# Serialize extractor releases so two tags pushed close together can't race the npm
+# publish. A separate group from `release` (the CLI) — the two packages don't contend.
+concurrency:
+  group: release-extractor
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # MUST equal the "Environment name" set on the npm Trusted Publisher. GitHub
+    # auto-creates this environment on first use; add protection rules (e.g. required
+    # reviewers) to it later if you want a manual approval gate before each publish.
+    environment: release-extractor
+    steps:
+      # SHA-pinned (not floating tags) — see ci.yml + .github/dependabot.yml.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      # OIDC trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.x. Pinned to
+      # 11.18.0 (the last 11.x) instead of @latest: npm 12.0.0 regressed
+      # `npm publish --provenance` with "Cannot find module 'sigstore'". See release.yml.
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@11.18.0
+      - run: npm ci
+      # Validate the thing being published (its own workspace gates). The extractor is a
+      # dependency of the CLI, so its PR CI already ran the full-workspace suite; here we
+      # re-validate the extractor at release time before shipping it.
+      - name: Typecheck
+        run: npm run typecheck -w @backthread/extractor
+      - name: Test
+        run: npm test -w @backthread/extractor
+      # Guard: the tag must match packages/extractor/package.json — never publish a
+      # version that doesn't match the tag.
+      - name: Tag matches extractor version
+        run: |
+          PKG="extractor-v$(node -p "require('./packages/extractor/package.json').version")"
+          if [ "$PKG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME != packages/extractor/package.json ($PKG). Bump packages/extractor/package.json to match the tag." >&2
+            exit 1
+          fi
+      # `npm publish` runs the extractor's `prepack` (build), so the published dist is
+      # always freshly compiled. With OIDC trusted publishing npm authenticates via the
+      # workflow's id-token (no NODE_AUTH_TOKEN) and auto-attaches build provenance.
+      - name: Publish @backthread/extractor to npm (OIDC trusted publishing)
+        run: npm publish -w @backthread/extractor --provenance --access public
+      - name: GitHub Release (auto-generated notes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
