@@ -40,10 +40,13 @@ await build({
   // load EAGERLY on EVERY `backthread` invocation — regressing capture /
   // session-start / mcp startup and breaking the "stay light" contract. As an
   // external, node resolves it at runtime relative to this bundle's on-disk
-  // location: the OSS workspace symlink in dev/dogfood; absent (→ a clean
-  // `unavailable`, never a crash) in a pre-publish npx/plugin install. When the
-  // extractor is published + promoted devDependencies → dependencies, npx/plugin
-  // installs light it up with no bundle change.
+  // location: the OSS workspace symlink in dev/dogfood; the published package in
+  // an npx/plugin install (an OPTIONAL dependency — best-effort installed, so the
+  // fleet lights up in the common case without making the CLI's whole install
+  // hinge on the extractor's heavy transitive tree); absent (→ a clean
+  // `unavailable`, never a crash) when that best-effort install is skipped or
+  // fails. Promoting devDependencies → optionalDependencies lights up npx/plugin
+  // installs with no bundle change.
   external: ['@backthread/extractor'],
   // Inline the redact version (read above) so the bundled bin reports it correctly.
   define: { __REDACT_VERSION__: JSON.stringify(redactVersion) },

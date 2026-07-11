@@ -93,13 +93,13 @@ Backthread answers "what's going on here?" at two depths, so you pay for depth o
 |---|---|---|
 | [`cli`](./cli) | [`backthread`](https://www.npmjs.com/package/backthread) | The `npx backthread` CLI — captures the *why* of your changes from your agent sessions and answers "how does X work?" from the terminal. |
 | [`packages/redact`](./packages/redact) | [`@backthread/redact`](https://www.npmjs.com/package/@backthread/redact) | The redaction fence — pure, zero-dependency string transforms that strip source code and tool I/O out of a session transcript before anything leaves your machine. |
-| [`packages/extractor`](./packages/extractor) | `@backthread/extractor` *(not yet published)* | Deterministic, install-free structural extraction (AST → communities → god-nodes → framework & infra adapters) for TypeScript + Python — zero LLM/DB/network. Powers the local structure cache. |
+| [`packages/extractor`](./packages/extractor) | [`@backthread/extractor`](https://www.npmjs.com/package/@backthread/extractor) | Deterministic, install-free structural extraction (AST → communities → god-nodes → framework & infra adapters) for TypeScript + Python — zero LLM/DB/network. Powers the local structure cache. |
 
 ## Why these are open source
 
 The redaction fence and the CLI are the parts of Backthread that run **on your machine and see your code**. The trust claim — *"source code and tool I/O never leave your machine unredacted"* — is only worth as much as your ability to verify it. So this code is public: read it, audit it, run it. **Verify us, don't trust us.**
 
-The structural extractor that derives the architecture view lives in this repo as [`@backthread/extractor`](./packages/extractor) — polyglot by design (TypeScript + Python today, more languages behind a pluggable adapter seam), and it's the same engine that powers the local structure cache above. (Not yet published to npm; the CLI resolves it from this workspace for now.)
+The structural extractor that derives the architecture view lives in this repo as [`@backthread/extractor`](./packages/extractor) — polyglot by design (TypeScript + Python today, more languages behind a pluggable adapter seam), and it's the same engine that powers the local structure cache above. It's published on npm and installable standalone (`npm install @backthread/extractor`).
 
 ## Security
 
