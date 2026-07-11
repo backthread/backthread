@@ -12,7 +12,22 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+// Bundlers (esbuild `define`) inline this so a bundled consumer — where
+// `import.meta.url` + an fs read of package.json don't work — still reports the
+// real version. Absent when running unbundled (the `typeof` guard below is safe
+// on an undeclared identifier — it evaluates to 'undefined' rather than throwing).
+declare const __EXTRACTOR_VERSION__: string | undefined;
+
 function readPackageVersion(): string {
+  // Preferred: a build-time injected version (survives bundling).
+  try {
+    if (typeof __EXTRACTOR_VERSION__ === 'string' && __EXTRACTOR_VERSION__) {
+      return __EXTRACTOR_VERSION__;
+    }
+  } catch {
+    /* not injected — fall through to the unbundled fs read */
+  }
+  // Fallback: read package.json (works when installed/unbundled).
   try {
     // dev: src/version.ts → ../package.json; built: dist/version.js → ../package.json.
     const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
