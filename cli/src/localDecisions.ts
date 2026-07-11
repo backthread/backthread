@@ -216,6 +216,11 @@ export async function syncDecisions(
     }
 
     // Fetch merged decisions (device-token auth; server gates by membership).
+    // NOTE: read-decisions inherits PostgREST's default row cap (~1000), so on a
+    // repo with >1000 merged decisions the local cache is truncated (and the DB
+    // fetch order isn't salience-first). Target repos are well under that, so this
+    // degrades gracefully (fewer local hints); the hosted `query`/grounded-ask
+    // path bypasses the cap via direct PostgREST for the depth tier.
     let res: Response | undefined;
     let failDetail = '';
     for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt++) {
