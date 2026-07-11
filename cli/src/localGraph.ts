@@ -128,7 +128,11 @@ async function defaultLoadExtractor(): Promise<ExtractorApi> {
 }
 
 /** A per-file change signature: mtime+size (stat-only — no content read, so the
- * unchanged fast-path stays cheap on a large repo). null when unstattable. */
+ * unchanged fast-path stays cheap on a large repo). RESIDUAL: a same-size content
+ * edit landing at the same mtime millisecond is missed (editors bump mtime, so
+ * this is negligible; same model as tsc's incremental cache) — and it self-heals
+ * on an extractor-version bump or `backthread graph --force`. null when
+ * unstattable. */
 function fileSignature(abs: string): string | null {
   try {
     const st = statSync(abs);
