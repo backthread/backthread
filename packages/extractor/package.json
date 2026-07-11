@@ -1,6 +1,6 @@
 {
   "name": "@backthread/extractor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Deterministic, install-free structural extraction for TypeScript and Python codebases — AST → communities → god-nodes → framework & infra adapters, zero LLM/DB/network.",
   "type": "module",
   "license": "MIT",
