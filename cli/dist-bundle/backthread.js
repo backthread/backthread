@@ -6931,6 +6931,9 @@ function functionsBaseUrl(env = process.env) {
 function buildIngestDecisionsUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/ingest-decisions`).toString();
 }
+function buildReadDecisionsUrl(env = process.env) {
+  return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/read-decisions`).toString();
+}
 function buildOnboardingStateUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/onboarding-state`).toString();
 }
@@ -34738,6 +34741,146 @@ async function refreshStructure(opts = {}, deps = {}) {
   }
 }
 
+// src/localDecisions.ts
+var DEFAULT_TTL_HOURS = 6;
+var READ_TIMEOUT_MS = 15e3;
+var READ_ATTEMPTS = 2;
+function parseSlug3(slug) {
+  const parts = slug.trim().replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  return { owner: parts[0], name: parts[1] };
+}
+function resolveSyncRepo(config2, cwd, readRemote) {
+  if (config2.repo) {
+    const parsed = parseSlug3(config2.repo);
+    if (parsed) return parsed;
+  }
+  return resolveRepo(cwd, readRemote);
+}
+function isFresh(section, repoSlug, ttlHours, now) {
+  if (!section || section.repo !== repoSlug) return false;
+  const synced = Date.parse(section.syncedAt);
+  if (Number.isNaN(synced)) return false;
+  const ageMs = now.getTime() - synced;
+  return ageMs >= 0 && ageMs < ttlHours * 36e5;
+}
+var asStrArray = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+function mapDecisions(flows, decisions) {
+  const flowName = /* @__PURE__ */ new Map();
+  for (const f of flows) if (f && typeof f.id === "string" && typeof f.name === "string") flowName.set(f.id, f.name);
+  const out = [];
+  for (const d of decisions) {
+    if (!d || typeof d.id !== "string" || typeof d.title !== "string") continue;
+    const flowNames = asStrArray(d.flowIds).map((id) => flowName.get(id)).filter((n) => typeof n === "string");
+    out.push({
+      id: d.id,
+      title: d.title,
+      why: typeof d.why === "string" ? d.why : null,
+      problem: typeof d.problem === "string" ? d.problem : null,
+      moduleIds: asStrArray(d.moduleIds),
+      flowNames,
+      decidedAt: typeof d.decidedAt === "string" ? d.decidedAt : null,
+      significance: typeof d.significance === "number" ? d.significance : null,
+      tradeoffs: asStrArray(d.tradeoffs),
+      assumptions: asStrArray(d.assumptions),
+      limitations: asStrArray(d.limitations)
+    });
+  }
+  return out;
+}
+async function syncDecisions(opts = {}, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const readConfigImpl = deps.readConfigImpl ?? readConfig;
+  const resolveRoot = deps.resolveRepoRootImpl ?? resolveRepoRoot;
+  const readCacheImpl = deps.readCacheImpl ?? readCache;
+  const writeSection = deps.writeCacheSectionImpl ?? writeCacheSection;
+  const now = deps.now ?? (() => /* @__PURE__ */ new Date());
+  const ttlHours = opts.ttlHours ?? DEFAULT_TTL_HOURS;
+  const cwd = opts.cwd ?? process.cwd();
+  try {
+    const config2 = await Promise.resolve().then(() => readConfigImpl(env)).catch(() => ({}));
+    if (!config2.device_token) {
+      return { status: "no-auth", detail: "not logged in \u2014 run `backthread login` to sync the decision cache." };
+    }
+    const repo = resolveSyncRepo(config2, cwd, deps.readRemoteImpl);
+    if (!repo) {
+      return { status: "no-repo", detail: "could not determine a repo (no config.repo and no git origin remote)." };
+    }
+    const repoSlug = `${repo.owner}/${repo.name}`;
+    const repoRoot = resolveRoot(cwd);
+    if (!opts.force) {
+      const prior = await readCacheImpl(repoRoot).catch(() => null);
+      if (isFresh(prior?.decisions ?? null, repoSlug, ttlHours, now())) {
+        return {
+          status: "fresh",
+          detail: `decision cache is fresh (< ${ttlHours}h) \u2014 skipped.`,
+          repo,
+          count: prior?.decisions?.items.length
+        };
+      }
+    }
+    let res;
+    let failDetail = "";
+    for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt++) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), READ_TIMEOUT_MS);
+      try {
+        res = await doFetch(buildReadDecisionsUrl(env), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config2.device_token}`,
+            "Content-Type": "application/json",
+            ...versionHeaders()
+          },
+          // read-decisions expects `{ repo: { owner, name } }` (validate.ts), NOT a
+          // slug string — the caller is identified from the bearer token.
+          body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name } }),
+          signal: ac.signal
+        });
+        if (res.status >= 500 && attempt < READ_ATTEMPTS) {
+          failDetail = `read-decisions rejected (${res.status})`;
+          res = void 0;
+          continue;
+        }
+        break;
+      } catch (e) {
+        failDetail = e.name === "AbortError" ? `read-decisions timed out after ${READ_TIMEOUT_MS / 1e3}s` : `read-decisions request failed: ${e.message}`;
+        res = void 0;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (!res) {
+      return { status: "read-failed", detail: `${failDetail} (after ${READ_ATTEMPTS} attempts).`, repo };
+    }
+    let payload;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    const rec = payload && typeof payload === "object" ? payload : {};
+    if (!res.ok) {
+      const serverErr = typeof rec.message === "string" && rec.message.length > 0 ? rec.message : "error" in rec ? String(rec.error) : `HTTP ${res.status}`;
+      return { status: "read-failed", detail: `read-decisions rejected (${res.status}): ${serverErr}`, repo };
+    }
+    const flows = Array.isArray(rec.flows) ? rec.flows : [];
+    const decisions = Array.isArray(rec.decisions) ? rec.decisions : [];
+    const items = mapDecisions(flows, decisions);
+    const section = {
+      syncedAt: now().toISOString(),
+      ttlHours,
+      repo: repoSlug,
+      items
+    };
+    await writeSection(repoRoot, { decisions: section, repo: repoSlug });
+    return { status: "synced", detail: `cached ${items.length} merged decision(s).`, repo, count: items.length };
+  } catch (e) {
+    return { status: "error", detail: `decision sync failed (swallowed): ${e.message}` };
+  }
+}
+
 // src/bin/backthread.ts
 var USAGE = `backthread \u2014 keep the thread on what your AI agent actually shipped
 
@@ -34765,6 +34908,8 @@ Capture
   backthread mcp                Start the MCP server (capture + query tools) over stdio
   backthread graph              Refresh the local structure cache for this repo (offline,
                           incremental). Powers the grep-time context hook. [--cwd <path>] [--force]
+  backthread sync               Sync this repo's merged decision log into the local cache
+                          (hours-TTL; the why half of the grep hook). [--cwd <path>] [--force]
 
 Manage
   backthread install            Set up capture for this repo (login + hook + backfill history)
@@ -34790,6 +34935,7 @@ var KNOWN_COMMANDS = [
   "capture",
   "mcp",
   "graph",
+  "sync",
   "install",
   "update",
   "doctor",
@@ -34912,6 +35058,12 @@ async function main(argv, deps = {}) {
       const outcome = await refreshStructure({ cwd, force: rest.includes("--force") });
       console.error(`backthread graph: ${outcome.status} \u2014 ${outcome.detail}`);
       return outcome.status === "error" ? 1 : 0;
+    }
+    case "sync": {
+      const cwd = flagValue(rest, "--cwd") ?? process.cwd();
+      const outcome = await syncDecisions({ cwd, force: rest.includes("--force") });
+      console.error(`backthread sync: ${outcome.status} \u2014 ${outcome.detail}`);
+      return outcome.status === "synced" || outcome.status === "fresh" ? 0 : 1;
     }
     case "start": {
       return onboarding(rest);
