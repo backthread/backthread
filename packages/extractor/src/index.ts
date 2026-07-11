@@ -155,6 +155,11 @@ export {
   detectFrameworks,
 } from './framework/registry.js';
 export { registerBuiltinFrameworkAdapters } from './framework/register.js';
+// The ORM data-model analysis (entities + relationships) a host applies onto the
+// graph during assembly — the granular ORM surface, exported for hosts that
+// enrich the graph with ORM structure (e.g. the ingest container's assemble step).
+export { analyzeOrmDataModel } from './framework/orm/orm.js';
+export type { OrmDataModel } from './framework/orm/orm.js';
 export type {
   FrameworkDetectContext,
   DetectMatch,
