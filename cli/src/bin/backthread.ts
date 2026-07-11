@@ -335,8 +335,17 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // absent — this hook is the CC path, and parseAgent('') would be 'unknown'.
       const ssAgent = parseAgent(flagValue(rest, '--agent'));
       setRequestAgent(ssAgent === 'unknown' ? 'claude-code' : ssAgent);
-      await readRawHookInput().catch(() => '');
-      const output = await runSessionStart();
+      // Drain + parse the payload for its `cwd` (the repo to refresh); a missing /
+      // unparseable payload degrades to process.cwd() inside runSessionStart.
+      const ssRaw = await readRawHookInput().catch(() => '');
+      let ssCwd: string | undefined;
+      try {
+        const p = JSON.parse(ssRaw) as { cwd?: unknown };
+        if (typeof p.cwd === 'string' && p.cwd) ssCwd = p.cwd;
+      } catch {
+        /* no cwd → runSessionStart falls back to process.cwd() */
+      }
+      const output = await runSessionStart({ cwd: ssCwd });
       console.log(JSON.stringify(output));
       return 0;
     }

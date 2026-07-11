@@ -1,74 +1,94 @@
-// ARP-763 — SessionStart ambient-routing hook tests.
+// SessionStart hook tests — the two-tier grep-hook flip: refresh the cache
+// (detached) + inject the DEPTH-TIER pointer (no longer "call query FIRST").
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ROUTING_CONTEXT,
+  SESSION_START_CONTEXT,
   buildSessionStartOutput,
   runSessionStart,
 } from './sessionStart.js';
 import type { BackthreadConfig } from './config.js';
 
-test('buildSessionStartOutput: set up → injects the routing instruction', () => {
+test('buildSessionStartOutput: set up → injects the depth-tier pointer', () => {
   const out = buildSessionStartOutput(true);
   assert.equal(out.hookSpecificOutput?.hookEventName, 'SessionStart');
-  assert.equal(out.hookSpecificOutput?.additionalContext, ROUTING_CONTEXT);
-  // ARP-854 — the instruction ROUTES BY QUESTION-TYPE: query for why/evolution/topology,
-  // read the source for single-module mechanics, both for a whole-feature "how".
-  assert.match(ROUTING_CONTEXT, /`query` MCP tool \(or `\/backthread:how`\)/);
-  assert.match(ROUTING_CONTEXT, /For what a single function or file does right now, just read the source/);
-  assert.match(ROUTING_CONTEXT, /whole-feature "how does X work", do both/);
-  // ARP-1009 — the blindspot pass is a PRE-READ: call FIRST, sequenced before (and
-  // aiming) the agent's own code pass — a complement, never a substitute (eval-driven
-  // repositioning; Thariq's vocabulary: "what am I missing" / "blindspot pass" /
-  // unknown unknowns).
-  assert.match(ROUTING_CONTEXT, /blindspot pass/);
-  assert.match(ROUTING_CONTEXT, /what am I missing/);
-  assert.match(ROUTING_CONTEXT, /unknown unknowns/);
-  assert.match(ROUTING_CONTEXT, /call it FIRST — a seconds-cheap cited pre-read/);
-  assert.match(ROUTING_CONTEXT, /Then do your own pass through the code/);
-  assert.match(ROUTING_CONTEXT, /aims your deep dive, it doesn't replace it/);
-  // the retired "call FIRST for any how/why" framing must be gone from every surface
-  assert.doesNotMatch(ROUTING_CONTEXT, /call the backthread `query` tool FIRST/);
+  assert.equal(out.hookSpecificOutput?.additionalContext, SESSION_START_CONTEXT);
+  // The grep-time local pre-read is now AUTOMATIC; the instruction says so...
+  assert.match(SESSION_START_CONTEXT, /Grep or Glob, the relevant local structure \+ the recorded why are injected\s+automatically/);
+  // ...and positions query/how as the hosted SYNTHESIS depth tier.
+  assert.match(SESSION_START_CONTEXT, /`query` MCP tool \(or `\/backthread:how`\)/);
+  assert.match(SESSION_START_CONTEXT, /reconciled SYNTHESIS/);
+  assert.match(SESSION_START_CONTEXT, /For what a single function or file does right now, just read the source/);
+  // The retired proactive "call query FIRST / per-question" nudge must be gone.
+  assert.doesNotMatch(SESSION_START_CONTEXT, /call it FIRST/i);
+  assert.doesNotMatch(SESSION_START_CONTEXT, /before grepping/i);
 });
 
 test('buildSessionStartOutput: not set up → no injection (empty object)', () => {
   assert.deepEqual(buildSessionStartOutput(false), {});
 });
 
-test('runSessionStart: device token present → injects + records the opportunity', async () => {
+test('runSessionStart: set up → injects, spawns the cache refresh with the cwd, records', async () => {
   let recorded = 0;
-  const out = await runSessionStart({
-    readConfig: async () => ({ device_token: 'backthread_pat_x' }) as BackthreadConfig,
-    recordRoutingInjected: async () => { recorded += 1; },
-  });
-  assert.equal(out.hookSpecificOutput?.additionalContext, ROUTING_CONTEXT);
-  assert.equal(recorded, 1); // the injection was counted
+  let refreshedCwd = '';
+  const out = await runSessionStart(
+    { cwd: '/repo' },
+    {
+      readConfig: async () => ({ device_token: 'backthread_pat_x' }) as BackthreadConfig,
+      recordRoutingInjected: async () => { recorded += 1; },
+      spawnCacheRefresh: (cwd) => { refreshedCwd = cwd; return true; },
+    },
+  );
+  assert.equal(out.hookSpecificOutput?.additionalContext, SESSION_START_CONTEXT);
+  assert.equal(refreshedCwd, '/repo', 'refreshed the session cwd');
+  assert.equal(recorded, 1);
 });
 
-test('runSessionStart: no device token → no injection, does NOT record', async () => {
+test('runSessionStart: no device token → no injection, no refresh, no record', async () => {
   let recorded = 0;
-  const out = await runSessionStart({
-    readConfig: async () => ({}) as BackthreadConfig,
-    recordRoutingInjected: async () => { recorded += 1; },
-  });
+  let refreshed = false;
+  const out = await runSessionStart(
+    {},
+    {
+      readConfig: async () => ({}) as BackthreadConfig,
+      recordRoutingInjected: async () => { recorded += 1; },
+      spawnCacheRefresh: () => { refreshed = true; return true; },
+    },
+  );
   assert.deepEqual(out, {});
   assert.equal(recorded, 0);
+  assert.equal(refreshed, false, 'never sync without auth');
 });
 
 test('runSessionStart: a config read error degrades to no injection (never throws)', async () => {
-  const out = await runSessionStart({
-    readConfig: async () => { throw new Error('unreadable config'); },
-    recordRoutingInjected: async () => {},
-  });
+  const out = await runSessionStart(
+    {},
+    { readConfig: async () => { throw new Error('unreadable config'); }, spawnCacheRefresh: () => true },
+  );
   assert.deepEqual(out, {});
 });
 
+test('runSessionStart: a refresh-spawn error never breaks the injection', async () => {
+  const out = await runSessionStart(
+    { cwd: '/repo' },
+    {
+      readConfig: async () => ({ device_token: 'backthread_pat_x' }) as BackthreadConfig,
+      recordRoutingInjected: async () => {},
+      spawnCacheRefresh: () => { throw new Error('spawn failed'); },
+    },
+  );
+  assert.equal(out.hookSpecificOutput?.additionalContext, SESSION_START_CONTEXT);
+});
+
 test('runSessionStart: a stats-record error never breaks the injection', async () => {
-  const out = await runSessionStart({
-    readConfig: async () => ({ device_token: 'backthread_pat_x' }) as BackthreadConfig,
-    recordRoutingInjected: async () => { throw new Error('disk full'); },
-  });
-  // still injected — the record failure is swallowed
-  assert.equal(out.hookSpecificOutput?.additionalContext, ROUTING_CONTEXT);
+  const out = await runSessionStart(
+    { cwd: '/repo' },
+    {
+      readConfig: async () => ({ device_token: 'backthread_pat_x' }) as BackthreadConfig,
+      recordRoutingInjected: async () => { throw new Error('disk full'); },
+      spawnCacheRefresh: () => true,
+    },
+  );
+  assert.equal(out.hookSpecificOutput?.additionalContext, SESSION_START_CONTEXT);
 });
