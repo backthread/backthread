@@ -33,6 +33,18 @@ await build({
   bundle: true,
   platform: 'node',
   format: 'esm',
+  // Keep `@backthread/extractor` OUT of the bundle — it is a LAZY, EXTERNAL,
+  // RUNTIME import (localGraph.ts: `await import('@backthread/extractor')`, only
+  // on the `graph`/grep-hook path). Inlining it would hoist its heavy transitive
+  // deps (ts-morph + Pyright, graphology, …) to top-level static imports that
+  // load EAGERLY on EVERY `backthread` invocation — regressing capture /
+  // session-start / mcp startup and breaking the "stay light" contract. As an
+  // external, node resolves it at runtime relative to this bundle's on-disk
+  // location: the OSS workspace symlink in dev/dogfood; absent (→ a clean
+  // `unavailable`, never a crash) in a pre-publish npx/plugin install. When the
+  // extractor is published + promoted devDependencies → dependencies, npx/plugin
+  // installs light it up with no bundle change.
+  external: ['@backthread/extractor'],
   // Inline the redact version (read above) so the bundled bin reports it correctly.
   define: { __REDACT_VERSION__: JSON.stringify(redactVersion) },
   // Match the package's Node 22 LTS pin (CLAUDE.md). The SDK + `--test-force-exit`
