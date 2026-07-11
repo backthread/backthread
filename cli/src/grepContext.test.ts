@@ -33,11 +33,12 @@ function cacheWith(): LocalCache {
   };
 }
 
-test('extractTerm reads Grep.pattern, Glob.glob, and falls back to the first string', () => {
+test('extractTerm reads only the known term keys (pattern/glob/query), else empty', () => {
   assert.equal(extractTerm({ pattern: 'invoice' }), 'invoice');
   assert.equal(extractTerm({ glob: '**/*.ts' }), '**/*.ts');
   assert.equal(extractTerm({ query: 'auth' }), 'auth');
-  assert.equal(extractTerm({ path: '/x', somethingElse: 'billing' }), 'billing');
+  // No free-for-all fallback: a non-term field (path/output_mode) must NOT become the term.
+  assert.equal(extractTerm({ path: '/x', output_mode: 'content' }), '');
   assert.equal(extractTerm({}), '');
   assert.equal(extractTerm(null), '');
 });

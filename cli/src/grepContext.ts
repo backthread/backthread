@@ -47,18 +47,15 @@ export interface GrepContextDeps {
 }
 
 /** Extract the search term from a Grep/Glob `tool_input`. Grep uses `pattern`,
- * Glob uses `glob`; we also try `query` and fall back to the first string field,
- * so a shape change or another search-ish tool still yields a usable term. */
+ * Glob uses `glob`; `query` is a defensive extra. NO free-for-all fallback: the
+ * ordered keys cover the real tools, and returning '' on an unknown shape just
+ * means no injection (fail-open) — safer than injecting on a non-term field like
+ * `output_mode`/`type`/`path`. */
 export function extractTerm(toolInput: unknown): string {
   if (!toolInput || typeof toolInput !== 'object') return '';
   const ti = toolInput as Record<string, unknown>;
   for (const key of ['pattern', 'glob', 'query']) {
     if (typeof ti[key] === 'string' && ti[key]) return ti[key] as string;
-  }
-  // Fallback for an unknown shape — but skip `path` (a directory SCOPE, not a
-  // search term) so it can't masquerade as the term.
-  for (const [k, v] of Object.entries(ti)) {
-    if (k !== 'path' && typeof v === 'string' && v) return v;
   }
   return '';
 }

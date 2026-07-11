@@ -35055,9 +35055,6 @@ function extractTerm(toolInput) {
   for (const key of ["pattern", "glob", "query"]) {
     if (typeof ti[key] === "string" && ti[key]) return ti[key];
   }
-  for (const [k, v] of Object.entries(ti)) {
-    if (k !== "path" && typeof v === "string" && v) return v;
-  }
   return "";
 }
 async function runGrepContext(rawStdin, deps = {}) {
