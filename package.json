@@ -13,10 +13,11 @@
     "cli",
     "packages/*"
   ],
+  "comment_build_order": "The cli imports TYPES from @backthread/extractor, whose package.json points `types`/`main` at dist/ — so the extractor must be BUILT before the cli typechecks/builds/tests. `npm ci` doesn't build workspaces and the `--workspaces` fan-out runs cli before packages/*, so each script below explicitly builds the extractor first. (redact is source-only — resolvable unbuilt — so it needs no such step.)",
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "test": "npm test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspace @backthread/extractor && npm run build --workspaces --if-present",
+    "test": "npm run build --workspace @backthread/extractor && npm test --workspaces --if-present",
+    "typecheck": "npm run build --workspace @backthread/extractor && npm run typecheck --workspaces --if-present",
     "bump": "node scripts/bump-version.mjs"
   }
 }
