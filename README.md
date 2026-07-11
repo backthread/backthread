@@ -82,7 +82,7 @@ Backthread answers "what's going on here?" at two depths, so you pay for depth o
 
 **The cache** lives at `.backthread/cache.json` in your repo root (self-ignored — it never touches your tracked `.gitignore`), with two sections:
 
-- `structure` — computed **locally** from your working tree by `backthread graph` (exact, offline, zero-LLM), refreshed **incrementally** (only changed files are re-parsed).
+- `structure` — computed **locally** from your working tree by `backthread graph` (exact, offline, zero-LLM), refreshed **incrementally** (the expensive symbol work stays proportional to what changed).
 - `decisions` — the **merged** decision log synced down by `backthread sync`. Decisions are merge-gated, so they rarely change mid-session.
 
 **Freshness.** SessionStart refreshes both in the background (a decision sync + a structure re-extract), and the decision sync also carries an hours-TTL fallback. You can refresh either on demand with `backthread graph` / `backthread sync`. No action needed beyond installing the plugin and staying on the latest version.
