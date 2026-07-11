@@ -2794,11 +2794,11 @@ var require_validate = __commonJS({
         jsonPointer = $data;
         data = names_1.default.rootData;
       } else {
-        const matches = RELATIVE_JSON_POINTER.exec($data);
-        if (!matches)
+        const matches2 = RELATIVE_JSON_POINTER.exec($data);
+        if (!matches2)
           throw new Error(`Invalid JSON-pointer: ${$data}`);
-        const up = +matches[1];
-        jsonPointer = matches[2];
+        const up = +matches2[1];
+        jsonPointer = matches2[2];
         if (jsonPointer === "#") {
           if (up >= dataLevel)
             throw new Error(errorMsg("property/index", up));
@@ -3495,11 +3495,11 @@ var require_schemes = __commonJS({
         urnComponent.error = "URN can not be parsed";
         return urnComponent;
       }
-      const matches = urnComponent.path.match(URN_REG);
-      if (matches) {
+      const matches2 = urnComponent.path.match(URN_REG);
+      if (matches2) {
         const scheme = options.scheme || urnComponent.scheme || "urn";
-        urnComponent.nid = matches[1].toLowerCase();
-        urnComponent.nss = matches[2];
+        urnComponent.nid = matches2[1].toLowerCase();
+        urnComponent.nss = matches2[2];
         const urnScheme = `${scheme}:${options.nid || urnComponent.nid}`;
         const schemeHandler = getSchemeHandler(urnScheme);
         urnComponent.path = void 0;
@@ -3769,8 +3769,8 @@ var require_fast_uri = __commonJS({
       return uriTokens.join("");
     }
     var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
-    function getParseError(parsed, matches) {
-      if (matches[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
+    function getParseError(parsed, matches2) {
+      if (matches2[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
         return 'URI path must start with "/" when authority is present.';
       }
       if (typeof parsed.port === "number" && (parsed.port < 0 || parsed.port > 65535)) {
@@ -3798,19 +3798,19 @@ var require_fast_uri = __commonJS({
           uri = "//" + uri;
         }
       }
-      const matches = uri.match(URI_PARSE);
-      if (matches) {
-        parsed.scheme = matches[1];
-        parsed.userinfo = matches[3];
-        parsed.host = matches[4];
-        parsed.port = parseInt(matches[5], 10);
-        parsed.path = matches[6] || "";
-        parsed.query = matches[7];
-        parsed.fragment = matches[8];
+      const matches2 = uri.match(URI_PARSE);
+      if (matches2) {
+        parsed.scheme = matches2[1];
+        parsed.userinfo = matches2[3];
+        parsed.host = matches2[4];
+        parsed.port = parseInt(matches2[5], 10);
+        parsed.path = matches2[6] || "";
+        parsed.query = matches2[7];
+        parsed.fragment = matches2[8];
         if (isNaN(parsed.port)) {
-          parsed.port = matches[5];
+          parsed.port = matches2[5];
         }
-        const parseError = getParseError(parsed, matches);
+        const parseError = getParseError(parsed, matches2);
         if (parseError !== void 0) {
           parsed.error = parsed.error || parseError;
           malformedAuthorityOrPort = true;
@@ -6650,12 +6650,12 @@ var require_formats = __commonJS({
     var DATE = /^(\d\d\d\d)-(\d\d)-(\d\d)$/;
     var DAYS = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     function date5(str2) {
-      const matches = DATE.exec(str2);
-      if (!matches)
+      const matches2 = DATE.exec(str2);
+      if (!matches2)
         return false;
-      const year = +matches[1];
-      const month = +matches[2];
-      const day = +matches[3];
+      const year = +matches2[1];
+      const month = +matches2[2];
+      const day = +matches2[3];
       return month >= 1 && month <= 12 && day >= 1 && day <= (month === 2 && isLeapYear(year) ? 29 : DAYS[month]);
     }
     function compareDate(d1, d2) {
@@ -6670,16 +6670,16 @@ var require_formats = __commonJS({
     var TIME = /^(\d\d):(\d\d):(\d\d(?:\.\d+)?)(z|([+-])(\d\d)(?::?(\d\d))?)?$/i;
     function getTime(strictTimeZone) {
       return function time3(str2) {
-        const matches = TIME.exec(str2);
-        if (!matches)
+        const matches2 = TIME.exec(str2);
+        if (!matches2)
           return false;
-        const hr = +matches[1];
-        const min = +matches[2];
-        const sec = +matches[3];
-        const tz = matches[4];
-        const tzSign = matches[5] === "-" ? -1 : 1;
-        const tzH = +(matches[6] || 0);
-        const tzM = +(matches[7] || 0);
+        const hr = +matches2[1];
+        const min = +matches2[2];
+        const sec = +matches2[3];
+        const tz = matches2[4];
+        const tzSign = matches2[5] === "-" ? -1 : 1;
+        const tzH = +(matches2[6] || 0);
+        const tzM = +(matches2[7] || 0);
         if (tzH > 23 || tzM > 59 || strictTimeZone && !tz)
           return false;
         if (hr <= 23 && min <= 59 && sec < 60)
@@ -34881,6 +34881,212 @@ async function syncDecisions(opts = {}, deps = {}) {
   }
 }
 
+// src/localJoin.ts
+var DEFAULTS = { maxModules: 4, maxDecisions: 5, maxNeighbors: 4, charBudget: 1400 };
+var WHY_MAX = 160;
+function tokenize(term) {
+  const raw = (term ?? "").trim();
+  if (!raw) return [];
+  const toks = /* @__PURE__ */ new Set();
+  for (const w of raw.split(/[^A-Za-z0-9]+/)) {
+    if (!w) continue;
+    for (const part of w.split(/(?<=[a-z0-9])(?=[A-Z])/)) {
+      const t = part.toLowerCase();
+      if (t.length >= 3) toks.add(t);
+    }
+    const whole = w.toLowerCase();
+    if (whole.length >= 3) toks.add(whole);
+  }
+  return [...toks];
+}
+function splitWords(s) {
+  const out = [];
+  for (const w of s.split(/[^A-Za-z0-9]+/)) {
+    if (!w) continue;
+    for (const part of w.split(/(?<=[a-z0-9])(?=[A-Z])/)) {
+      const t = part.toLowerCase();
+      if (t) out.push(t);
+    }
+  }
+  return out;
+}
+function commonPrefixLen(a, b) {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a[i] === b[i]) i++;
+  return i;
+}
+function wordMatch(word, token) {
+  if (word === token) return true;
+  const n = commonPrefixLen(word, token);
+  return n >= 4 && n >= Math.min(word.length, token.length) - 2;
+}
+function matches(hay, tok) {
+  if (typeof hay !== "string" || !hay) return false;
+  if (hay.toLowerCase().includes(tok)) return true;
+  for (const w of splitWords(hay)) if (wordMatch(w, tok)) return true;
+  return false;
+}
+function scoreModule(m, tokens) {
+  let score = 0;
+  let pathHint = null;
+  for (const tok of tokens) {
+    if (matches(m.id, tok)) score += 3;
+    if (matches(m.subsystem?.name ?? null, tok)) score += 2;
+    if (matches(m.packageName ?? null, tok)) score += 2;
+    if (matches(m.externalSpecifier ?? null, tok)) score += 2;
+    const hit = m.fileIds.find((f) => matches(f, tok));
+    if (hit) {
+      score += 2;
+      if (!pathHint) pathHint = hit;
+    }
+  }
+  return { score, pathHint: pathHint ?? m.fileIds[0] ?? null };
+}
+function scoreDecision(d, tokens) {
+  let score = 0;
+  for (const tok of tokens) {
+    if (matches(d.title, tok)) score += 4;
+    if (d.flowNames.some((n) => matches(n, tok))) score += 3;
+    if (matches(d.why, tok)) score += 2;
+    if (d.moduleIds.some((id) => matches(id, tok))) score += 2;
+    if (matches(d.problem, tok)) score += 1;
+    if ([...d.tradeoffs, ...d.assumptions, ...d.limitations].some((t) => matches(t, tok))) score += 1;
+  }
+  return score;
+}
+function neighborsOf(id, edges, cap) {
+  const out = /* @__PURE__ */ new Set();
+  for (const e of edges) {
+    if (e.source === id) out.add(e.target);
+    else if (e.target === id) out.add(e.source);
+    if (out.size >= cap) break;
+  }
+  return [...out].slice(0, cap);
+}
+function truncate(s, max) {
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length <= max ? one : one.slice(0, max - 1).trimEnd() + "\u2026";
+}
+function clampText(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  const lines = text.split("\n");
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 > maxChars) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  return kept.join("\n");
+}
+function renderContext(term, modules, decisions, budget) {
+  const shownTerm = term.replace(/\s+/g, " ").trim().slice(0, 80);
+  const lines = [`Backthread \u2014 local context for "${shownTerm}":`];
+  if (modules.length) {
+    lines.push("Structure:");
+    for (const m of modules) {
+      const tags = [m.kind, m.godNode ? "god-node" : null, m.subsystem ? `subsystem: ${m.subsystem}` : null].filter(Boolean).join(", ");
+      const path = m.pathHint ? ` \u2014 ${m.pathHint}` : "";
+      const nb = m.neighbors.length ? ` \u2192 ${m.neighbors.join(", ")}` : "";
+      lines.push(`  \u2022 ${m.id}${tags ? ` [${tags}]` : ""}${path}${nb}`);
+    }
+  }
+  if (decisions.length) {
+    lines.push("Why (from the decision log):");
+    for (const d of decisions) {
+      const date5 = d.decidedAt ? ` [${d.decidedAt.slice(0, 10)}]` : "";
+      const why = d.why ? ` \u2014 ${truncate(d.why, WHY_MAX)}` : "";
+      lines.push(`  \u2022 ${truncate(d.title, 120)}${why}${date5}`);
+    }
+  }
+  return clampText(lines.join("\n"), budget);
+}
+function buildLocalContext(term, cache, opts = {}) {
+  const o = { ...DEFAULTS, ...opts };
+  const tokens = tokenize(term);
+  const emptyResult = { term, empty: true, modules: [], decisions: [], text: "" };
+  if (tokens.length === 0 || !cache) return emptyResult;
+  const structure = cache.structure;
+  const edges = structure?.edges ?? [];
+  const modules = [];
+  for (const m of structure?.modules ?? []) {
+    const { score, pathHint } = scoreModule(m, tokens);
+    if (score <= 0) continue;
+    modules.push({
+      id: m.id,
+      kind: m.kind,
+      godNode: m.godNode,
+      subsystem: m.subsystem?.name ?? null,
+      pathHint,
+      fileCount: m.fileCount,
+      neighbors: neighborsOf(m.id, edges, o.maxNeighbors),
+      score
+    });
+  }
+  modules.sort(
+    (a, b) => b.score - a.score || Number(b.godNode) - Number(a.godNode) || b.fileCount - a.fileCount || a.id.localeCompare(b.id)
+  );
+  const decisions = [];
+  for (const d of cache.decisions?.items ?? []) {
+    const score = scoreDecision(d, tokens);
+    if (score <= 0) continue;
+    decisions.push({ id: d.id, title: d.title, why: d.why, flowNames: d.flowNames, decidedAt: d.decidedAt, score });
+  }
+  decisions.sort(
+    (a, b) => b.score - a.score || (Date.parse(b.decidedAt ?? "") || 0) - (Date.parse(a.decidedAt ?? "") || 0) || a.title.localeCompare(b.title)
+  );
+  const topModules = modules.slice(0, o.maxModules);
+  const topDecisions = decisions.slice(0, o.maxDecisions);
+  if (topModules.length === 0 && topDecisions.length === 0) return emptyResult;
+  return {
+    term,
+    empty: false,
+    modules: topModules,
+    decisions: topDecisions,
+    text: renderContext(term, topModules, topDecisions, o.charBudget)
+  };
+}
+
+// src/grepContext.ts
+function extractTerm(toolInput) {
+  if (!toolInput || typeof toolInput !== "object") return "";
+  const ti = toolInput;
+  for (const key of ["pattern", "glob", "query"]) {
+    if (typeof ti[key] === "string" && ti[key]) return ti[key];
+  }
+  return "";
+}
+async function runGrepContext(rawStdin, deps = {}) {
+  const resolveRoot = deps.resolveRepoRootImpl ?? resolveRepoRoot;
+  const readCacheImpl = deps.readCacheImpl ?? readCache;
+  try {
+    let payload;
+    try {
+      payload = JSON.parse(rawStdin);
+    } catch {
+      return {};
+    }
+    const rec = payload && typeof payload === "object" ? payload : {};
+    const term = extractTerm(rec.tool_input);
+    if (!term) return {};
+    const cwd = typeof rec.cwd === "string" && rec.cwd ? rec.cwd : deps.cwd ?? process.cwd();
+    const repoRoot = resolveRoot(cwd);
+    const cache = await readCacheImpl(repoRoot).catch(() => null);
+    if (!cache) return {};
+    const ctx = buildLocalContext(term, cache);
+    if (ctx.empty) return {};
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        additionalContext: ctx.text
+      }
+    };
+  } catch {
+    return {};
+  }
+}
+
 // src/bin/backthread.ts
 var USAGE = `backthread \u2014 keep the thread on what your AI agent actually shipped
 
@@ -35046,6 +35252,12 @@ async function main(argv, deps = {}) {
       setRequestAgent(ssAgent === "unknown" ? "claude-code" : ssAgent);
       await readRawHookInput().catch(() => "");
       const output = await runSessionStart();
+      console.log(JSON.stringify(output));
+      return 0;
+    }
+    case "grep-context": {
+      const raw = await readRawHookInput().catch(() => "");
+      const output = await runGrepContext(raw);
       console.log(JSON.stringify(output));
       return 0;
     }

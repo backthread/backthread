@@ -185,6 +185,14 @@ export interface InstallResult {
  * isn't already present (and upgrades a retired SessionEnd command in place), preserving
  * every other key/hook. Idempotent. Returns whether a write happened (false = both already
  * present / no change).
+ *
+ * ONLY the async CAPTURE hooks (SessionEnd + Stop) are registered here. The two
+ * SYNCHRONOUS hooks — SessionStart ambient routing and the PreToolUse grep-context
+ * injection — are PLUGIN-ONLY (declared in cli/hooks/hooks.json, which runs the shipped
+ * bundle): a synchronous `npx backthread …` command would block every session start /
+ * every grep on npm's resolve, so they're deliberately never written into this
+ * settings.json fallback (the capture hooks get away with `@latest` only because they're
+ * `--detach`ed). Bare-npx users get capture; the plugin adds routing + the grep hook.
  */
 export async function registerHook(
   deps: InstallDeps = {},
