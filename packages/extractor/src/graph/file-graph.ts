@@ -28,11 +28,12 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
 /**
  * The extractor languages the pipeline supports. The dispatch (graph/extract.ts)
  * picks ONE per repo; every source-path predicate below is parameterized by it so
- * a single implementation serves the ts-morph (TS), Pyright (Python), and Prism
- * (Ruby) adapters. `ts` is the default everywhere the caller can't yet supply a
- * language (the incremental diff classifier is TS-only today).
+ * a single implementation serves the ts-morph (TS), Pyright (Python), Prism
+ * (Ruby), and the hand-rolled Elixir adapters. `ts` is the default everywhere the
+ * caller can't yet supply a language (the incremental diff classifier is TS-only
+ * today).
  */
-export type SourceLang = 'ts' | 'python' | 'ruby';
+export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
@@ -47,6 +48,16 @@ export const PYTHON_SOURCE_EXTENSIONS = ['py', 'pyi'] as const;
  * (dependency declarations), not graph nodes, so they're deliberately excluded.
  */
 export const RUBY_SOURCE_EXTENSIONS = ['rb', 'rake', 'ru'] as const;
+
+/**
+ * Elixir source extensions the hand-rolled Elixir scanner parses: compiled
+ * modules (`.ex`), scripts / config / tests (`.exs`), and the EEx template family
+ * (`.eex`/`.heex`/`.leex` — Phoenix views). All are plain-text Elixir the
+ * syntactic scanner reads; no native grammar, no repo-code execution. `mix.exs`
+ * matches `.exs` but is a MANIFEST (parsed for deps, never a graph node), so the
+ * scanner skips it explicitly.
+ */
+export const ELIXIR_SOURCE_EXTENSIONS = ['ex', 'exs', 'eex', 'heex', 'leex'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -106,12 +117,32 @@ export const RUBY_EXCLUDE_DIRS = [
   '.git',
 ] as const;
 
+/**
+ * Directories the Elixir scanner's walk excludes: Mix build artifacts (`_build`),
+ * the vendored dependency tree (`deps` — the Elixir analogue of `node_modules` /
+ * `vendor/bundle`; walking it would misread installed deps as first-party source),
+ * the language-server cache (`.elixir_ls`), and coverage output (`cover`).
+ * `.elixir_ls` is also caught by the dot-segment skip; listed explicitly so the
+ * policy is self-contained. `node_modules` is kept because a Phoenix repo's
+ * `assets/` ships a JS toolchain.
+ */
+export const ELIXIR_EXCLUDE_DIRS = [
+  '_build',
+  'deps',
+  '.elixir_ls',
+  'cover',
+  'node_modules',
+  '.git',
+] as const;
+
 const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXTENSIONS.join('|')})$`);
 const PYTHON_SOURCE_EXT_RE = new RegExp(`\\.(${PYTHON_SOURCE_EXTENSIONS.join('|')})$`);
 const RUBY_SOURCE_EXT_RE = new RegExp(`\\.(${RUBY_SOURCE_EXTENSIONS.join('|')})$`);
+const ELIXIR_SOURCE_EXT_RE = new RegExp(`\\.(${ELIXIR_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
 const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
+const ELIXIR_EXCLUDE_SET = new Set<string>(ELIXIR_EXCLUDE_DIRS);
 
 // Extension-less Ruby source basenames. A `Rakefile` is Ruby; `config.ru` already
 // matches the `.ru` extension. `Gemfile` is intentionally NOT here — it's a
@@ -129,13 +160,27 @@ const RUBY_SOURCE_BASENAMES = new Set<string>(['Rakefile']);
  * exclude set; the dot-segment skip drops `.venv`/`.tox`/… while keeping
  * `__init__.py` (a `_`-prefixed name, not a dotted one). For `ruby` it's
  * `.rb`/`.rake`/`.ru` (plus the extension-less `Rakefile`) + the Ruby exclude set
- * (`vendor`/`tmp`/`log`/`storage`).
+ * (`vendor`/`tmp`/`log`/`storage`). For `elixir` it's `.ex`/`.exs`/`.eex`/`.heex`/
+ * `.leex` + the Elixir exclude set (`_build`/`deps`/`.elixir_ls`/`cover`); the
+ * dot-segment skip drops `.elixir_ls`/`.formatter.exs`.
  */
 export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean {
   const extRe =
-    lang === 'python' ? PYTHON_SOURCE_EXT_RE : lang === 'ruby' ? RUBY_SOURCE_EXT_RE : SOURCE_EXT_RE;
+    lang === 'python'
+      ? PYTHON_SOURCE_EXT_RE
+      : lang === 'ruby'
+        ? RUBY_SOURCE_EXT_RE
+        : lang === 'elixir'
+          ? ELIXIR_SOURCE_EXT_RE
+          : SOURCE_EXT_RE;
   const excludes =
-    lang === 'python' ? PYTHON_EXCLUDE_SET : lang === 'ruby' ? RUBY_EXCLUDE_SET : EXCLUDE_SET;
+    lang === 'python'
+      ? PYTHON_EXCLUDE_SET
+      : lang === 'ruby'
+        ? RUBY_EXCLUDE_SET
+        : lang === 'elixir'
+          ? ELIXIR_EXCLUDE_SET
+          : EXCLUDE_SET;
   // Ruby has extension-less source files (a `Rakefile`); every other language —
   // and every other Ruby file — must match its language's source extension.
   const base = path.slice(path.lastIndexOf('/') + 1);

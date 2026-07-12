@@ -10,6 +10,7 @@ import {
   listSourceFiles,
   graphLanguage,
   hasRubyManifest,
+  hasMixManifest,
 } from './language.js';
 import type { NormalizedGraph } from './types.js';
 
@@ -83,6 +84,42 @@ describe('detectRepoLanguage', () => {
     });
     expect(detectRepoLanguage(dir)).toBe('ruby');
   });
+
+  it('selects elixir for a mix.exs repo (Phoenix keeps its JS toolchain under assets/)', async () => {
+    const dir = await repo({
+      'mix.exs': 'defmodule MyApp.MixProject do\n  use Mix.Project\nend\n',
+      'mix.lock': '%{}\n',
+      'lib/my_app/accounts/user.ex': 'defmodule MyApp.Accounts.User do\nend\n',
+      'lib/my_app_web/router.ex': 'defmodule MyAppWeb.Router do\nend\n',
+      // A nested assets/package.json must NOT flip the repo to TS — it is not a
+      // root manifest, and detectRepoLanguage only reads root manifests.
+      'assets/package.json': '{"name":"assets"}',
+      'assets/js/app.js': 'console.log(1);\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('elixir');
+  });
+
+  it('selects elixir for a Phoenix app that also ships a root package.json — .ex dominates', async () => {
+    const dir = await repo({
+      'mix.exs': 'defmodule MyApp.MixProject do\nend\n',
+      'package.json': '{"name":"app"}',
+      'lib/my_app/accounts.ex': 'defmodule MyApp.Accounts do\nend\n',
+      'lib/my_app_web/router.ex': 'defmodule MyAppWeb.Router do\nend\n',
+      'lib/my_app_web/endpoint.ex': 'defmodule MyAppWeb.Endpoint do\nend\n',
+      'assets/js/app.js': 'console.log(1)\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('elixir');
+  });
+
+  it('selects elixir by file count when .ex dominates and no manifest disambiguates', async () => {
+    const dir = await repo({
+      'a.ex': 'defmodule A do\nend\n',
+      'b.ex': 'defmodule B do\nend\n',
+      'c.ex': 'defmodule C do\nend\n',
+      'tool.ts': 'export const t=1;\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('elixir');
+  });
 });
 
 describe('listSourceFiles', () => {
@@ -138,6 +175,31 @@ describe('listSourceFiles', () => {
     expect(files.some((f) => f.startsWith('log/'))).toBe(false);
     expect(files.some((f) => f.startsWith('.bundle/'))).toBe(false);
   });
+
+  it('lists .ex/.exs/.heex and skips _build/deps/.elixir_ls + dot dirs (elixir)', async () => {
+    const dir = await repo({
+      'lib/my_app/user.ex': 'defmodule MyApp.User do\nend\n',
+      'lib/my_app_web/router.ex': 'defmodule MyAppWeb.Router do\nend\n',
+      'lib/my_app_web/controllers/page_html/index.html.heex': '<h1>hi</h1>\n',
+      'config/config.exs': 'import Config\n',
+      'test/my_app_test.exs': 'defmodule MyAppTest do\nend\n', // kept — noise-filter drops tests later
+      'README.md': '# no\n',
+      '_build/dev/lib/my_app/ebin/x.ex': 'compiled=1\n',
+      'deps/phoenix/lib/phoenix.ex': 'vendored=1\n',
+      '.elixir_ls/cache.ex': 'cache=1\n',
+    });
+    const files = listSourceFiles(dir, 'elixir');
+    expect(files).toContain('lib/my_app/user.ex');
+    expect(files).toContain('lib/my_app_web/controllers/page_html/index.html.heex');
+    expect(files).toContain('config/config.exs');
+    expect(files).toContain('test/my_app_test.exs');
+    // build artifacts / vendored deps / LS cache never appear
+    expect(files.some((f) => f.startsWith('_build/'))).toBe(false);
+    expect(files.some((f) => f.startsWith('deps/'))).toBe(false);
+    expect(files.some((f) => f.startsWith('.elixir_ls/'))).toBe(false);
+    // non-source files never appear
+    expect(files.some((f) => f.endsWith('.md'))).toBe(false);
+  });
 });
 
 describe('detectRepoLanguages (multi-language)', () => {
@@ -147,11 +209,24 @@ describe('detectRepoLanguages (multi-language)', () => {
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`backend/app/m${i}.py`, `x = ${i}\n`]));
   const rb = (n: number): Record<string, string> =>
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`app/models/m${i}.rb`, `class M${i}; end\n`]));
+  const ex = (n: number): Record<string, string> =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`lib/my_app/m${i}.ex`, `defmodule M${i} do\nend\n`]));
 
   it('returns a SINGLE language for a single-language repo (no behavior change)', async () => {
     expect(await detectRepoLanguages(await repo({ 'package.json': '{}', ...ts(6) }))).toEqual(['ts']);
     expect(await detectRepoLanguages(await repo({ 'pyproject.toml': '[project]\nname="x"\n', ...py(6) }))).toEqual(['python']);
     expect(await detectRepoLanguages(await repo({ Gemfile: "gem 'rails'\n", ...rb(6) }))).toEqual(['ruby']);
+    expect(await detectRepoLanguages(await repo({ 'mix.exs': 'defmodule X.MixProject do\nend\n', ...ex(6) }))).toEqual(['elixir']);
+  });
+
+  it('keeps a Phoenix repo single-language (elixir) despite an assets/ JS toolchain below threshold', async () => {
+    const dir = await repo({ 'mix.exs': 'defmodule X.MixProject do\nend\n', ...ex(40), 'assets/js/app.js': 'x=1;\n', 'assets/js/hooks.js': 'y=2;\n' });
+    expect(detectRepoLanguages(dir)).toEqual(['elixir']);
+  });
+
+  it('returns BOTH languages (dominant first) for an Elixir backend + large JS frontend', async () => {
+    const dir = await repo({ 'mix.exs': 'defmodule X.MixProject do\nend\n', ...ex(20), ...ts(40) });
+    expect(detectRepoLanguages(dir)).toEqual(['ts', 'elixir']);
   });
 
   it('keeps a TS repo single-language when it only ships a couple of .py scripts (below threshold)', async () => {
@@ -177,11 +252,14 @@ describe('graphLanguage', () => {
     edges: [],
     externals: [],
   });
-  it('is python for py/pyi, ruby for rb, else ts', () => {
+  it('is python for py/pyi, ruby for rb, elixir for ex/exs/heex, else ts', () => {
     expect(graphLanguage(g(['ts', 'tsx']))).toBe('ts');
     expect(graphLanguage(g(['py']))).toBe('python');
     expect(graphLanguage(g(['pyi']))).toBe('python');
     expect(graphLanguage(g(['rb']))).toBe('ruby');
+    expect(graphLanguage(g(['ex']))).toBe('elixir');
+    expect(graphLanguage(g(['exs']))).toBe('elixir');
+    expect(graphLanguage(g(['heex']))).toBe('elixir');
     expect(graphLanguage(g([]))).toBe('ts');
   });
 });
@@ -192,5 +270,14 @@ describe('hasRubyManifest', () => {
     expect(hasRubyManifest(await repo({ 'Gemfile.lock': 'GEM\n' }))).toBe(true);
     expect(hasRubyManifest(await repo({ 'foo.gemspec': 'Gem::Specification.new\n' }))).toBe(true);
     expect(hasRubyManifest(await repo({ 'package.json': '{}' }))).toBe(false);
+  });
+});
+
+describe('hasMixManifest', () => {
+  it('detects mix.exs / mix.lock, else false', async () => {
+    expect(hasMixManifest(await repo({ 'mix.exs': 'defmodule X.MixProject do\nend\n' }))).toBe(true);
+    expect(hasMixManifest(await repo({ 'mix.lock': '%{}\n' }))).toBe(true);
+    expect(hasMixManifest(await repo({ 'package.json': '{}' }))).toBe(false);
+    expect(hasMixManifest(await repo({ Gemfile: "gem 'rails'\n" }))).toBe(false);
   });
 });

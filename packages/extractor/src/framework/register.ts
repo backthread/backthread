@@ -20,7 +20,7 @@
 // protocol adapter that co-fires on the same repo.
 
 import { registerFrameworkAdapter } from './registry.js';
-import { hasRubyManifest } from '../graph/language.js';
+import { hasRubyManifest, hasMixManifest } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
 import { nestAdapter } from './nest/nest.js';
@@ -63,22 +63,30 @@ export function registerBuiltinFrameworkAdapters(): void {
 
 // Lazily loaded once per process. The Ruby fleet imports the Prism parser (a WASM
 // module) via the shared Ruby AST layer, so — unlike the eager JS/Python builtins
-// above — it must NOT module-load for a TS/Python repo. It is dynamically imported
-// here, and only when the repo declares Ruby, so a TS/Python ingest never pulls in
-// the Ruby toolchain.
+// above — it must NOT module-load for a TS/Python repo. The Elixir fleet is gated
+// the same way (its scanner is hand-rolled + dep-free, but the "zero cost when
+// absent" promise still means a non-Elixir repo never loads its adapter modules).
+// Each is dynamically imported here, and only when the repo declares that language,
+// so a TS/Python ingest never pulls in either toolchain.
 let rubyRegistered = false;
+let elixirRegistered = false;
 
 /**
- * Register the framework adapters whose parser toolchain must NOT load for every
- * repo. Both pipeline steps (detect + contribute) call this before detection; it
- * is idempotent (once per process) and never throws. Today only the Ruby fleet is
- * lazy — gated on a Ruby manifest (Gemfile / *.gemspec); a future language with a
- * heavy parser registers behind the same gate.
+ * Register the framework adapters whose toolchain must NOT load for every repo.
+ * Both pipeline steps (detect + contribute) call this before detection; it is
+ * idempotent (once per process) and never throws. Gated per-language: Ruby on a
+ * Ruby manifest (Gemfile / *.gemspec), Elixir on a mix.exs. A future language
+ * registers behind the same gate.
  */
 export async function registerLanguageScopedFrameworkAdapters(repoDir: string): Promise<void> {
   if (!rubyRegistered && hasRubyManifest(repoDir)) {
     rubyRegistered = true;
     const { registerRubyFrameworkAdapters } = await import('./register-ruby.js');
     registerRubyFrameworkAdapters();
+  }
+  if (!elixirRegistered && hasMixManifest(repoDir)) {
+    elixirRegistered = true;
+    const { registerElixirFrameworkAdapters } = await import('./register-elixir.js');
+    registerElixirFrameworkAdapters();
   }
 }
