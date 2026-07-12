@@ -10,25 +10,18 @@
 // Registration order = co-fire priority (web → data → async → protocol), mirroring
 // the Python fleet's ordering in register.ts.
 
+import { registerFrameworkAdapter } from './registry.js';
+import { railsAdapter } from './rails/rails.js';
+
 /**
  * Register every builtin Ruby framework adapter. Called (once per process) from
  * register.ts's Gemfile gate. Idempotent on name — safe to call more than once.
  *
- * The fleet lands incrementally: the Rails (web), ActiveRecord (data), Sidekiq
- * (async) and GraphQL/gRPC (protocol) adapters register here as each ships. Until
- * then this is a no-op — the seam is wired and the isolation gate proven, with no
- * adapters to run yet. The log line makes the gate firing observable (the "a Ruby
- * repo loaded the Ruby fleet, a TS/Python repo did not" isolation probe).
+ * The fleet lands incrementally (web → data → async → protocol); the remaining
+ * ActiveRecord (data), Sidekiq (async) and GraphQL/gRPC (protocol) adapters
+ * register here as each ships.
  */
 export function registerRubyFrameworkAdapters(): void {
-  // web → data → async → protocol (each registerFrameworkAdapter(...) call is
-  // added as its adapter lands):
-  //   registerFrameworkAdapter(railsAdapter);
-  //   registerFrameworkAdapter(activeRecordAdapter);
-  //   registerFrameworkAdapter(sidekiqAdapter);
-  //   registerFrameworkAdapter(sinatraAdapter);
-  //   registerFrameworkAdapter(hanamiAdapter);
-  //   registerFrameworkAdapter(graphqlRubyAdapter);
-  //   registerFrameworkAdapter(grpcRubyAdapter);
-  console.log('  [ruby] framework fleet registered (Ruby manifest present)');
+  // web
+  registerFrameworkAdapter(railsAdapter);
 }

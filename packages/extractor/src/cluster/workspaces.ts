@@ -54,7 +54,7 @@ import { parse as parseYaml } from 'yaml';
 import { parse as parseToml } from 'smol-toml';
 import type { PackageRole } from '../types.js';
 import { compileMatchers, slugify } from './overrides.js';
-import { EXCLUDE_DIRS, PYTHON_EXCLUDE_DIRS, ELIXIR_EXCLUDE_DIRS } from '../graph/file-graph.js';
+import { EXCLUDE_DIRS, PYTHON_EXCLUDE_DIRS, RUBY_EXCLUDE_DIRS, ELIXIR_EXCLUDE_DIRS } from '../graph/file-graph.js';
 import { normalizePyName, requirementName } from '../graph/python-manifest.js';
 
 export interface WorkspacePackage {
@@ -283,6 +283,26 @@ export function detectWorkspaceLayout(rootDir: string): WorkspaceLayout {
       declared,
       role: elixirRoleOf(dir),
       declaredDeps: [],
+    });
+  }
+
+  // 3d. Ruby packages / mountable Rails engines. Every non-root dir with a
+  //     *.gemspec — a gem or an in-repo engine (engines/<name>/<name>.gemspec) — is
+  //     a boundary (the gemspec IS the declaration; no workspace glob needed). Merged
+  //     into the SAME packages list so an engine becomes its own subsystem and Louvain
+  //     runs within it. A dir already claimed (JS/Python/Elixir) keeps its boundary (first wins).
+  for (const dir of findRubyPackageDirs(rootDir)) {
+    if (seenRoots.has(dir)) continue;
+    const name = rubyPackageName(rootDir, dir);
+    seenRoots.add(dir);
+    packages.push({
+      root: dir,
+      name,
+      slug: reserveSlug(slugFor(name, dir.split('/').pop() ?? dir)),
+      entryFileIds: rubyEntryCandidates(dir, name),
+      declared: false,
+      role: rubyRoleOf(dir),
+      declaredDeps: [], // Ruby cross-package deps aren't wired (rare); left empty
     });
   }
 
@@ -838,6 +858,76 @@ function pythonRoleOf(pkgRoot: string, py: Record<string, unknown> | null): Pack
   const scripts =
     asObject(asObject(py?.project)?.scripts) ?? asObject(asObject(asObject(py?.tool)?.poetry)?.scripts);
   if (scripts && Object.keys(scripts).length > 0) return 'app';
+  return 'lib';
+}
+
+// ---------------------------------------------------------------------------
+// Ruby package / mountable-engine detection. A gemspec-bearing dir is a boundary
+// (a gem or an in-repo Rails engine). Pure + fs-reading + never-throws.
+
+// Skip both JS and Ruby excludes — a vendored `vendor/bundle/**/x.gemspec` is
+// never a first-party boundary.
+const RUBY_PKG_EXCLUDE_SET = new Set<string>([...EXCLUDE_DIRS, ...RUBY_EXCLUDE_DIRS]);
+
+/** Sorted non-root dirs containing a `*.gemspec`. */
+function findRubyPackageDirs(rootDir: string): string[] {
+  const out = new Set<string>();
+  const walk = (rel: string, depth: number): void => {
+    if (depth > MAX_WALK_DEPTH) return;
+    let entries;
+    try {
+      entries = readdirSync(rel === '' ? rootDir : join(rootDir, rel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        if (ent.name.startsWith('.') || RUBY_PKG_EXCLUDE_SET.has(ent.name)) continue;
+        walk(rel === '' ? ent.name : `${rel}/${ent.name}`, depth + 1);
+      } else if (rel !== '' && ent.isFile() && ent.name.endsWith('.gemspec')) {
+        out.add(rel);
+      }
+    }
+  };
+  walk('', 0);
+  return [...out].sort();
+}
+
+/** The gem/engine name from a dir's gemspec filename, else the dir basename. */
+function rubyPackageName(rootDir: string, dir: string): string | null {
+  try {
+    const specs = readdirSync(join(rootDir, dir))
+      .filter((f) => f.endsWith('.gemspec'))
+      .sort();
+    if (specs.length) return specs[0].replace(/\.gemspec$/, '');
+  } catch {
+    // unreadable — fall through to the dir basename
+  }
+  return dir.split('/').pop() ?? null;
+}
+
+/** Best-first candidate entry files for a Ruby package/engine (its lib entry). */
+function rubyEntryCandidates(dir: string, name: string | null): string[] {
+  const out: string[] = [];
+  const push = (p: string): void => {
+    if (!out.includes(p)) out.push(p);
+  };
+  const base = name ?? dir.split('/').pop() ?? '';
+  if (base) {
+    push(`${dir}/lib/${base}/engine.rb`);
+    push(`${dir}/lib/${base}.rb`);
+  }
+  push(`${dir}/lib/engine.rb`);
+  return out;
+}
+
+/** Classify a Ruby package: apps/ → app, tools/config → tooling, else lib (a gem
+ *  or engine is a reusable unit). */
+function rubyRoleOf(dir: string): PackageRole {
+  const seg0 = dir.split('/')[0];
+  if (TOOLING_DIRS.has(seg0)) return 'tooling';
+  if (seg0 === 'apps') return 'app';
   return 'lib';
 }
 

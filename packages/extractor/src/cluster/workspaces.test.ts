@@ -393,3 +393,22 @@ test('non-umbrella Phoenix repo (single root mix.exs) stays one package', () => 
   });
   expect(rootsOf(detectWorkspaceLayout(dir))).toEqual(['']); // only the root scope
 });
+
+test('a *.gemspec dir is a package boundary — a mountable Rails engine is partitioned', () => {
+  const dir = fixture({
+    Gemfile: "gem 'rails'\n",
+    'app/models/user.rb': 'class User; end\n',
+    // an in-repo mountable engine (its gemspec = the boundary; no workspace glob)
+    'engines/billing/billing.gemspec': 'Gem::Specification.new\n',
+    'engines/billing/lib/billing/engine.rb': 'module Billing; class Engine < Rails::Engine; end; end\n',
+    'engines/billing/app/models/invoice.rb': 'class Invoice; end\n',
+  });
+  const layout = detectWorkspaceLayout(dir);
+  expect(rootsOf(layout)).toContain('engines/billing');
+  const engine = layout.packages.find((p) => p.root === 'engines/billing')!;
+  expect(engine.name).toBe('billing');
+  expect(engine.role).toBe('lib');
+  // files inside the engine belong to the engine, not the root scope
+  expect(layout.packageOf('engines/billing/app/models/invoice.rb').root).toBe('engines/billing');
+  expect(layout.packageOf('app/models/user.rb').root).toBe('');
+});
