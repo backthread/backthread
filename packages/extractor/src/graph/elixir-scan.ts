@@ -38,6 +38,9 @@ const MODULE_HEAD_RE = /^([A-Z][A-Za-z0-9_.]*)/;
  * prevents a directive-looking line inside a `@doc`/`@moduledoc` code example from
  * being read as a real directive. Cheap + deterministic; never throws.
  */
+export function sourceLines(text: string): string[] {
+  return preprocessLines(text);
+}
 function preprocessLines(text: string): string[] {
   const raw = text.split('\n');
   const out: string[] = [];
