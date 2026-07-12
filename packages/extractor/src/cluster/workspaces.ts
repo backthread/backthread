@@ -54,7 +54,7 @@ import { parse as parseYaml } from 'yaml';
 import { parse as parseToml } from 'smol-toml';
 import type { PackageRole } from '../types.js';
 import { compileMatchers, slugify } from './overrides.js';
-import { EXCLUDE_DIRS, PYTHON_EXCLUDE_DIRS } from '../graph/file-graph.js';
+import { EXCLUDE_DIRS, PYTHON_EXCLUDE_DIRS, ELIXIR_EXCLUDE_DIRS } from '../graph/file-graph.js';
 import { normalizePyName, requirementName } from '../graph/python-manifest.js';
 
 export interface WorkspacePackage {
@@ -129,6 +129,9 @@ const WORKSPACE_MANIFEST_BASENAMES = new Set([
   'pyproject.toml',
   'setup.py',
   'setup.cfg',
+  // Elixir Mix project file. A repo-root mix.exs plus one per umbrella app
+  // (`apps/*/mix.exs`) defines the Elixir package boundaries.
+  'mix.exs',
 ]);
 
 /** Does a repo-relative path name a workspace-layout-defining manifest? */
@@ -177,6 +180,9 @@ export function detectWorkspaceLayout(rootDir: string): WorkspaceLayout {
     // uv workspace member globs (`[tool.uv.workspace].members`) are the
     // Python analogue of package.json `workspaces`.
     ...collectPythonDeclaredGlobs(rootDir),
+    // Elixir umbrella `apps_path` (root mix.exs) declares `apps/*` members — the
+    // analogue of package.json `workspaces` / uv members.
+    ...collectElixirDeclaredGlobs(rootDir),
   ]);
 
   // 3. Materialize packages. The root scope is ALWAYS present (and always
@@ -252,6 +258,31 @@ export function detectWorkspaceLayout(rootDir: string): WorkspaceLayout {
       declared,
       role: pythonRoleOf(dir, py),
       declaredDeps: [], // filled by the second pass once nameToPackage exists
+    });
+  }
+
+  // 3c. Elixir umbrella apps. Every non-root dir with a mix.exs — in an umbrella
+  //    that's `apps/<child>/mix.exs`, one boundary per child app. The OTP app name
+  //    (`app: :my_app` in `def project`) names the package; the whole repo is still
+  //    extracted as ONE graph, so cross-app `alias` edges already connect the apps —
+  //    this partition just groups each app into its own subsystem. A dir already a
+  //    JS/Python package keeps its one boundary (first wins). Cross-app deps
+  //    (`{:sibling, in_umbrella: true}`) are left to the import graph (declaredDeps
+  //    stays empty) — the alias edges already span apps.
+  for (const dir of findMixPackageDirs(rootDir)) {
+    if (seenRoots.has(dir)) continue;
+    const name = mixAppName(join(rootDir, dir));
+    const declared = matchesDeclared(dir);
+    if (!declared && name === null) continue;
+    seenRoots.add(dir);
+    packages.push({
+      root: dir,
+      name,
+      slug: reserveSlug(slugFor(name, dir.split('/').pop() ?? dir)),
+      entryFileIds: elixirEntryCandidates(dir, name),
+      declared,
+      role: elixirRoleOf(dir),
+      declaredDeps: [],
     });
   }
 
@@ -650,6 +681,81 @@ function findPythonPackageDirs(rootDir: string): string[] {
   };
   walk('', 0);
   return [...out].sort();
+}
+
+// ── Elixir umbrella package detection ──────────────────────────────────────
+const EX_MANIFEST_FILES = new Set(['mix.exs']);
+const EX_EXCLUDE_SET = new Set<string>([...EXCLUDE_DIRS, ...ELIXIR_EXCLUDE_DIRS]);
+
+/** Sorted non-root dirs containing a mix.exs (umbrella children at apps/<child>). */
+function findMixPackageDirs(rootDir: string): string[] {
+  const out = new Set<string>();
+  const walk = (rel: string, depth: number): void => {
+    if (depth > MAX_WALK_DEPTH) return;
+    let entries;
+    try {
+      entries = readdirSync(rel === '' ? rootDir : join(rootDir, rel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        if (ent.name.startsWith('.') || EX_EXCLUDE_SET.has(ent.name)) continue;
+        walk(rel === '' ? ent.name : `${rel}/${ent.name}`, depth + 1);
+      } else if (rel !== '' && ent.isFile() && EX_MANIFEST_FILES.has(ent.name)) {
+        out.add(rel);
+      }
+    }
+  };
+  walk('', 0);
+  return [...out].sort();
+}
+
+/** Read a dir's mix.exs text; '' on absence/any failure. NEVER evaluated. */
+function readMixExs(absDir: string): string {
+  try {
+    const p = join(absDir, 'mix.exs');
+    return existsSync(p) ? readFileSync(p, 'utf8') : '';
+  } catch {
+    return '';
+  }
+}
+
+/** The OTP app name from `def project`'s `app: :name`, or null. Regex, never eval. */
+function mixAppName(absDir: string): string | null {
+  const m = readMixExs(absDir).match(/\bapp:\s*:([A-Za-z_][A-Za-z0-9_]*)/);
+  return m ? m[1] : null;
+}
+
+/** Root mix.exs umbrella `apps_path: "apps"` → `["apps/*"]`; else []. */
+function collectElixirDeclaredGlobs(rootDir: string): string[] {
+  const m = readMixExs(rootDir).match(/apps_path:\s*"([^"]+)"/);
+  return m ? [`${m[1]}/*`] : [];
+}
+
+/** Best-first entry candidates for an Elixir package (existence checked by caller). */
+function elixirEntryCandidates(pkgRoot: string, name: string | null): string[] {
+  const rel = (f: string): string => (pkgRoot ? `${pkgRoot}/${f}` : f);
+  const out: string[] = [];
+  const push = (p: string): void => {
+    if (!out.includes(p)) out.push(p);
+  };
+  if (name) {
+    push(rel(`lib/${name}.ex`));
+    push(rel(`lib/${name}/application.ex`));
+  }
+  const dirBase = pkgRoot.split('/').pop() ?? '';
+  if (dirBase) push(rel(`lib/${dirBase}.ex`));
+  return out;
+}
+
+/** Role for an Elixir package: an umbrella app under `apps/` is an app, else a lib. */
+function elixirRoleOf(pkgRoot: string): PackageRole {
+  const seg0 = pkgRoot.split('/')[0];
+  if (seg0 !== '' && TOOLING_DIRS.has(seg0)) return 'tooling';
+  if (seg0 === 'apps') return 'app';
+  return 'lib';
 }
 
 /** Parse a dir's pyproject.toml into an object; null on absence/any failure. */

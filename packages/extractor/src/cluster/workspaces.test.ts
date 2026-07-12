@@ -363,3 +363,33 @@ test('isWorkspaceManifestPath recognizes Python manifests (recompute trigger)', 
   expect(isWorkspaceManifestPath('pkg/setup.py')).toBe(true);
   expect(isWorkspaceManifestPath('pkg/setup.cfg')).toBe(true);
 });
+
+test('elixir umbrella: each apps/* mix.exs project becomes a package', () => {
+  const dir = fixture({
+    'mix.exs':
+      'defmodule MyUmbrella.MixProject do\n  use Mix.Project\n  def project do\n    [apps_path: "apps", version: "0.1.0"]\n  end\nend\n',
+    'apps/core/mix.exs':
+      'defmodule Core.MixProject do\n  def project do\n    [app: :core, version: "0.1.0"]\n  end\nend\n',
+    'apps/core/lib/core.ex': 'defmodule Core do\nend\n',
+    'apps/web/mix.exs': 'defmodule Web.MixProject do\n  def project do\n    [app: :web]\n  end\nend\n',
+    'apps/web/lib/web.ex': 'defmodule Web do\nend\n',
+  });
+  const layout = detectWorkspaceLayout(dir);
+  const roots = rootsOf(layout);
+  expect(roots).toContain('apps/core');
+  expect(roots).toContain('apps/web');
+  const core = layout.packages.find((p) => p.root === 'apps/core');
+  expect(core?.name).toBe('core'); // from `app: :core`
+  expect(core?.role).toBe('app'); // apps/* → app
+  // a file under apps/core resolves to the core package (longest-prefix membership)
+  expect(layout.packageOf('apps/core/lib/core.ex').root).toBe('apps/core');
+  expect(isWorkspaceManifestPath('apps/core/mix.exs')).toBe(true);
+});
+
+test('non-umbrella Phoenix repo (single root mix.exs) stays one package', () => {
+  const dir = fixture({
+    'mix.exs': 'defmodule MyApp.MixProject do\n  def project do\n    [app: :my_app]\n  end\nend\n',
+    'lib/my_app.ex': 'defmodule MyApp do\nend\n',
+  });
+  expect(rootsOf(detectWorkspaceLayout(dir))).toEqual(['']); // only the root scope
+});
