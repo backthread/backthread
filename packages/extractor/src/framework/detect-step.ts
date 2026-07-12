@@ -12,7 +12,7 @@
 // mutation, no effect on the assembled snapshot). Adapters consume the manifest
 // starting in .
 
-import { registerBuiltinFrameworkAdapters } from './register.js';
+import { registerBuiltinFrameworkAdapters, registerLanguageScopedFrameworkAdapters } from './register.js';
 import { detectFrameworks } from './registry.js';
 import type { FrameworkManifest } from './types.js';
 
@@ -30,6 +30,7 @@ export async function detectFrameworkStack(repoDir: string): Promise<FrameworkMa
   // identical, and fall through to the empty-manifest generic-TS path on failure.
   try {
     registerBuiltinFrameworkAdapters();
+    await registerLanguageScopedFrameworkAdapters(repoDir);
     const manifest = await detectFrameworks(repoDir);
     logManifest(manifest);
     return manifest;

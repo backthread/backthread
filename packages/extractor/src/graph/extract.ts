@@ -71,15 +71,20 @@ export function mergeGraphs(root: string, graphs: readonly NormalizedGraph[]): N
 }
 
 /**
- * Pick the structural adapter for a detected language. The Python adapter is
- * LAZILY imported so a TS ingest never loads `@zzzen/pyright-internal` (keeps the
- * TS path — and the worker's TS bundle — free of the Python toolchain; only a
- * Python repo pays for it). TS stays the default + eager (the pipeline's home turf).
+ * Pick the structural adapter for a detected language. The Python + Ruby adapters
+ * are LAZILY imported so a TS ingest never loads `@zzzen/pyright-internal` or
+ * `@ruby/prism` (keeps the TS path — and the worker's TS bundle — free of the
+ * other-language toolchains; only a Python/Ruby repo pays for its parser). TS
+ * stays the default + eager (the pipeline's home turf).
  */
 async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
   if (language === 'python') {
     const { PythonExtractor } = await import('./python-adapter.js');
     return new PythonExtractor();
+  }
+  if (language === 'ruby') {
+    const { RubyExtractor } = await import('./ruby-adapter.js');
+    return new RubyExtractor();
   }
   return new TsMorphExtractor();
 }

@@ -67,7 +67,7 @@ import { ModuleId, parseEdgeKind, type Edge } from '../types.js';
 import type { ClusterResult } from '../cluster/louvain.js';
 import type { NormalizedGraph } from '../graph/types.js';
 import { crossLanguageApiEdges } from '../graph/cross-language.js';
-import { registerBuiltinFrameworkAdapters } from './register.js';
+import { registerBuiltinFrameworkAdapters, registerLanguageScopedFrameworkAdapters } from './register.js';
 import { detectFrameworks, listFrameworkAdapters } from './registry.js';
 import type { FrameworkAdapter, FrameworkContext, FrameworkEdge, RoleTag } from './types.js';
 
@@ -123,6 +123,7 @@ export async function contributeFrameworkGraph(args: {
   const { repoDir, graph, cluster } = args;
   try {
     registerBuiltinFrameworkAdapters();
+    await registerLanguageScopedFrameworkAdapters(repoDir);
     const manifest = await detectFrameworks(repoDir);
 
     // the cross-language full-stack seam (frontend→backend HTTP-API

@@ -4,7 +4,13 @@ import { describe, it, expect, afterEach } from '../testkit.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { detectRepoLanguage, detectRepoLanguages, listSourceFiles, graphLanguage } from './language.js';
+import {
+  detectRepoLanguage,
+  detectRepoLanguages,
+  listSourceFiles,
+  graphLanguage,
+  hasRubyManifest,
+} from './language.js';
 import type { NormalizedGraph } from './types.js';
 
 const dirs: string[] = [];
@@ -55,6 +61,28 @@ describe('detectRepoLanguage', () => {
     });
     expect(detectRepoLanguage(dir)).toBe('python');
   });
+
+  it('selects ruby for a Gemfile repo with no TS/Python manifest', async () => {
+    const dir = await repo({ Gemfile: "source 'https://rubygems.org'\n", 'app/models/user.rb': 'class User; end\n' });
+    expect(detectRepoLanguage(dir)).toBe('ruby');
+  });
+
+  it('selects ruby for a bare *.gemspec repo', async () => {
+    const dir = await repo({ 'mygem.gemspec': 'Gem::Specification.new\n', 'lib/mygem.rb': 'module MyGem; end\n' });
+    expect(detectRepoLanguage(dir)).toBe('ruby');
+  });
+
+  it('selects ruby for a Rails app that also ships a package.json (JS bundler) — .rb dominates', async () => {
+    const dir = await repo({
+      Gemfile: "gem 'rails'\n",
+      'package.json': '{"name":"app"}',
+      'app/models/user.rb': 'class User; end\n',
+      'app/controllers/users_controller.rb': 'class UsersController; end\n',
+      'app/jobs/mail_job.rb': 'class MailJob; end\n',
+      'app/javascript/app.js': 'console.log(1)\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('ruby');
+  });
 });
 
 describe('listSourceFiles', () => {
@@ -81,6 +109,35 @@ describe('listSourceFiles', () => {
     // non-source files never appear
     expect(files.some((f) => f.endsWith('.md') || f.endsWith('.pyc'))).toBe(false);
   });
+
+  it('lists .rb/.rake/.ru + Rakefile and skips vendor/tmp/log + dot dirs (ruby)', async () => {
+    const dir = await repo({
+      'app/models/user.rb': 'class User; end\n',
+      'lib/tasks/db.rake': 'task :db\n',
+      'config.ru': 'run App\n',
+      Rakefile: "require 'rake'\n",
+      Gemfile: "gem 'rails'\n",
+      'mygem.gemspec': 'Gem::Specification.new\n',
+      'README.md': '# no\n',
+      'vendor/bundle/gems/rails/lib/rails.rb': 'module Rails; end\n',
+      'tmp/cache/x.rb': 'x=1\n',
+      'log/dev.rb': 'x=1\n',
+      '.bundle/gem.rb': 'x=1\n',
+    });
+    const files = listSourceFiles(dir, 'ruby');
+    expect(files).toContain('app/models/user.rb');
+    expect(files).toContain('lib/tasks/db.rake');
+    expect(files).toContain('config.ru');
+    expect(files).toContain('Rakefile');
+    // manifests + non-source never appear
+    expect(files).not.toContain('Gemfile');
+    expect(files.some((f) => f.endsWith('.gemspec') || f.endsWith('.md'))).toBe(false);
+    // vendored / scratch / dot dirs never appear
+    expect(files.some((f) => f.startsWith('vendor/'))).toBe(false);
+    expect(files.some((f) => f.startsWith('tmp/'))).toBe(false);
+    expect(files.some((f) => f.startsWith('log/'))).toBe(false);
+    expect(files.some((f) => f.startsWith('.bundle/'))).toBe(false);
+  });
 });
 
 describe('detectRepoLanguages (multi-language)', () => {
@@ -88,10 +145,13 @@ describe('detectRepoLanguages (multi-language)', () => {
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`frontend/src/f${i}.ts`, `export const x${i}=1;\n`]));
   const py = (n: number): Record<string, string> =>
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`backend/app/m${i}.py`, `x = ${i}\n`]));
+  const rb = (n: number): Record<string, string> =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`app/models/m${i}.rb`, `class M${i}; end\n`]));
 
   it('returns a SINGLE language for a single-language repo (no behavior change)', async () => {
     expect(await detectRepoLanguages(await repo({ 'package.json': '{}', ...ts(6) }))).toEqual(['ts']);
     expect(await detectRepoLanguages(await repo({ 'pyproject.toml': '[project]\nname="x"\n', ...py(6) }))).toEqual(['python']);
+    expect(await detectRepoLanguages(await repo({ Gemfile: "gem 'rails'\n", ...rb(6) }))).toEqual(['ruby']);
   });
 
   it('keeps a TS repo single-language when it only ships a couple of .py scripts (below threshold)', async () => {
@@ -117,10 +177,20 @@ describe('graphLanguage', () => {
     edges: [],
     externals: [],
   });
-  it('is python when any file is py/pyi, else ts', () => {
+  it('is python for py/pyi, ruby for rb, else ts', () => {
     expect(graphLanguage(g(['ts', 'tsx']))).toBe('ts');
     expect(graphLanguage(g(['py']))).toBe('python');
     expect(graphLanguage(g(['pyi']))).toBe('python');
+    expect(graphLanguage(g(['rb']))).toBe('ruby');
     expect(graphLanguage(g([]))).toBe('ts');
+  });
+});
+
+describe('hasRubyManifest', () => {
+  it('detects Gemfile / Gemfile.lock / *.gemspec, else false', async () => {
+    expect(hasRubyManifest(await repo({ Gemfile: "gem 'rails'\n" }))).toBe(true);
+    expect(hasRubyManifest(await repo({ 'Gemfile.lock': 'GEM\n' }))).toBe(true);
+    expect(hasRubyManifest(await repo({ 'foo.gemspec': 'Gem::Specification.new\n' }))).toBe(true);
+    expect(hasRubyManifest(await repo({ 'package.json': '{}' }))).toBe(false);
   });
 });
