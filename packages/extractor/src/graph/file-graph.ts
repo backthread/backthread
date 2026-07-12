@@ -28,17 +28,25 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
 /**
  * The extractor languages the pipeline supports. The dispatch (graph/extract.ts)
  * picks ONE per repo; every source-path predicate below is parameterized by it so
- * a single implementation serves both the ts-morph (TS) and Pyright (Python,
- * ) adapters. `ts` is the default everywhere the caller can't yet supply a
+ * a single implementation serves the ts-morph (TS), Pyright (Python), and Prism
+ * (Ruby) adapters. `ts` is the default everywhere the caller can't yet supply a
  * language (the incremental diff classifier is TS-only today).
  */
-export type SourceLang = 'ts' | 'python';
+export type SourceLang = 'ts' | 'python' | 'ruby';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
 
 /** Python source extensions the Pyright adapter parses (module + stub files). */
 export const PYTHON_SOURCE_EXTENSIONS = ['py', 'pyi'] as const;
+
+/**
+ * Ruby source extensions the Prism adapter parses: `.rb` modules, `.rake` tasks,
+ * and `.ru` rackup files. A `Rakefile` (extension-less) is also Ruby source —
+ * matched by RUBY_SOURCE_BASENAMES below. `Gemfile` / `*.gemspec` are MANIFESTS
+ * (dependency declarations), not graph nodes, so they're deliberately excluded.
+ */
+export const RUBY_SOURCE_EXTENSIONS = ['rb', 'rake', 'ru'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -79,10 +87,36 @@ export const PYTHON_EXCLUDE_DIRS = [
   'node_modules',
 ] as const;
 
+/**
+ * Directories the Ruby adapter's walk excludes: Bundler's vendored gem tree,
+ * runtime scratch (`tmp` / `log`), the local Bundler config, ActiveStorage's
+ * on-disk root, and any JS-bundler deps. Mirrors the TS/Python EXCLUDE_DIRS role
+ * — none hold first-party source, and walking `vendor/bundle` would misread
+ * installed gems as internal (blowing the install-free promise). `.bundle` is
+ * also caught by the dot-segment skip; listed explicitly so the policy is
+ * self-contained.
+ */
+export const RUBY_EXCLUDE_DIRS = [
+  'vendor',
+  'tmp',
+  'log',
+  '.bundle',
+  'storage',
+  'node_modules',
+  '.git',
+] as const;
+
 const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXTENSIONS.join('|')})$`);
 const PYTHON_SOURCE_EXT_RE = new RegExp(`\\.(${PYTHON_SOURCE_EXTENSIONS.join('|')})$`);
+const RUBY_SOURCE_EXT_RE = new RegExp(`\\.(${RUBY_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
+const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
+
+// Extension-less Ruby source basenames. A `Rakefile` is Ruby; `config.ru` already
+// matches the `.ru` extension. `Gemfile` is intentionally NOT here — it's a
+// manifest, not a graph node.
+const RUBY_SOURCE_BASENAMES = new Set<string>(['Rakefile']);
 
 /**
  * Does a repo-relative posix path denote a file the extractor would include?
@@ -93,12 +127,19 @@ const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
  * classifier must skip them too or a patched graph would diverge from a full
  * extract. For `python` the same shape holds with `.py`/`.pyi` + the Python
  * exclude set; the dot-segment skip drops `.venv`/`.tox`/… while keeping
- * `__init__.py` (a `_`-prefixed name, not a dotted one).
+ * `__init__.py` (a `_`-prefixed name, not a dotted one). For `ruby` it's
+ * `.rb`/`.rake`/`.ru` (plus the extension-less `Rakefile`) + the Ruby exclude set
+ * (`vendor`/`tmp`/`log`/`storage`).
  */
 export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean {
-  const extRe = lang === 'python' ? PYTHON_SOURCE_EXT_RE : SOURCE_EXT_RE;
-  const excludes = lang === 'python' ? PYTHON_EXCLUDE_SET : EXCLUDE_SET;
-  if (!extRe.test(path)) return false;
+  const extRe =
+    lang === 'python' ? PYTHON_SOURCE_EXT_RE : lang === 'ruby' ? RUBY_SOURCE_EXT_RE : SOURCE_EXT_RE;
+  const excludes =
+    lang === 'python' ? PYTHON_EXCLUDE_SET : lang === 'ruby' ? RUBY_EXCLUDE_SET : EXCLUDE_SET;
+  // Ruby has extension-less source files (a `Rakefile`); every other language —
+  // and every other Ruby file — must match its language's source extension.
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  if (!extRe.test(path) && !(lang === 'ruby' && RUBY_SOURCE_BASENAMES.has(base))) return false;
   for (const seg of path.split('/')) {
     if (seg.startsWith('.')) return false;
     if (excludes.has(seg)) return false;
