@@ -1,4 +1,4 @@
-// Ruby structural extractor — the node backbone (import edges land next).
+// Ruby structural extractor — the Prism-driven import backbone.
 
 import { describe, it, expect, afterEach } from '../testkit.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
@@ -22,30 +22,54 @@ async function repo(files: Record<string, string>): Promise<string> {
   return dir;
 }
 
+const internalEdges = (g: { edges: Array<{ from: string; to: string; external: boolean }> }): string[] =>
+  g.edges.filter((e) => !e.external).map((e) => `${e.from}->${e.to}`);
+
 describe('RubyExtractor', () => {
-  it('emits one node per first-party Ruby file, real loc, no edges yet (backbone TBD)', async () => {
+  it('builds Zeitwerk import edges from constant references (superclass + body refs)', async () => {
     const dir = await repo({
-      'app/models/user.rb': 'class User\n  def name\n  end\nend\n',
-      'app/controllers/users_controller.rb': 'class UsersController\nend\n',
-      'lib/tasks/db.rake': 'task :migrate do\nend\n',
-      Rakefile: "require 'rake'\n",
-      Gemfile: "gem 'rails'\n", // manifest — not a node
-      'vendor/bundle/gems/x/lib/x.rb': 'module X; end\n', // vendored — excluded
+      Gemfile: "gem 'rails'\n",
+      'app/models/application_record.rb': 'class ApplicationRecord\nend\n',
+      'app/models/user.rb': 'class User < ApplicationRecord\nend\n',
+      'app/controllers/application_controller.rb': 'class ApplicationController\nend\n',
+      'app/controllers/users_controller.rb':
+        'class UsersController < ApplicationController\n  def index\n    @users = User.all\n  end\nend\n',
     });
     const graph = await new RubyExtractor().extract(dir);
+    const edges = internalEdges(graph);
+    // superclass edge + autoloaded-constant reference edge
+    expect(edges).toContain(
+      'app/controllers/users_controller.rb->app/controllers/application_controller.rb',
+    );
+    expect(edges).toContain('app/controllers/users_controller.rb->app/models/user.rb');
+    expect(edges).toContain('app/models/user.rb->app/models/application_record.rb');
+  });
 
-    // sorted, deterministic; manifests + vendored deps excluded
-    expect(graph.files.map((f) => f.id)).toEqual([
-      'Rakefile',
-      'app/controllers/users_controller.rb',
-      'app/models/user.rb',
-      'lib/tasks/db.rake',
-    ]);
+  it('resolves require_relative to first-party edges and require to gem externals', async () => {
+    const dir = await repo({
+      'my_gem.gemspec': 'Gem::Specification.new\n',
+      'lib/my_gem.rb':
+        "require_relative 'my_gem/version'\nrequire 'json'\nrequire 'sidekiq'\nmodule MyGem\nend\n",
+      'lib/my_gem/version.rb': "module MyGem\n  VERSION = '1.0'\nend\n",
+    });
+    const graph = await new RubyExtractor().extract(dir);
+    expect(internalEdges(graph)).toContain('lib/my_gem.rb->lib/my_gem/version.rb'); // require_relative
+    const exts = graph.externals.map((x) => x.id);
+    expect(exts).toContain('ext:sidekiq'); // third-party gem
+    expect(exts).not.toContain('ext:json'); // stdlib dropped
+    expect(graph.files.map((f) => f.id)).not.toContain('Gemfile'); // manifest, not a node
+  });
+
+  it('emits deterministic sorted nodes (rb + real loc); import edges only, no call edges', async () => {
+    const dir = await repo({
+      'app/models/user.rb': 'class User\n  def name\n  end\nend\n',
+      'app/models/post.rb': 'class Post\nend\n',
+    });
+    const graph = await new RubyExtractor().extract(dir);
+    expect(graph.files.map((f) => f.id)).toEqual(['app/models/post.rb', 'app/models/user.rb']);
     expect(graph.files.every((f) => f.language === 'rb')).toBe(true);
     expect(graph.files.find((f) => f.id === 'app/models/user.rb')?.loc).toBe(5);
-    // Seam only — no import/call edges or externals yet.
-    expect(graph.edges).toEqual([]);
-    expect(graph.externals).toEqual([]);
+    expect(graph.edges.every((e) => e.kind === 'import')).toBe(true); // v1: no call edges
   });
 
   it('returns an empty graph for a repo with no Ruby files', async () => {

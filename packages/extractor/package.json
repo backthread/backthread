@@ -48,6 +48,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@ruby/prism": "^1.9.0",
     "@zzzen/pyright-internal": "1.2.0-dev.20251207",
     "graphology": "^0.25.4",
     "graphology-communities-louvain": "^2.0.2",
