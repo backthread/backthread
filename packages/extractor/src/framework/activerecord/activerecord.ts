@@ -30,6 +30,7 @@ import { camelize } from '../../graph/ruby-zeitwerk.js';
 import { singularize, type Inflections } from '../../graph/ruby-inflect.js';
 import { parseRubyScope, type RubyScope } from '../ruby/analyze.js';
 import {
+  constantName,
   keywordArg,
   literalValue,
   positionalArgs,
@@ -37,6 +38,7 @@ import {
   symbolValue,
   type RubyClass,
 } from '../ruby/ruby-ast.js';
+import { TrueNode } from '@ruby/prism';
 import type {
   DetectMatch,
   FrameworkAdapter,
@@ -92,16 +94,67 @@ const MODEL_PRIORITY = 2;
 
 const AR_BASES = new Set(['ApplicationRecord', 'ActiveRecord::Base']);
 const ASSOCIATION_CALLS = new Set(['has_many', 'belongs_to', 'has_one', 'has_and_belongs_to_many']);
-// A body DSL that marks a class as an AR model even when its base was renamed / it
-// is an STI subclass of another model.
-const AR_MARKERS = new Set([...ASSOCIATION_CALLS, 'validates', 'scope', 'enum', 'validate', 'attribute']);
+// Body DSL that, ALONE, marks a class as an AR model (a renamed base or an STI
+// subclass whose superclass isn't an AR_BASE). Deliberately EXCLUDES the plural
+// association calls (has_many / has_one / has_and_belongs_to_many): those are shared
+// by ActiveModel::Serializer + form objects, so an association call is NOT a
+// sufficient AR signal on its own. A genuine signal is an AR base OR a persistence
+// marker — belongs_to (AR-specific) or a validation / scope / enum / attribute
+// marker. (Serializers/forms are hard-excluded before markers are ever consulted.)
+const AR_MARKERS = new Set(['belongs_to', 'validates', 'validate', 'scope', 'enum', 'attribute']);
+
+// Classes that REUSE the association/attribute DSL but are NOT persistent AR models:
+// ActiveModel::Serializer subclasses (+ any *Serializer name — nested serializer
+// bases like ActivityPub::Serializer / REST::…Serializer don't inherit from AMS
+// directly) and form objects (ActiveModel::Model / *Form / a `Form::…` namespace).
+// A serializer's `has_many` is a JSON shape, not a DB association; treating it as a
+// model produced ~120 bogus "unresolvable association" logs on real Rails apps.
+const NON_AR_INCLUDES = new Set(['ActiveModel::Model', 'ActiveModel::Serializer']);
+
+function lastConstSegment(name: string): string {
+  const i = name.lastIndexOf('::');
+  return i >= 0 ? name.slice(i + 2) : name;
+}
+
+/** A class that reuses the AR association/attribute DSL but is NOT a persistent
+ *  model (a serializer or a form object) — excluded from model detection outright,
+ *  before any positive AR signal is consulted. */
+function isNonArDslClass(cls: RubyClass): boolean {
+  // Name-based (covers nested serializer bases whose superclass isn't AMS).
+  if (cls.simpleName.endsWith('Serializer') || cls.simpleName.endsWith('Form')) return true;
+  // A `Form::…`-namespaced object (form objects commonly live under app/models/form/).
+  if (cls.nesting.includes('Form')) return true;
+  // A Serializer/Form base class.
+  if (cls.superclass) {
+    const base = lastConstSegment(cls.superclass);
+    if (base.endsWith('Serializer') || base.endsWith('Form')) return true;
+  }
+  // `include ActiveModel::Model` / `include ActiveModel::Serializer`.
+  for (const call of cls.bodyCalls) {
+    if (call.name !== 'include') continue;
+    for (const arg of positionalArgs(call)) {
+      const mod = constantName(arg);
+      if (mod && NON_AR_INCLUDES.has(mod)) return true;
+    }
+  }
+  return false;
+}
+
+/** A `polymorphic: true` association targets an interface, not a single model —
+ *  draw no edge and log nothing (its target isn't one resolvable class). */
+function isPolymorphicAssociation(call: RubyClass['bodyCalls'][number]): boolean {
+  return keywordArg(call, 'polymorphic') instanceof TrueNode;
+}
 
 // Migrations + the schema dump are historical, not the live domain model.
 const MIGRATION_PATH_RE = /(^|\/)(db\/migrate|db\/schema\.rb)/;
 
-/** Is this class an ActiveRecord model? */
+/** Is this class an ActiveRecord model? Serializers + form objects that reuse the
+ *  association DSL are excluded FIRST, so only a genuine AR base or persistence
+ *  marker qualifies. */
 function isModel(cls: RubyClass): boolean {
   if (cls.kind !== 'class') return false;
+  if (isNonArDslClass(cls)) return false;
   if (cls.superclass && AR_BASES.has(cls.superclass)) return true;
   return cls.bodyCalls.some((c) => AR_MARKERS.has(c.name));
 }
@@ -195,6 +248,7 @@ async function analyzeActiveRecord(ctx: FrameworkContext): Promise<ActiveRecordA
     for (const m of models) {
       for (const call of m.bodyCalls) {
         if (!ASSOCIATION_CALLS.has(call.name)) continue;
+        if (isPolymorphicAssociation(call)) continue; // no edge, no unresolved log
         const target = associationTarget(m, call, scope.inflections);
         if (!target) continue;
         const to = scope.resolve(target, m.nesting) ?? modelClassToFile.get(target);

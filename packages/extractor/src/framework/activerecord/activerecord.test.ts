@@ -91,6 +91,83 @@ describe('activerecord syntheticEdges (real inflections)', () => {
   });
 });
 
+describe('activerecord model-detection tightening', () => {
+  // A real AR model + a serializer + a form object that all reuse the association /
+  // attribute DSL. Only the AR model should be detected.
+  const MIXED = {
+    Gemfile: "gem 'rails'\n",
+    'app/models/application_record.rb': 'class ApplicationRecord < ActiveRecord::Base\nend\n',
+    'app/models/account.rb': 'class Account < ApplicationRecord\n  has_many :statuses\nend\n',
+    'app/models/status.rb': 'class Status < ApplicationRecord\n  belongs_to :account\nend\n',
+    // AMS serializer with associations — NOT a model (name + base both say Serializer)
+    'app/serializers/account_serializer.rb':
+      'class AccountSerializer < ActiveModel::Serializer\n  has_many :statuses\n  has_one :account\nend\n',
+    // nested serializer base whose superclass is NOT ActiveModel::Serializer
+    'app/serializers/activitypub/note_serializer.rb':
+      'module ActivityPub\n  class NoteSerializer < ActivityPub::Serializer\n    has_many :tags\n  end\nend\n',
+    // form object (include ActiveModel::Model + a persistence-looking marker)
+    'app/models/form/admin_settings.rb':
+      'class Form::AdminSettings\n  include ActiveModel::Model\n  attribute :site_title\n  validates :site_title, presence: true\n  has_many :statuses\nend\n',
+  };
+
+  it('excludes serializers + form objects, keeps real AR models', async () => {
+    const roles = await activeRecordAdapter.roleTags!(await repo(MIXED));
+    expect(roles.get('app/models/account.rb')).toMatchObject({ role: 'model', kind: 'service' });
+    expect(roles.get('app/models/status.rb')).toMatchObject({ role: 'model', kind: 'service' });
+    // serializers + form object are NOT models
+    expect(roles.has('app/serializers/account_serializer.rb')).toBe(false);
+    expect(roles.has('app/serializers/activitypub/note_serializer.rb')).toBe(false);
+    expect(roles.has('app/models/form/admin_settings.rb')).toBe(false);
+  });
+
+  it('draws no association edge FROM an excluded serializer/form', async () => {
+    const edges = await activeRecordAdapter.syntheticEdges!(await repo(MIXED));
+    const sources = new Set(edges.map((e) => e.source));
+    expect(sources.has('app/serializers/account_serializer.rb')).toBe(false);
+    expect(sources.has('app/models/form/admin_settings.rb')).toBe(false);
+    // the real Account<->Status association still resolves
+    const pairs = edges.map((e) => `${e.source}->${e.target}`);
+    expect(pairs).toContain('app/models/account.rb->app/models/status.rb');
+    expect(pairs).toContain('app/models/status.rb->app/models/account.rb');
+  });
+
+  it('skips polymorphic associations (no edge) but honors :through, HABTM, class_name', async () => {
+    const edges = await activeRecordAdapter.syntheticEdges!(
+      await repo({
+        Gemfile: "gem 'rails'\n",
+        'app/models/application_record.rb': 'class ApplicationRecord < ActiveRecord::Base\nend\n',
+        'app/models/comment.rb':
+          'class Comment < ApplicationRecord\n  belongs_to :commentable, polymorphic: true\n  belongs_to :author, class_name: "Account"\nend\n',
+        'app/models/account.rb':
+          'class Account < ApplicationRecord\n  has_many :roles, through: :account_roles\n  has_and_belongs_to_many :groups\nend\n',
+        'app/models/role.rb': 'class Role < ApplicationRecord\nend\n',
+        'app/models/group.rb': 'class Group < ApplicationRecord\nend\n',
+      }),
+    );
+    const pairs = edges.map((e) => `${e.source}->${e.target}`);
+    // polymorphic belongs_to :commentable → NO edge (and no `Commentable` target)
+    expect(pairs.some((p) => p.includes('commentable') || p.endsWith('->Commentable'))).toBe(false);
+    expect(edges.some((e) => e.metadata?.relation === 'belongs_to' && e.source === 'app/models/comment.rb'
+      && e.target === 'app/models/account.rb')).toBe(true); // class_name: "Account"
+    expect(pairs).toContain('app/models/account.rb->app/models/role.rb'); // :through → final model Role
+    expect(pairs).toContain('app/models/account.rb->app/models/group.rb'); // HABTM
+  });
+
+  it('a bare has_many is no longer a sufficient model signal (needs a real AR signal)', async () => {
+    const roles = await activeRecordAdapter.roleTags!(
+      await repo({
+        Gemfile: "gem 'rails'\n",
+        // a PORO with only has_many + no AR base/marker is NOT a model anymore
+        'app/services/aggregator.rb': 'class Aggregator\n  has_many :things\nend\n',
+        // belongs_to (a persistence marker) still qualifies a based-less STI-style class
+        'app/models/special.rb': 'class Special < SomethingCustom\n  belongs_to :owner\nend\n',
+      }),
+    );
+    expect(roles.has('app/services/aggregator.rb')).toBe(false);
+    expect(roles.get('app/models/special.rb')).toMatchObject({ role: 'model' });
+  });
+});
+
 describe('activerecord groupingPrior', () => {
   it('groups the models dir into a Data Model subsystem', async () => {
     const prior = await activeRecordAdapter.groupingPrior!(await repo(MODELS));
