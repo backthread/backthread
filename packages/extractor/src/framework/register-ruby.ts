@@ -12,16 +12,18 @@
 
 import { registerFrameworkAdapter } from './registry.js';
 import { railsAdapter } from './rails/rails.js';
+import { activeRecordAdapter } from './activerecord/activerecord.js';
 
 /**
  * Register every builtin Ruby framework adapter. Called (once per process) from
  * register.ts's Gemfile gate. Idempotent on name — safe to call more than once.
  *
  * The fleet lands incrementally (web → data → async → protocol); the remaining
- * ActiveRecord (data), Sidekiq (async) and GraphQL/gRPC (protocol) adapters
- * register here as each ships.
+ * Sidekiq (async) and GraphQL/gRPC (protocol) adapters register here as each ships.
  */
 export function registerRubyFrameworkAdapters(): void {
   // web
   registerFrameworkAdapter(railsAdapter);
+  // data
+  registerFrameworkAdapter(activeRecordAdapter);
 }
