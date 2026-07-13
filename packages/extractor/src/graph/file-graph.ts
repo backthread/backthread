@@ -238,8 +238,11 @@ export function isConfigInvalidatorPath(path: string): boolean {
  * row (all lookups miss → re-parse — the once-per-version cost; saveParseCache
  * GCs the orphaned versions best-effort). Version 1 is RESERVED for the
  * implicit Stage-A semantics and is never written to the table.
+ *
+ * v3: the Elixir adapter gained inline CALL edges (was import-only) — a change to
+ * per-file extraction output for `.ex`/`.exs` blobs, so cached rows must re-parse.
  */
-export const EXTRACTOR_VERSION = 2;
+export const EXTRACTOR_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // State shape.
