@@ -1,7 +1,7 @@
 # @backthread/extractor
 
-Deterministic, install-free **structural extraction** for TypeScript and Python
-codebases. Point it at a working tree and it returns a structural graph of the
+Deterministic, install-free **structural extraction** for TypeScript, Python,
+Ruby, and Elixir codebases. Point it at a working tree and it returns a structural graph of the
 system — modules, edges, communities, god-nodes, framework roles, and
 infrastructure — with **zero LLM, database, or network**.
 
