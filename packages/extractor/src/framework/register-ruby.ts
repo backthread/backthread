@@ -16,13 +16,13 @@ import { sinatraAdapter } from './sinatra/sinatra.js';
 import { hanamiAdapter } from './hanami/hanami.js';
 import { activeRecordAdapter } from './activerecord/activerecord.js';
 import { sidekiqAdapter } from './sidekiq/sidekiq.js';
+import { graphqlRubyAdapter } from './graphql-ruby/graphql-ruby.js';
+import { grpcRubyAdapter } from './grpc-ruby/grpc-ruby.js';
 
 /**
  * Register every builtin Ruby framework adapter. Called (once per process) from
  * register.ts's Gemfile gate. Idempotent on name — safe to call more than once.
- *
- * The fleet lands incrementally (web → data → async → protocol); the remaining
- * GraphQL/gRPC (protocol) adapters register here as each ships.
+ * Registration order = co-fire priority: web → data → async → protocol.
  */
 export function registerRubyFrameworkAdapters(): void {
   // web
@@ -33,4 +33,7 @@ export function registerRubyFrameworkAdapters(): void {
   registerFrameworkAdapter(activeRecordAdapter);
   // async
   registerFrameworkAdapter(sidekiqAdapter);
+  // protocol
+  registerFrameworkAdapter(graphqlRubyAdapter);
+  registerFrameworkAdapter(grpcRubyAdapter);
 }
