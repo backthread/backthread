@@ -20,6 +20,7 @@ import { registerFrameworkAdapter } from './registry.js';
 import { phoenixAdapter } from './phoenix/phoenix.js';
 import { otpAdapter } from './otp/otp.js';
 import { ectoAdapter } from './ecto/ecto.js';
+import { ashAdapter } from './ash/ash.js';
 import { obanAdapter } from './oban/oban.js';
 import { broadwayAdapter } from './broadway/broadway.js';
 import { absintheAdapter } from './absinthe/absinthe.js';
@@ -41,6 +42,7 @@ export function registerElixirFrameworkAdapters(): void {
   registerFrameworkAdapter(phoenixAdapter); // web
   registerFrameworkAdapter(otpAdapter); // runtime / supervision (spans web→data)
   registerFrameworkAdapter(ectoAdapter); // data
+  registerFrameworkAdapter(ashAdapter); // data
   registerFrameworkAdapter(obanAdapter); // async
   registerFrameworkAdapter(broadwayAdapter); // async
   registerFrameworkAdapter(absintheAdapter); // protocol
