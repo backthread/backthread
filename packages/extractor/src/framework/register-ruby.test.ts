@@ -16,6 +16,7 @@ import {
   registerBuiltinFrameworkAdapters,
   registerLanguageScopedFrameworkAdapters,
 } from './register.js';
+import { registerRubyFrameworkAdapters } from './register-ruby.js';
 
 async function repo(files: Record<string, string>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'bt-ruby-gate-'));
@@ -36,12 +37,30 @@ describe('registerLanguageScopedFrameworkAdapters (Ruby gate)', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('runs the Gemfile gate without throwing when a Ruby manifest is present', async () => {
-    // The fleet is empty in this slice (adapters land next), so this asserts the
-    // gate + dynamic import of register-ruby.ts are wired and safe; the registry
-    // effect is a no-op today, and grows as each adapter registers.
+  it('registers the Ruby fleet when a Ruby manifest is present', async () => {
+    clearFrameworkAdapters();
     const dir = await repo({ Gemfile: "gem 'rails'\n" });
-    await expect(registerLanguageScopedFrameworkAdapters(dir)).resolves.toBeUndefined();
+    await registerLanguageScopedFrameworkAdapters(dir);
+    const names = listFrameworkAdapters().map((a) => a.name);
+    expect(names).toContain('rails');
+    expect(names).toContain('activerecord');
+    expect(names).toContain('sidekiq');
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('registerRubyFrameworkAdapters (fleet order)', () => {
+  it('registers the full Ruby fleet in priority order (web → data → async → protocol)', () => {
+    clearFrameworkAdapters();
+    registerRubyFrameworkAdapters();
+    expect(listFrameworkAdapters().map((a) => a.name)).toEqual([
+      'rails',
+      'sinatra',
+      'hanami',
+      'activerecord',
+      'sidekiq',
+      'graphql-ruby',
+      'grpc-ruby',
+    ]);
   });
 });

@@ -1,5 +1,5 @@
 // @backthread/extractor — deterministic, install-free structural extraction for
-// TypeScript and Python codebases.
+// TypeScript, Python, Ruby, and Elixir codebases.
 //
 // Turns a working tree into a structural graph: modules (with kinds, god-node
 // flags, and path-derived subsystems), edges, communities, framework roles, and
