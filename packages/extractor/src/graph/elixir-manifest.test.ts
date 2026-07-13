@@ -1,10 +1,15 @@
 // Elixir dependency-manifest reading — regex-scanned, never evaluated.
 
 import { describe, it, expect, afterEach } from '../testkit.js';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { readMixDeps, parseMixExsDeps, parseMixLockDeps } from './elixir-manifest.js';
+import { dirname, join } from 'node:path';
+import {
+  readMixDeps,
+  readMixDepsDeep,
+  parseMixExsDeps,
+  parseMixLockDeps,
+} from './elixir-manifest.js';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -16,6 +21,19 @@ function repo(files: Record<string, string>): string {
   for (const [rel, content] of Object.entries(files)) writeFileSync(join(dir, rel), content);
   return dir;
 }
+// Like `repo`, but supports nested paths (`apps/web/mix.exs`) — mkdir -p first.
+function nestedRepo(files: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'bt-mix-'));
+  dirs.push(dir);
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = join(dir, rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+  }
+  return dir;
+}
+const mixExs = (...deps: string[]) =>
+  `defmodule X do\n  defp deps do\n    [${deps.map((d) => `{:${d}, "~> 1.0"}`).join(', ')}]\n  end\nend\n`;
 
 describe('parseMixExsDeps', () => {
   it('extracts the {:name, ...} dep tuples, ignoring bare atoms and keyword lists', () => {
@@ -91,5 +109,67 @@ end
     expect(deps.has('only_prod')).toBe(true);
     expect(deps.has('only_dev')).toBe(true);
     expect(deps.has('credo')).toBe(true);
+  });
+});
+
+describe('readMixDepsDeep', () => {
+  it('equals readMixDeps on a single-root repo (single-app behavior unchanged)', () => {
+    const dir = repo({
+      'mix.exs': mixExs('phoenix', 'oban'),
+      'mix.lock': '%{\n  "phoenix" => {:hex, :phoenix, "1.7.0", ...},\n  "postgrex" => {:hex, :postgrex, "0.17.0", ...},\n}\n',
+    });
+    expect(readMixDepsDeep(dir)).toEqual(readMixDeps(dir));
+    expect(readMixDepsDeep(dir)).toEqual(new Set(['phoenix', 'oban', 'postgrex']));
+  });
+
+  it('unions deps from an umbrella child (apps/web/mix.exs declaring phoenix)', () => {
+    // The umbrella ROOT declares no framework; the child app does — the shape a
+    // depth-1 shallow scan misses but a repo-wide union catches.
+    const dir = nestedRepo({
+      'mix.exs': mixExs(), // bare umbrella root (apps_path project, no framework dep)
+      'apps/web/mix.exs': mixExs('phoenix', 'phoenix_live_view'),
+      'apps/core/mix.exs': mixExs('ecto', 'ecto_sql'),
+    });
+    const deps = readMixDepsDeep(dir);
+    expect(deps.has('phoenix')).toBe(true);
+    expect(deps.has('phoenix_live_view')).toBe(true);
+    expect(deps.has('ecto')).toBe(true);
+    expect(deps.has('ecto_sql')).toBe(true);
+  });
+
+  it('finds a deeply-nested Elixir app in a polyglot monorepo (Firezone shape)', () => {
+    // Rust at the root, Phoenix under `elixir/apps/web/` — 3 levels deep, beyond the
+    // depth-1 shallow scan. The root has NO mix.exs at all.
+    const dir = nestedRepo({
+      'Cargo.toml': '[package]\nname = "firewall"\n',
+      'rust/src/main.rs': 'fn main() {}\n',
+      'elixir/mix.exs': mixExs(), // bare umbrella root
+      'elixir/apps/web/mix.exs': mixExs('phoenix'),
+      'elixir/apps/domain/mix.exs': mixExs('oban', 'oban_web'),
+    });
+    const deps = readMixDepsDeep(dir);
+    expect(deps.has('phoenix')).toBe(true);
+    expect(deps.has('oban')).toBe(true);
+    expect(deps.has('oban_web')).toBe(true);
+  });
+
+  it('skips _build and deps (vendored/generated mix.exs must not leak into the union)', () => {
+    const dir = nestedRepo({
+      'mix.exs': mixExs('phoenix'),
+      // A vendored dep + a build artifact each carry their OWN mix.exs declaring a
+      // dep the first-party app does not — these must be excluded.
+      'deps/some_lib/mix.exs': mixExs('vendored_only_dep'),
+      '_build/dev/lib/gen/mix.exs': mixExs('build_only_dep'),
+      'node_modules/pkg/mix.exs': mixExs('node_only_dep'),
+    });
+    const deps = readMixDepsDeep(dir);
+    expect(deps.has('phoenix')).toBe(true);
+    expect(deps.has('vendored_only_dep')).toBe(false);
+    expect(deps.has('build_only_dep')).toBe(false);
+    expect(deps.has('node_only_dep')).toBe(false);
+  });
+
+  it('returns an empty set (never throws) for a repo with no mix.exs anywhere', () => {
+    expect(readMixDepsDeep(repo({ 'README.md': '# hi\n' }))).toEqual(new Set());
   });
 });

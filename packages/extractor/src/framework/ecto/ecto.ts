@@ -59,7 +59,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../detect-util.js';
-import { readMixDeps } from '../../graph/elixir-manifest.js';
+import { readMixDeps, readMixDepsDeep } from '../../graph/elixir-manifest.js';
 import { parseElixirScope, type ParsedElixirFile } from '../elixir/analyze.js';
 import type {
   DetectMatch,
@@ -82,13 +82,17 @@ export interface EctoSignals {
   hasEctoSql: boolean; // ecto_sql — the SQL-backed variant (supporting bump)
 }
 
-/** Gather the signal set for a single root dir (reads mix manifests only). */
-export function gatherEctoSignals(baseDir: string): EctoSignals {
-  const deps = readMixDeps(baseDir);
+/** Decide the signal set from a dependency-name set (pure). */
+function ectoSignalsFromDeps(deps: Set<string>): EctoSignals {
   return {
     hasEcto: deps.has('ecto'),
     hasEctoSql: deps.has('ecto_sql'),
   };
+}
+
+/** Gather the signal set for a single root dir (reads mix manifests only). */
+export function gatherEctoSignals(baseDir: string): EctoSignals {
+  return ectoSignalsFromDeps(readMixDeps(baseDir));
 }
 
 // Non-source dirs the nested scan skips (cheap + can't hold a first-party manifest).
@@ -460,6 +464,14 @@ export const ectoAdapter: FrameworkAdapter = {
         const m = scoreEcto(gatherEctoSignals(join(base, sub)), sub);
         if (m) return m;
       }
+      // Repo-wide fallback (FIRES ONLY after root + shallow miss) — a deeply-nested
+      // Elixir umbrella in a polyglot monorepo (`elixir/apps/*/mix.exs`, the Firezone
+      // shape) that the depth-1 shallow scan can't see. Union every mix.exs's deps
+      // across the repo; if `ecto`/`ecto_sql` is declared anywhere, detect with
+      // rootPath '' (the hooks scan ALL in-scope Elixir files). One bounded walk;
+      // manifests only, never source content.
+      const deep = scoreEcto(ectoSignalsFromDeps(readMixDepsDeep(ctx.repoDir)), '');
+      if (deep) return deep;
     }
     return null;
   },

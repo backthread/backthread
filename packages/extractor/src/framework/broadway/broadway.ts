@@ -37,7 +37,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../detect-util.js';
-import { readMixDeps } from '../../graph/elixir-manifest.js';
+import { readMixDeps, readMixDepsDeep } from '../../graph/elixir-manifest.js';
 import { parseElixirScope, type ParsedElixirFile } from '../elixir/analyze.js';
 import { sourceLines } from '../../graph/elixir-scan.js';
 import type {
@@ -59,15 +59,19 @@ export interface BroadwaySignals {
   hasBroadwayTransport: boolean; // broadway_kafka / broadway_sqs / broadway_* transport
 }
 
-/** Gather the signal set for a single root dir (reads mix manifests only). */
-export function gatherBroadwaySignals(baseDir: string): BroadwaySignals {
-  const deps = readMixDeps(baseDir);
+/** Decide the signal set from a dependency-name set (pure). */
+function broadwaySignalsFromDeps(deps: Set<string>): BroadwaySignals {
   return {
     hasBroadway: deps.has('broadway'),
     // A `broadway_*` transport adapter is a strong secondary signal this really is a
     // Broadway deployment (vs. `broadway` pulled in transitively).
     hasBroadwayTransport: [...deps].some((d) => d !== 'broadway' && d.startsWith('broadway_')),
   };
+}
+
+/** Gather the signal set for a single root dir (reads mix manifests only). */
+export function gatherBroadwaySignals(baseDir: string): BroadwaySignals {
+  return broadwaySignalsFromDeps(readMixDeps(baseDir));
 }
 
 // Non-source dirs the nested scan skips (cheap + can't hold a first-party manifest).
@@ -292,6 +296,14 @@ export const broadwayAdapter: FrameworkAdapter = {
         const m = scoreBroadway(gatherBroadwaySignals(join(base, sub)), sub);
         if (m) return m;
       }
+      // Repo-wide fallback (FIRES ONLY after root + shallow miss) — a deeply-nested
+      // Elixir umbrella in a polyglot monorepo (`elixir/apps/*/mix.exs`, the Firezone
+      // shape) that the depth-1 shallow scan can't see. Union every mix.exs's deps
+      // across the repo; if `broadway` is declared anywhere, detect with rootPath ''
+      // (the hooks scan ALL in-scope Elixir files). One bounded walk; manifests only,
+      // never source content.
+      const deep = scoreBroadway(broadwaySignalsFromDeps(readMixDepsDeep(ctx.repoDir)), '');
+      if (deep) return deep;
     }
     return null;
   },

@@ -20,7 +20,7 @@
 // protocol adapter that co-fires on the same repo.
 
 import { registerFrameworkAdapter } from './registry.js';
-import { hasRubyManifest, hasMixManifest } from '../graph/language.js';
+import { hasRubyManifest, hasMixManifestDeep } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
 import { nestAdapter } from './nest/nest.js';
@@ -84,7 +84,13 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     const { registerRubyFrameworkAdapters } = await import('./register-ruby.js');
     registerRubyFrameworkAdapters();
   }
-  if (!elixirRegistered && hasMixManifest(repoDir)) {
+  // Nested-aware (hasMixManifestDeep, not root-only): a polyglot monorepo keeping its
+  // Phoenix app under a top-level `elixir/` dir (`elixir/mix.exs`, or an umbrella's
+  // `elixir/apps/web/mix.exs`) still loads the Elixir fleet. Root-Elixir repos
+  // short-circuit on the cheap root check; the bounded walk only runs when the root
+  // has no mix.exs. Zero cost when absent still holds — the adapter MODULES are
+  // imported only when this predicate is true.
+  if (!elixirRegistered && hasMixManifestDeep(repoDir)) {
     elixirRegistered = true;
     const { registerElixirFrameworkAdapters } = await import('./register-elixir.js');
     registerElixirFrameworkAdapters();

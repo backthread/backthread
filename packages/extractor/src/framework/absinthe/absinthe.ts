@@ -33,7 +33,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../detect-util.js';
-import { readMixDeps } from '../../graph/elixir-manifest.js';
+import { readMixDeps, readMixDepsDeep } from '../../graph/elixir-manifest.js';
 import { parseElixirScope, type ParsedElixirFile } from '../elixir/analyze.js';
 import type {
   DetectMatch,
@@ -53,13 +53,17 @@ export interface AbsintheSignals {
   hasAbsinthe: boolean; // absinthe (or absinthe_plug / absinthe_phoenix, which pull it in)
 }
 
-/** Gather the signal set for a single root dir (reads mix manifests only). */
-export function gatherAbsintheSignals(baseDir: string): AbsintheSignals {
-  const deps = readMixDeps(baseDir);
+/** Decide the signal set from a dependency-name set (pure). */
+function absintheSignalsFromDeps(deps: Set<string>): AbsintheSignals {
   return {
     hasAbsinthe:
       deps.has('absinthe') || deps.has('absinthe_plug') || deps.has('absinthe_phoenix'),
   };
+}
+
+/** Gather the signal set for a single root dir (reads mix manifests only). */
+export function gatherAbsintheSignals(baseDir: string): AbsintheSignals {
+  return absintheSignalsFromDeps(readMixDeps(baseDir));
 }
 
 // Non-source dirs the nested scan skips (cheap + can't hold a first-party manifest).
@@ -342,6 +346,14 @@ export const absintheAdapter: FrameworkAdapter = {
         const m = scoreAbsinthe(gatherAbsintheSignals(join(base, sub)), sub);
         if (m) return m;
       }
+      // Repo-wide fallback (FIRES ONLY after root + shallow miss) — a deeply-nested
+      // Elixir umbrella in a polyglot monorepo (`elixir/apps/*/mix.exs`, the Firezone
+      // shape) that the depth-1 shallow scan can't see. Union every mix.exs's deps
+      // across the repo; if `absinthe` (or absinthe_plug / absinthe_phoenix) is
+      // declared anywhere, detect with rootPath '' (the hooks scan ALL in-scope Elixir
+      // files). One bounded walk; manifests only, never source content.
+      const deep = scoreAbsinthe(absintheSignalsFromDeps(readMixDepsDeep(ctx.repoDir)), '');
+      if (deep) return deep;
     }
     return null;
   },
