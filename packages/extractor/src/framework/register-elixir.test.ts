@@ -13,6 +13,10 @@ import {
   registerBuiltinFrameworkAdapters,
   registerLanguageScopedFrameworkAdapters,
 } from './register.js';
+import { registerElixirFrameworkAdapters } from './register-elixir.js';
+
+// The full Elixir fleet, in registration = co-fire priority order.
+const ELIXIR_FLEET = ['phoenix', 'ecto', 'oban', 'broadway', 'absinthe', 'grpc-elixir'];
 
 async function repo(files: Record<string, string>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'bt-elixir-gate-'));
@@ -33,13 +37,21 @@ describe('registerLanguageScopedFrameworkAdapters (Elixir gate)', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('runs the mix.exs gate without throwing when an Elixir manifest is present', async () => {
-    // The gate now registers the Phoenix adapter (the fleet grows as each further
-    // adapter lands); this asserts the gate + dynamic import of register-elixir.ts
-    // are wired and safe. The concrete adapters registering are covered by their own
-    // suites (e.g. framework/phoenix/phoenix.test.ts).
+  it('registers the Elixir fleet when a mix.exs is present', async () => {
+    clearFrameworkAdapters();
+    registerBuiltinFrameworkAdapters();
     const dir = await repo({ 'mix.exs': 'defmodule X.MixProject do\nend\n' });
-    await expect(registerLanguageScopedFrameworkAdapters(dir)).resolves.toBeUndefined();
+    await registerLanguageScopedFrameworkAdapters(dir);
+    const names = listFrameworkAdapters().map((a) => a.name);
+    for (const adapter of ELIXIR_FLEET) expect(names).toContain(adapter);
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe('registerElixirFrameworkAdapters (fleet order)', () => {
+  it('registers the full Elixir fleet in priority order (web → data → async → protocol)', () => {
+    clearFrameworkAdapters();
+    registerElixirFrameworkAdapters();
+    expect(listFrameworkAdapters().map((a) => a.name)).toEqual(ELIXIR_FLEET);
   });
 });

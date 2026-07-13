@@ -103,6 +103,18 @@ describe('elixir-ast accessors (pure)', () => {
       { module: 'Oban.Worker', args: 'queue: :mailers, max_attempts: 3' },
     ]);
   });
+
+  it('useDirectives joins a multi-line option list (trailing comma / wrapped brackets)', () => {
+    expect(useDirectives('  use Ecto.Repo,\n    otp_app: :my_app,\n    adapter: Ecto.Adapters.Postgres\n')).toEqual([
+      { module: 'Ecto.Repo', args: 'otp_app: :my_app, adapter: Ecto.Adapters.Postgres' },
+    ]);
+    // an unclosed bracket also continues the join
+    expect(useDirectives('  use Broadway,\n    producer: [\n      module: {MyProducer, []}\n    ]\n')).toEqual([
+      { module: 'Broadway', args: 'producer: [ module: {MyProducer, []} ]' },
+    ]);
+    // a plain single-line use with no args is unchanged
+    expect(useDirectives('  use Ecto.Schema\n')).toEqual([{ module: 'Ecto.Schema', args: '' }]);
+  });
   it('moduleAttributes reads @name value', () => {
     expect(moduleAttributes('  @behaviour Oban.Worker\n')).toEqual([
       { name: 'behaviour', value: 'Oban.Worker' },
