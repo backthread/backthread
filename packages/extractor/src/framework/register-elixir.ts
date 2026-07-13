@@ -18,6 +18,11 @@
 
 import { registerFrameworkAdapter } from './registry.js';
 import { phoenixAdapter } from './phoenix/phoenix.js';
+import { ectoAdapter } from './ecto/ecto.js';
+import { obanAdapter } from './oban/oban.js';
+import { broadwayAdapter } from './broadway/broadway.js';
+import { absintheAdapter } from './absinthe/absinthe.js';
+import { grpcElixirAdapter } from './grpc-elixir/grpc-elixir.js';
 
 /**
  * Register every builtin Elixir framework adapter. Called (once per process) from
@@ -29,13 +34,14 @@ import { phoenixAdapter } from './phoenix/phoenix.js';
  * the Elixir fleet, a TS/Python repo did not" isolation probe).
  */
 export function registerElixirFrameworkAdapters(): void {
-  // web → data → async → protocol (each registerFrameworkAdapter(...) call is
-  // added as its adapter lands):
+  // web → data → async → protocol (registration order = co-fire priority, so a
+  // web framework's request-entry role/grouping wins over an additive data/async/
+  // protocol adapter on the same module).
   registerFrameworkAdapter(phoenixAdapter); // web
-  //   registerFrameworkAdapter(ectoAdapter);
-  //   registerFrameworkAdapter(obanAdapter);
-  //   registerFrameworkAdapter(broadwayAdapter);
-  //   registerFrameworkAdapter(absintheAdapter);
-  //   registerFrameworkAdapter(grpcElixirAdapter);
+  registerFrameworkAdapter(ectoAdapter); // data
+  registerFrameworkAdapter(obanAdapter); // async
+  registerFrameworkAdapter(broadwayAdapter); // async
+  registerFrameworkAdapter(absintheAdapter); // protocol
+  registerFrameworkAdapter(grpcElixirAdapter); // protocol
   console.log('  [elixir] framework fleet registered (mix.exs present)');
 }

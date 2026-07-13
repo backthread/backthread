@@ -40,7 +40,7 @@ export interface ElixirDef {
   name: string;
 }
 
-const USE_RE = /^\s*use\s+([A-Z][A-Za-z0-9_.]*)\s*(?:,\s*(.+?))?\s*$/;
+const USE_RE = /^\s*use\s+([A-Z][A-Za-z0-9_.]*)\b(.*)$/;
 const ATTR_RE = /^\s*@([a-z_][A-Za-z0-9_]*)\s+(.+?)\s*$/;
 const DEF_RE = /^\s*(defp?|defmacrop?)\s+([a-z_][A-Za-z0-9_]*[!?]?)/;
 const CALL_RE = /^\s*([a-z_][A-Za-z0-9_]*[!?]?)\s+(\S.*?)\s*$/;
@@ -97,12 +97,36 @@ export function moduleNames(text: string): string[] {
   return scanModuleDefs(text);
 }
 
-/** The `use` directives in a file, with their trailing args. */
+/** More opening than closing brackets/braces/parens → the expression continues. */
+function hasUnclosedBracket(s: string): boolean {
+  let depth = 0;
+  for (const ch of s) {
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+  }
+  return depth > 0;
+}
+
+/**
+ * The `use` directives in a file, with their trailing args. Handles the idiomatic
+ * MULTI-LINE option list (`use Ecto.Repo,\n  otp_app: :app` / a wrapped
+ * `producer: [ … ]`): when the option list clearly continues — a trailing comma or
+ * an unclosed bracket — following lines are joined before the args are read.
+ * Single-line directives are unchanged.
+ */
 export function useDirectives(text: string): ElixirUse[] {
+  const lines = sourceLines(text);
   const out: ElixirUse[] = [];
-  for (const line of sourceLines(text)) {
-    const m = line.match(USE_RE);
-    if (m) out.push({ module: m[1], args: (m[2] ?? '').trim() });
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(USE_RE);
+    if (!m) continue;
+    let rest = m[2].trim();
+    while (i + 1 < lines.length && (rest.endsWith(',') || hasUnclosedBracket(rest))) {
+      rest = `${rest} ${lines[i + 1].trim()}`.trim();
+      i++;
+    }
+    const args = rest.startsWith(',') ? rest.slice(1).trim() : rest;
+    out.push({ module: m[1], args });
   }
   return out;
 }
