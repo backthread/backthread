@@ -12,6 +12,9 @@
 import { sourceLines, scanModuleDefs, scanDirectives } from '../../graph/elixir-scan.js';
 
 export { scanModuleDefs, scanDirectives };
+// Re-exported so framework adapters share the extractor's alias/call scanners (the
+// call-edge resolver, v2) instead of re-deriving them.
+export { scanAliasScope, scanCallSites, aliasExpand } from '../../graph/elixir-scan.js';
 export type { ElixirDirective } from '../../graph/elixir-scan.js';
 
 /** A `use` directive: `use MyAppWeb, :controller` → { module: 'MyAppWeb', args: ':controller' }. */
