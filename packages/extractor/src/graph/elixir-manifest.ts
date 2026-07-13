@@ -15,7 +15,7 @@
 // (`if Mix.env() == :prod do [...] else [...] end`) — a regex captures the atoms in
 // BOTH branches, where an evaluator would run only one.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // A Mix dependency tuple head: `{:phoenix,` / `{:jason}` / `{ :ecto_sql ,`.
@@ -56,5 +56,61 @@ export function readMixDeps(baseDir: string): Set<string> {
   const deps = new Set<string>();
   for (const name of parseMixExsDeps(readOr(join(baseDir, 'mix.exs')))) deps.add(name);
   for (const name of parseMixLockDeps(readOr(join(baseDir, 'mix.lock')))) deps.add(name);
+  return deps;
+}
+
+// Build/vendor/tool dirs the repo-wide walk skips — mirrors findMixPackageDirs in
+// cluster/workspaces.ts (EXCLUDE_DIRS ∪ ELIXIR_EXCLUDE_DIRS, minus the dot-dirs the
+// dot-prefix skip already catches). None hold a first-party mix.exs; walking `deps/`
+// or `_build/` would misread vendored/generated packages as the repo's own.
+const DEEP_WALK_SKIP_DIRS = new Set<string>([
+  'node_modules', // vendored JS (a Phoenix `assets/` ships a JS toolchain)
+  'deps', // Mix's vendored dependency tree (the Elixir `node_modules`)
+  '_build', // Mix build artifacts
+  'cover', // coverage output
+  'dist',
+  'build',
+  'out',
+  'coverage',
+]);
+
+// Depth cap — a pathological/vendored tree must not turn detection into a full-disk
+// crawl. Real Elixir apps live 1-3 levels deep (an umbrella's `apps/<child>`, a
+// polyglot monorepo's `elixir/apps/<child>`); 8 is generous. Mirrors
+// MAX_WALK_DEPTH in cluster/workspaces.ts.
+const DEEP_WALK_MAX_DEPTH = 8;
+
+/**
+ * The UNION of DIRECT dependency names declared by EVERY mix.exs in the repo — the
+ * root, umbrella children (`apps/<child>/mix.exs`), AND a deeply-nested Elixir app
+ * in a polyglot monorepo (`elixir/apps/web/mix.exs`, the Firezone shape). A BOUNDED
+ * walk (skips build/vendor dirs + dot-dirs, depth-capped) finds every mix.exs dir and
+ * unions `readMixDeps` of each (its mix.exs `deps/0` tuples + the adjacent mix.lock
+ * keys). Membership is what the framework adapters gate on.
+ *
+ * On a single-mix.exs repo this equals `readMixDeps(repoDir)`, so standard single-app
+ * detection is unchanged — the adapters use this ONLY as a fallback, after a root +
+ * shallow scan already missed. NEVER throws (an unreadable dir skips its subtree).
+ */
+export function readMixDepsDeep(repoDir: string): Set<string> {
+  const deps = new Set<string>();
+  const walk = (dir: string, depth: number): void => {
+    if (depth > DEEP_WALK_MAX_DEPTH) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable dir → skip subtree, never throw
+    }
+    // This dir declares deps iff it holds a mix.exs (root + every umbrella/nested app).
+    if (entries.some((e) => e.isFile() && e.name === 'mix.exs')) {
+      for (const name of readMixDeps(dir)) deps.add(name);
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || DEEP_WALK_SKIP_DIRS.has(e.name)) continue;
+      walk(join(dir, e.name), depth + 1);
+    }
+  };
+  walk(repoDir, 0);
   return deps;
 }

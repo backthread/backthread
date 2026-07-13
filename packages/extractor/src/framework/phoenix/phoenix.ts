@@ -52,7 +52,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readdirSync } from 'node:fs';
 import { clampConfidence, resolveBase } from '../detect-util.js';
-import { readMixDeps } from '../../graph/elixir-manifest.js';
+import { readMixDeps, readMixDepsDeep } from '../../graph/elixir-manifest.js';
 import { parseElixirScope, type ParsedElixirFile } from '../elixir/analyze.js';
 import type {
   DetectMatch,
@@ -75,13 +75,17 @@ export interface PhoenixSignals {
   hasLiveView: boolean; // phoenix_live_view — raises confidence (supporting)
 }
 
-/** Gather the signal set for a single root dir (reads mix manifests only). */
-export function gatherPhoenixSignals(baseDir: string): PhoenixSignals {
-  const deps = readMixDeps(baseDir);
+/** Decide the signal set from a dependency-name set (pure). */
+function phoenixSignalsFromDeps(deps: Set<string>): PhoenixSignals {
   return {
     hasPhoenix: deps.has('phoenix'),
     hasLiveView: deps.has('phoenix_live_view'),
   };
+}
+
+/** Gather the signal set for a single root dir (reads mix manifests only). */
+export function gatherPhoenixSignals(baseDir: string): PhoenixSignals {
+  return phoenixSignalsFromDeps(readMixDeps(baseDir));
 }
 
 // Non-source dirs the nested scan skips (cheap + can't hold a first-party manifest).
@@ -649,6 +653,14 @@ export const phoenixAdapter: FrameworkAdapter = {
         const m = scorePhoenix(gatherPhoenixSignals(join(base, sub)), sub);
         if (m) return m;
       }
+      // Repo-wide fallback (FIRES ONLY after root + shallow miss) — a deeply-nested
+      // Elixir umbrella in a polyglot monorepo (`elixir/apps/web/mix.exs`, the
+      // Firezone shape) that the depth-1 shallow scan can't see. Union every mix.exs's
+      // deps across the repo; if `phoenix` is declared anywhere, detect with rootPath
+      // '' (the hooks scan ALL in-scope Elixir files, so '' covers an app under
+      // `elixir/apps/*`). One bounded walk; manifests only, never source content.
+      const deep = scorePhoenix(phoenixSignalsFromDeps(readMixDepsDeep(ctx.repoDir)), '');
+      if (deep) return deep;
     }
     return null;
   },

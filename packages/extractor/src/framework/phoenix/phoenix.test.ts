@@ -120,6 +120,45 @@ describe('phoenixAdapter.detect (fs fixtures)', () => {
     }
   });
 
+  it('detects a DEEPLY-nested umbrella app past the shallow scan (rootPath "")', async () => {
+    // The Firezone shape: no root mix.exs; a bare umbrella root under `elixir/`; the
+    // `phoenix` dep declared only in an umbrella child 3 levels deep. The depth-1
+    // shallow scan reaches `elixir/mix.exs` (which declares nothing) and misses the
+    // child — the repo-wide deep union catches it. rootPath is '' (the hooks scan all
+    // in-scope Elixir files, so '' covers the app under `elixir/apps/*`).
+    const nested = mkdtempSync(join(tmpdir(), 'bt-phx-umbrella-'));
+    write(nested, 'rust/src/main.rs', 'fn main() {}\n'); // polyglot root, no mix.exs
+    write(nested, 'elixir/mix.exs', mixExs([])); // bare umbrella root
+    write(nested, 'elixir/apps/web/mix.exs', mixExs(['phoenix', 'phoenix_live_view']));
+    write(nested, 'elixir/apps/domain/mix.exs', mixExs(['ecto_sql']));
+    try {
+      const m = await phoenixAdapter.detect({ repoDir: nested });
+      expect(m).not.toBeNull();
+      expect(m!.adapter).toBe('phoenix');
+      expect(m!.rootPath).toBe('');
+      expect(m!.confidence).toBeGreaterThan(0.85); // live_view bump rode along the union
+    } finally {
+      rmSync(nested, { recursive: true, force: true });
+    }
+  });
+
+  it('the deep fallback does NOT fire when a workspace packageDir scopes detection', async () => {
+    // packageDir = the per-package fan-out; the repo-wide walk must stay off (the
+    // fan-out already visits each package). A package with no phoenix → no match.
+    const nested = mkdtempSync(join(tmpdir(), 'bt-phx-pkgscope-'));
+    write(nested, 'elixir/apps/web/mix.exs', mixExs(['phoenix']));
+    write(nested, 'services/api/mix.exs', mixExs(['jason']));
+    try {
+      const m = await phoenixAdapter.detect({
+        repoDir: nested,
+        packageDir: join(nested, 'services/api'),
+      });
+      expect(m).toBeNull();
+    } finally {
+      rmSync(nested, { recursive: true, force: true });
+    }
+  });
+
   it('gatherPhoenixSignals reads deps from mix.exs', () => {
     const s = gatherPhoenixSignals(phoenixRepo);
     expect(s.hasPhoenix).toBe(true);

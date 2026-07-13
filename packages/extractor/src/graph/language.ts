@@ -8,7 +8,7 @@
 // the exclude sets) with real fs walks.
 
 import { readdirSync, existsSync } from 'node:fs';
-import { relative, resolve } from 'node:path';
+import { relative, resolve, join } from 'node:path';
 import type { NormalizedGraph } from './types.js';
 import {
   isSourceFilePath,
@@ -50,6 +50,45 @@ export function hasRubyManifest(repoDir: string): boolean {
  */
 export function hasMixManifest(repoDir: string): boolean {
   return ELIXIR_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
+}
+
+// Depth cap + skip set for the nested manifest probe — mirrors MAX_WALK_DEPTH /
+// findMixPackageDirs in cluster/workspaces.ts (real Elixir apps sit 1-3 levels deep;
+// 8 is generous). Skips build/vendor + dot dirs so a `deps/**/mix.exs` can't fake it.
+const MIX_PROBE_MAX_DEPTH = 8;
+const MIX_PROBE_SKIP = new Set<string>([...EXCLUDE_DIRS, ...ELIXIR_EXCLUDE_DIRS]);
+
+/**
+ * Does the repo declare an Elixir project ANYWHERE — the root OR a nested / umbrella
+ * app? A polyglot monorepo commonly keeps its Phoenix app under a top-level `elixir/`
+ * dir (`elixir/mix.exs`, or an umbrella's `elixir/apps/web/mix.exs`), which the
+ * root-only `hasMixManifest` misses. A BOUNDED walk (skips build/dep + dot dirs,
+ * depth-capped, EARLY-EXITS on the first mix.exs) finds it.
+ *
+ * The root-only `hasMixManifest` stays the graph-language selector (unchanged — a
+ * nested-Elixir repo already extracts via the dominant-source-count path); this
+ * broader probe gates the Elixir framework FLEET registration, so its adapters load +
+ * run for a repo whose Elixir lives below the root instead of silently no-op-ing.
+ * NEVER throws (an unreadable dir skips its subtree).
+ */
+export function hasMixManifestDeep(repoDir: string): boolean {
+  if (hasMixManifest(repoDir)) return true; // cheap root check short-circuits
+  const walk = (dir: string, depth: number): boolean => {
+    if (depth > MIX_PROBE_MAX_DEPTH) return false;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false; // unreadable dir → skip subtree, never throw
+    }
+    if (entries.some((e) => e.isFile() && e.name === 'mix.exs')) return true;
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || MIX_PROBE_SKIP.has(e.name)) continue;
+      if (walk(join(dir, e.name), depth + 1)) return true;
+    }
+    return false;
+  };
+  return walk(resolve(repoDir), 0);
 }
 
 /**

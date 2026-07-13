@@ -33,7 +33,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../detect-util.js';
-import { readMixDeps } from '../../graph/elixir-manifest.js';
+import { readMixDeps, readMixDepsDeep } from '../../graph/elixir-manifest.js';
 import { parseElixirScope, type ParsedElixirFile } from '../elixir/analyze.js';
 import type {
   DetectMatch,
@@ -133,6 +133,19 @@ export function gatherGrpcElixirSignals(baseDir: string): GrpcElixirSignals {
     hasGrpc: deps.has('grpc'),
     hasProtoFiles: artifacts.hasProto,
     hasGeneratedPb: artifacts.hasGeneratedPb,
+  };
+}
+
+/**
+ * The DEPS-ONLY signal set for the repo-wide fallback — keyed on the declared `grpc`
+ * dep across every mix.exs (the artifact heuristic is a root/nested-scan concern, not
+ * scanned repo-wide here). scoreGrpcElixir then matches iff `grpc` is declared.
+ */
+function grpcElixirSignalsFromDeps(deps: Set<string>): GrpcElixirSignals {
+  return {
+    hasGrpc: deps.has('grpc'),
+    hasProtoFiles: false,
+    hasGeneratedPb: false,
   };
 }
 
@@ -352,6 +365,14 @@ export const grpcElixirAdapter: FrameworkAdapter = {
         const m = scoreGrpcElixir(gatherGrpcElixirSignals(join(base, sub)), sub);
         if (m) return m;
       }
+      // Repo-wide fallback (FIRES ONLY after root + shallow miss) — a deeply-nested
+      // Elixir umbrella in a polyglot monorepo (`elixir/apps/*/mix.exs`, the Firezone
+      // shape) that the depth-1 shallow scan can't see. Union every mix.exs's deps
+      // across the repo; if `grpc` is declared anywhere, detect with rootPath '' (the
+      // hooks scan ALL in-scope Elixir files). One bounded walk; manifests only,
+      // never source content.
+      const deep = scoreGrpcElixir(grpcElixirSignalsFromDeps(readMixDepsDeep(ctx.repoDir)), '');
+      if (deep) return deep;
     }
     return null;
   },

@@ -11,6 +11,7 @@ import {
   graphLanguage,
   hasRubyManifest,
   hasMixManifest,
+  hasMixManifestDeep,
 } from './language.js';
 import type { NormalizedGraph } from './types.js';
 
@@ -279,5 +280,33 @@ describe('hasMixManifest', () => {
     expect(hasMixManifest(await repo({ 'mix.lock': '%{}\n' }))).toBe(true);
     expect(hasMixManifest(await repo({ 'package.json': '{}' }))).toBe(false);
     expect(hasMixManifest(await repo({ Gemfile: "gem 'rails'\n" }))).toBe(false);
+  });
+});
+
+describe('hasMixManifestDeep', () => {
+  it('matches hasMixManifest at the root (cheap short-circuit)', async () => {
+    expect(hasMixManifestDeep(await repo({ 'mix.exs': 'defmodule X do\nend\n' }))).toBe(true);
+    expect(hasMixManifestDeep(await repo({ 'mix.lock': '%{}\n' }))).toBe(true);
+  });
+
+  it('finds a nested/umbrella Elixir app the root-only check misses (Firezone shape)', async () => {
+    // Rust at the root, Phoenix under `elixir/apps/web/` — no root mix.exs.
+    const dir = await repo({
+      'Cargo.toml': '[package]\nname = "fw"\n',
+      'elixir/mix.exs': 'defmodule Umbrella do\nend\n',
+      'elixir/apps/web/mix.exs': 'defmodule Web do\nend\n',
+    });
+    expect(hasMixManifest(dir)).toBe(false); // root-only selector still says no
+    expect(hasMixManifestDeep(dir)).toBe(true); // the fleet gate says yes
+  });
+
+  it('ignores a vendored/build mix.exs and returns false for a non-Elixir repo', async () => {
+    const dir = await repo({
+      'package.json': '{}',
+      'deps/some_lib/mix.exs': 'defmodule Vendored do\nend\n',
+      '_build/dev/lib/gen/mix.exs': 'defmodule Built do\nend\n',
+    });
+    expect(hasMixManifestDeep(dir)).toBe(false);
+    expect(hasMixManifestDeep(await repo({ 'README.md': '# hi\n' }))).toBe(false);
   });
 });

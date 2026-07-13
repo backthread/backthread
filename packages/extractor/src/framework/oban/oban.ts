@@ -36,7 +36,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../detect-util.js';
-import { readMixDeps } from '../../graph/elixir-manifest.js';
+import { readMixDeps, readMixDepsDeep } from '../../graph/elixir-manifest.js';
 import { parseElixirScope, type ParsedElixirFile } from '../elixir/analyze.js';
 import { sourceLines } from '../../graph/elixir-scan.js';
 import type {
@@ -58,15 +58,19 @@ export interface ObanSignals {
   hasObanExtension: boolean; // oban_web / oban_pro / oban_* — a supporting signal
 }
 
-/** Gather the signal set for a single root dir (reads mix manifests only). */
-export function gatherObanSignals(baseDir: string): ObanSignals {
-  const deps = readMixDeps(baseDir);
+/** Decide the signal set from a dependency-name set (pure). */
+function obanSignalsFromDeps(deps: Set<string>): ObanSignals {
   return {
     hasOban: deps.has('oban'),
     // An `oban_*` companion (Web dashboard / Pro) is a strong secondary signal this
     // really is an Oban deployment (vs. `oban` pulled in transitively).
     hasObanExtension: [...deps].some((d) => d !== 'oban' && d.startsWith('oban_')),
   };
+}
+
+/** Gather the signal set for a single root dir (reads mix manifests only). */
+export function gatherObanSignals(baseDir: string): ObanSignals {
+  return obanSignalsFromDeps(readMixDeps(baseDir));
 }
 
 // Non-source dirs the nested scan skips (cheap + can't hold a first-party manifest).
@@ -317,6 +321,14 @@ export const obanAdapter: FrameworkAdapter = {
         const m = scoreOban(gatherObanSignals(join(base, sub)), sub);
         if (m) return m;
       }
+      // Repo-wide fallback (FIRES ONLY after root + shallow miss) — a deeply-nested
+      // Elixir umbrella in a polyglot monorepo (`elixir/apps/*/mix.exs`, the Firezone
+      // shape) that the depth-1 shallow scan can't see. Union every mix.exs's deps
+      // across the repo; if `oban` is declared anywhere, detect with rootPath '' (the
+      // hooks scan ALL in-scope Elixir files). One bounded walk; manifests only,
+      // never source content.
+      const deep = scoreOban(obanSignalsFromDeps(readMixDepsDeep(ctx.repoDir)), '');
+      if (deep) return deep;
     }
     return null;
   },
