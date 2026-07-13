@@ -12,6 +12,8 @@
 
 import { registerFrameworkAdapter } from './registry.js';
 import { railsAdapter } from './rails/rails.js';
+import { sinatraAdapter } from './sinatra/sinatra.js';
+import { hanamiAdapter } from './hanami/hanami.js';
 import { activeRecordAdapter } from './activerecord/activerecord.js';
 import { sidekiqAdapter } from './sidekiq/sidekiq.js';
 
@@ -25,6 +27,8 @@ import { sidekiqAdapter } from './sidekiq/sidekiq.js';
 export function registerRubyFrameworkAdapters(): void {
   // web
   registerFrameworkAdapter(railsAdapter);
+  registerFrameworkAdapter(sinatraAdapter);
+  registerFrameworkAdapter(hanamiAdapter);
   // data
   registerFrameworkAdapter(activeRecordAdapter);
   // async
