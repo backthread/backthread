@@ -10,21 +10,28 @@
 //
 // Registration order = co-fire priority (web → data → async → protocol), mirroring
 // the Python fleet's ordering in register.ts.
+//
+// This module is itself only ever DYNAMICALLY imported (from register.ts's mix.exs
+// gate), so its static imports of the Elixir adapters + their scanner load ONLY for
+// an Elixir repo — which is what keeps the "zero cost when absent" promise. It stays
+// SYNCHRONOUS (register.ts calls it without await, before detection).
+
+import { registerFrameworkAdapter } from './registry.js';
+import { phoenixAdapter } from './phoenix/phoenix.js';
 
 /**
  * Register every builtin Elixir framework adapter. Called (once per process) from
  * register.ts's mix.exs gate. Idempotent on name — safe to call more than once.
  *
- * The fleet lands incrementally: the Phoenix (web), Ecto (data), Oban/Broadway
- * (async) and Absinthe/gRPC (protocol) adapters register here as each ships. Until
- * then this is a no-op — the seam is wired and the isolation gate proven, with no
- * adapters to run yet. The log line makes the gate firing observable (the "an
- * Elixir repo loaded the Elixir fleet, a TS/Python repo did not" isolation probe).
+ * The fleet lands incrementally: Phoenix (web) is first; the Ecto (data),
+ * Oban/Broadway (async) and Absinthe/gRPC (protocol) adapters register here as each
+ * ships. The log line makes the gate firing observable (the "an Elixir repo loaded
+ * the Elixir fleet, a TS/Python repo did not" isolation probe).
  */
 export function registerElixirFrameworkAdapters(): void {
   // web → data → async → protocol (each registerFrameworkAdapter(...) call is
   // added as its adapter lands):
-  //   registerFrameworkAdapter(phoenixAdapter);
+  registerFrameworkAdapter(phoenixAdapter); // web
   //   registerFrameworkAdapter(ectoAdapter);
   //   registerFrameworkAdapter(obanAdapter);
   //   registerFrameworkAdapter(broadwayAdapter);
