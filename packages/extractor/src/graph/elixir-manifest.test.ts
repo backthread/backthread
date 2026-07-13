@@ -9,6 +9,8 @@ import {
   readMixDepsDeep,
   parseMixExsDeps,
   parseMixLockDeps,
+  mixDeclaresApplicationMod,
+  mixDeclaresApplicationModDeep,
 } from './elixir-manifest.js';
 
 const dirs: string[] = [];
@@ -171,5 +173,31 @@ describe('readMixDepsDeep', () => {
 
   it('returns an empty set (never throws) for a repo with no mix.exs anywhere', () => {
     expect(readMixDepsDeep(repo({ 'README.md': '# hi\n' }))).toEqual(new Set());
+  });
+});
+
+describe('mixDeclaresApplicationMod (OTP app callback)', () => {
+  const appMix = 'defmodule X do\n  def application do\n    [mod: {MyApp.Application, []}]\n  end\nend\n';
+  const libMix = 'defmodule X do\n  defp deps do\n    [{:jason, "~> 1.0"}]\n  end\nend\n';
+
+  it('is true when the mix.exs declares a mod: application callback', () => {
+    expect(mixDeclaresApplicationMod(repo({ 'mix.exs': appMix }))).toBe(true);
+  });
+
+  it('is false for a pure library (no mod: callback) or a missing mix.exs', () => {
+    expect(mixDeclaresApplicationMod(repo({ 'mix.exs': libMix }))).toBe(false);
+    expect(mixDeclaresApplicationMod(repo({ 'README.md': '# hi\n' }))).toBe(false);
+  });
+
+  it('deep-finds a mod: callback in a nested app', () => {
+    const dir = nestedRepo({ 'package.json': '{"name":"web"}', 'backend/mix.exs': appMix });
+    expect(mixDeclaresApplicationModDeep(dir)).toBe(true);
+  });
+
+  it('ignores a callback that lives only under a vendored/build dir, and a callback-less repo', () => {
+    // The ONLY mod: callback is under deps/ (a vendored dep) → must be skipped → false.
+    expect(mixDeclaresApplicationModDeep(nestedRepo({ 'deps/vendored/mix.exs': appMix }))).toBe(false);
+    // A repo whose only first-party mix.exs is a library → false.
+    expect(mixDeclaresApplicationModDeep(nestedRepo({ 'apps/lib/mix.exs': libMix }))).toBe(false);
   });
 });

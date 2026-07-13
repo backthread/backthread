@@ -18,6 +18,7 @@
 
 import { registerFrameworkAdapter } from './registry.js';
 import { phoenixAdapter } from './phoenix/phoenix.js';
+import { otpAdapter } from './otp/otp.js';
 import { ectoAdapter } from './ecto/ecto.js';
 import { obanAdapter } from './oban/oban.js';
 import { broadwayAdapter } from './broadway/broadway.js';
@@ -38,6 +39,7 @@ export function registerElixirFrameworkAdapters(): void {
   // web framework's request-entry role/grouping wins over an additive data/async/
   // protocol adapter on the same module).
   registerFrameworkAdapter(phoenixAdapter); // web
+  registerFrameworkAdapter(otpAdapter); // runtime / supervision (spans web→data)
   registerFrameworkAdapter(ectoAdapter); // data
   registerFrameworkAdapter(obanAdapter); // async
   registerFrameworkAdapter(broadwayAdapter); // async
