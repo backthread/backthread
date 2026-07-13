@@ -294,12 +294,26 @@ describe('phoenixAdapter analysis (groupingPrior / syntheticEdges / roleTags)', 
     expect(tmpl?.kind).toBe('calls');
   });
 
-  it('is deterministic across two runs (stable ids + ordering)', async () => {
-    const g2 = (await phoenixAdapter.groupingPrior!(ctx)).groups;
-    const e2 = await phoenixAdapter.syntheticEdges!(ctx);
-    const r2 = await phoenixAdapter.roleTags!(ctx);
+  it('is deterministic across a genuinely fresh re-parse (stable ids, ordering + values)', async () => {
+    // A NEW context object → the WeakMap analysis cache MISSES → analyzePhoenix
+    // re-reads + re-parses the fixture from disk. (Reusing `ctx` would short-circuit
+    // on the cache and compare identical references — not a real determinism check.)
+    const ctx2: FrameworkContext = {
+      repoDir: dir,
+      rootPath: '',
+      match: { adapter: 'phoenix', confidence: 1, rootPath: '' },
+      graph,
+      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
+    };
+    const g2 = (await phoenixAdapter.groupingPrior!(ctx2)).groups;
+    const e2 = await phoenixAdapter.syntheticEdges!(ctx2);
+    const r2 = await phoenixAdapter.roleTags!(ctx2);
+    // Full-VALUE equality (ids + labels + fileIds; edge endpoints + kind + metadata;
+    // role tags), not just key sets — determinism is the snapshot-stability invariant.
     expect(g2).toEqual(groups);
-    expect(e2.map(edgeKey)).toEqual(edges.map(edgeKey));
-    expect([...r2.keys()].sort()).toEqual([...roles.keys()].sort());
+    expect(e2).toEqual(edges);
+    const entries = (m: Map<string, RoleTag>) =>
+      [...m.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    expect(entries(r2)).toEqual(entries(roles));
   });
 });

@@ -34,9 +34,10 @@ describe('registerLanguageScopedFrameworkAdapters (Elixir gate)', () => {
   });
 
   it('runs the mix.exs gate without throwing when an Elixir manifest is present', async () => {
-    // The fleet is empty in this slice (adapters land next), so this asserts the
-    // gate + dynamic import of register-elixir.ts are wired and safe; the registry
-    // effect is a no-op today, and grows as each adapter registers.
+    // The gate now registers the Phoenix adapter (the fleet grows as each further
+    // adapter lands); this asserts the gate + dynamic import of register-elixir.ts
+    // are wired and safe. The concrete adapters registering are covered by their own
+    // suites (e.g. framework/phoenix/phoenix.test.ts).
     const dir = await repo({ 'mix.exs': 'defmodule X.MixProject do\nend\n' });
     await expect(registerLanguageScopedFrameworkAdapters(dir)).resolves.toBeUndefined();
     await rm(dir, { recursive: true, force: true });

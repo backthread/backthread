@@ -278,7 +278,9 @@ function isTemplateFile(fileId: string): boolean {
 // The candidate owning module(s) for a template file, ordered by likelihood. Two
 // conventions: the legacy `<web>/templates/<resource>/<file>` (Phoenix.View →
 // `<Web>.<Resource>View`) and the modern colocated `<web>/…/<resource>_html/<file>`
-// (`<Web>.<Resource>HTML`). Deterministic + registry-resolved; unresolved → dropped.
+// (`<Web>.<Resource>HTML`). A template is owned by a VIEW/HTML module, NEVER a
+// Controller — so Controller is deliberately excluded (no controller→template false
+// edge). Deterministic + registry-resolved; unresolved → dropped.
 function templateOwnerCandidates(fileId: string): string[] {
   const parts = fileId.split('/');
   const webIdx = parts.findIndex((p) => p.endsWith('_web'));
@@ -289,13 +291,13 @@ function templateOwnerCandidates(fileId: string): string[] {
   const tIdx = parts.indexOf('templates', webIdx);
   if (tIdx >= 0 && tIdx + 1 < parts.length - 1) {
     const r = camelize(parts[tIdx + 1]);
-    out.push(`${webns}.${r}View`, `${webns}.${r}HTML`, `${webns}.${r}Controller`);
+    out.push(`${webns}.${r}View`, `${webns}.${r}HTML`);
   }
   // Modern: a `<resource>_html/` dir holding the colocated template (`PageHTML`).
   const htmlIdx = parts.findIndex((p, i) => i > webIdx && i < parts.length - 1 && p.endsWith('_html'));
   if (htmlIdx >= 0) {
     const r = camelize(parts[htmlIdx].slice(0, -'_html'.length));
-    out.push(`${webns}.${r}HTML`, `${webns}.${r}View`, `${webns}.${r}Controller`);
+    out.push(`${webns}.${r}HTML`, `${webns}.${r}View`);
   }
   return out;
 }
@@ -335,7 +337,10 @@ interface ContextSeed {
  * (`extra/lib/<app>/billing/` next to `lib/<app>/billing/`) MERGES into one
  * "Billing" subsystem rather than splitting into two suffixed duplicates.
  */
-function buildContextGroups(exFiles: readonly string[]): FrameworkGroup[] {
+function buildContextGroups(
+  exFiles: readonly string[],
+  mixTaskFiles: ReadonlySet<string>,
+): FrameworkGroup[] {
   const exFileSet = new Set(exFiles);
 
   // Per lib-root: collect the top segments, then decide the app namespaces.
@@ -353,8 +358,10 @@ function buildContextGroups(exFiles: readonly string[]): FrameworkGroup[] {
       // Precise: the app root is the `_web` sibling's prefix.
       for (const w of webSegs) apps.add(w.slice(0, -'_web'.length));
     } else {
-      // Fallback (headless / API-only Phoenix): every non-web top dir is an app.
-      for (const t of tops) if (!t.endsWith('_web')) apps.add(t);
+      // Fallback (headless / API-only Phoenix): every non-web top dir is an app —
+      // EXCEPT `mix` (Elixir's reserved build-tool namespace, `lib/mix/tasks/…`),
+      // which is never a domain app / context.
+      for (const t of tops) if (!t.endsWith('_web') && t !== 'mix') apps.add(t);
     }
     appsByRoot.set(root, apps);
   }
@@ -363,6 +370,7 @@ function buildContextGroups(exFiles: readonly string[]): FrameworkGroup[] {
   const seedByKey = new Map<string, ContextSeed>();
   const filesByKey = new Map<string, string[]>();
   for (const id of exFiles) {
+    if (mixTaskFiles.has(id)) continue; // a `Mix.Tasks.*` module is build tooling, not a domain
     const lp = libParts(id);
     if (!lp || lp.after.length < 3) continue; // need <app>/<context>/<file…>
     const [app, context] = lp.after;
@@ -514,8 +522,13 @@ function analyzePhoenix(ctx: FrameworkContext): PhoenixAnalysis {
     }
   }
 
-  // Pass 2 — context grouping + the 'context' service role.
-  const groups = buildContextGroups(scope.exFiles);
+  // Pass 2 — context grouping + the 'context' service role. Mix tasks
+  // (`defmodule Mix.Tasks.*`) are build tooling, never a domain context.
+  const mixTaskFiles = new Set<string>();
+  for (const [id, parsed] of scope.parsed) {
+    if (parsed.modules.some((m) => m === 'Mix.Tasks' || m.startsWith('Mix.Tasks.'))) mixTaskFiles.add(id);
+  }
+  const groups = buildContextGroups(scope.exFiles, mixTaskFiles);
   const contextFiles = new Set<string>();
   for (const g of groups) for (const f of g.fileIds) contextFiles.add(f);
   for (const id of contextFiles) {
