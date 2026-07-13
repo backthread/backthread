@@ -74,6 +74,23 @@ describe('activerecord syntheticEdges (associations)', () => {
   });
 });
 
+describe('activerecord syntheticEdges (real inflections)', () => {
+  it('singularizes irregular association names to the right model (people → Person)', async () => {
+    const edges = await activeRecordAdapter.syntheticEdges!(
+      await repo({
+        Gemfile: "gem 'rails'\n",
+        'app/models/application_record.rb': 'class ApplicationRecord < ActiveRecord::Base\nend\n',
+        'app/models/group.rb': 'class Group < ApplicationRecord\n  has_many :people\nend\n',
+        'app/models/person.rb': 'class Person < ApplicationRecord\n  belongs_to :group\nend\n',
+      }),
+    );
+    const pairs = edges.map((e) => `${e.source}->${e.target}`);
+    // `has_many :people` → Person (irregular), not the naive `People`
+    expect(pairs).toContain('app/models/group.rb->app/models/person.rb');
+    expect(pairs).toContain('app/models/person.rb->app/models/group.rb');
+  });
+});
+
 describe('activerecord groupingPrior', () => {
   it('groups the models dir into a Data Model subsystem', async () => {
     const prior = await activeRecordAdapter.groupingPrior!(await repo(MODELS));

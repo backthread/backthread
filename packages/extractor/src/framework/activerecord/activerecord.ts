@@ -27,6 +27,7 @@ import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../detect-util.js';
 import { readRubyDeps } from '../../graph/ruby-manifest.js';
 import { camelize } from '../../graph/ruby-zeitwerk.js';
+import { singularize, type Inflections } from '../../graph/ruby-inflect.js';
 import { parseRubyScope, type RubyScope } from '../ruby/analyze.js';
 import {
   keywordArg,
@@ -105,24 +106,20 @@ function isModel(cls: RubyClass): boolean {
   return cls.bodyCalls.some((c) => AR_MARKERS.has(c.name));
 }
 
-function singularize(s: string): string {
-  if (s.endsWith('ies')) return `${s.slice(0, -3)}y`;
-  if (s.endsWith('sses') || s.endsWith('ses') || s.endsWith('xes') || s.endsWith('ches') || s.endsWith('shes')) {
-    return s.slice(0, -2);
-  }
-  if (s.endsWith('s') && !s.endsWith('ss')) return s.slice(0, -1);
-  return s;
-}
-
 /** The target model class name of an association, or undefined. `class_name:`
- *  wins; else the symbol is camelized (singularized for the plural associations). */
-function associationTarget(cls: RubyClass, call: RubyClass['bodyCalls'][number]): string | undefined {
+ *  wins; else the symbol is camelized (real-singularized for the plural
+ *  associations — `has_many :people` → Person, `has_many :statuses` → Status). */
+function associationTarget(
+  cls: RubyClass,
+  call: RubyClass['bodyCalls'][number],
+  infl: Inflections,
+): string | undefined {
   const override = stringValue(keywordArg(call, 'class_name'));
   if (override) return override;
   const sym = symbolValue(positionalArgs(call)[0]) ?? stringValue(positionalArgs(call)[0]);
   if (!sym) return undefined;
   const plural = call.name === 'has_many' || call.name === 'has_and_belongs_to_many';
-  return camelize(plural ? singularize(sym) : sym);
+  return camelize(plural ? singularize(sym, infl) : sym, infl);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +195,7 @@ async function analyzeActiveRecord(ctx: FrameworkContext): Promise<ActiveRecordA
     for (const m of models) {
       for (const call of m.bodyCalls) {
         if (!ASSOCIATION_CALLS.has(call.name)) continue;
-        const target = associationTarget(m, call);
+        const target = associationTarget(m, call, scope.inflections);
         if (!target) continue;
         const to = scope.resolve(target, m.nesting) ?? modelClassToFile.get(target);
         if (to && to !== fileId) {

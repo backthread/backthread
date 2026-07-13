@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildConstantIndex, resolveConstant } from '../../graph/ruby-zeitwerk.js';
+import { readInflections, type Inflections } from '../../graph/ruby-inflect.js';
 import {
   collectCalls,
   collectClasses,
@@ -59,6 +60,9 @@ export interface RubyScope {
   constIndex: ReadonlyMap<string, string>;
   /** Inferred autoload roots. */
   roots: readonly string[];
+  /** The repo's resolved inflection tables (declared acronyms/irregulars +
+   *  built-in defaults) — the adapters pluralize/singularize/camelize with these. */
+  inflections: Inflections;
   /** fileId -> parsed AST + collected classes/calls (unparseable files omitted). */
   parsed: Map<string, ParsedRubyFile>;
   /** Resolve a constant reference to its defining file, honoring lexical nesting. */
@@ -78,7 +82,10 @@ export async function parseRubyScope(ctx: FrameworkContext): Promise<RubyScope> 
     .filter((f) => isRubyFile(f.language) && inScope(f.id, rootPath))
     .map((f) => f.id);
   const internalIds = new Set(rbFiles);
-  const { index, roots } = buildConstantIndex(rbFiles);
+  // Read the repo's declared inflections ONCE so the constant index — and every
+  // adapter that reuses this scope — camelizes acronyms + pluralizes the Rails way.
+  const inflections = readInflections(repoDir, rbFiles);
+  const { index, roots } = buildConstantIndex(rbFiles, inflections);
 
   const parsed = new Map<string, ParsedRubyFile>();
   const parse = await getRubyParser();
@@ -99,6 +106,7 @@ export async function parseRubyScope(ctx: FrameworkContext): Promise<RubyScope> 
     internalIds,
     constIndex: index,
     roots,
+    inflections,
     parsed,
     resolve: (ref, nesting = []) => resolveConstant(ref, nesting, index),
   };

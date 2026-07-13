@@ -97,4 +97,24 @@ describe('rails syntheticEdges (route spine)', () => {
     expect(pairs).toContain('config/routes.rb->app/controllers/admin/users_controller.rb');
     expect(edges.every((e) => e.kind === 'calls')).toBe(true);
   });
+
+  it('resolves inflection-heavy routes: declared acronym + real pluralize + module: kwarg', async () => {
+    const ctx = await railsRepo({
+      Gemfile: "gem 'rails'\n",
+      'config/initializers/inflections.rb':
+        "ActiveSupport::Inflector.inflections(:en) do |inflect|\n  inflect.acronym 'ActivityPub'\nend\n",
+      // a singular `resource :inbox` maps to the PLURAL InboxesController (inbox → inboxes),
+      // and `module: :activitypub` + the declared acronym namespace it as ActivityPub::…
+      'app/controllers/activitypub/inboxes_controller.rb':
+        'module ActivityPub\n  class InboxesController < ApplicationController\n  end\nend\n',
+      // `controller:` override is used verbatim — never re-pluralized to `SettingsController`
+      'app/controllers/setting_controller.rb': 'class SettingController < ApplicationController\nend\n',
+      'config/routes.rb':
+        "Rails.application.routes.draw do\n  resource :inbox, only: [:create], module: :activitypub\n  resource :setting, only: [:show], controller: :setting\nend\n",
+    });
+    const edges = await railsAdapter.syntheticEdges!(ctx);
+    const pairs = edges.map((e) => `${e.source}->${e.target}`);
+    expect(pairs).toContain('config/routes.rb->app/controllers/activitypub/inboxes_controller.rb');
+    expect(pairs).toContain('config/routes.rb->app/controllers/setting_controller.rb');
+  });
 });

@@ -13,16 +13,17 @@
 // Autoload roots (Rails + gem conventions): each app/<subdir> (except view/asset
 // dirs), each app/<subdir>/concerns, and lib/. Deterministic + pure (no fs, no
 // parser) — every function here is a total function of its inputs.
+//
+// camelize is now ACRONYM-aware (it lives in ruby-inflect, threaded here as an
+// optional Inflections): with the repo's declared `inflect.acronym` rules,
+// `activitypub/inboxes_controller.rb` maps to `ActivityPub::InboxesController`
+// instead of `Activitypub::…` — recovering the constant a code-reader would.
+// Absent an Inflections (the default), it degrades to the plain camelizer.
 
-/** camelize one underscore_cased path segment: `users_controller` -> `UsersController`.
- *  Zeitwerk's DEFAULT inflector does exactly this (no acronym table); an acronym
- *  like `api` -> `Api` (not `API`) is an accepted miss until a repo needs it. */
-export function camelize(segment: string): string {
-  return segment
-    .split('_')
-    .map((w) => (w.length ? w.charAt(0).toUpperCase() + w.slice(1) : w))
-    .join('');
-}
+import { camelize, EMPTY_INFLECTIONS, type Inflections } from './ruby-inflect.js';
+
+export { camelize } from './ruby-inflect.js';
+export type { Inflections } from './ruby-inflect.js';
 
 // app/<x> subdirs that Rails does NOT autoload as Ruby (assets/views/JS), so a
 // file under them never defines an autoloadable constant.
@@ -55,14 +56,18 @@ export function computeAutoloadRoots(fileIds: Iterable<string>): string[] {
  * no autoload root (config/, db/migrate/, spec/, a bare Rakefile — those reference
  * constants but don't define autoloadable ones). `roots` MUST be longest-first.
  */
-export function fileToConstant(fileId: string, roots: readonly string[]): string | undefined {
+export function fileToConstant(
+  fileId: string,
+  roots: readonly string[],
+  infl: Inflections = EMPTY_INFLECTIONS,
+): string | undefined {
   for (const root of roots) {
     const prefix = `${root}/`;
     if (!fileId.startsWith(prefix)) continue;
     const rel = fileId.slice(prefix.length).replace(/\.rb$/, '');
     const segs = rel.split('/').filter(Boolean);
     if (!segs.length) return undefined;
-    return segs.map(camelize).join('::');
+    return segs.map((s) => camelize(s, infl)).join('::');
   }
   return undefined;
 }
@@ -70,14 +75,17 @@ export function fileToConstant(fileId: string, roots: readonly string[]): string
 /** The constant-name -> file-id index for a file set, plus the autoload roots it
  *  was built from. Deterministic: files are visited in sorted order, so on a
  *  (rare) constant collision the smallest file id wins. */
-export function buildConstantIndex(fileIds: readonly string[]): {
+export function buildConstantIndex(
+  fileIds: readonly string[],
+  infl: Inflections = EMPTY_INFLECTIONS,
+): {
   index: Map<string, string>;
   roots: string[];
 } {
   const roots = computeAutoloadRoots(fileIds);
   const index = new Map<string, string>();
   for (const id of [...fileIds].sort()) {
-    const c = fileToConstant(id, roots);
+    const c = fileToConstant(id, roots, infl);
     if (c && !index.has(c)) index.set(c, id);
   }
   return { index, roots };
