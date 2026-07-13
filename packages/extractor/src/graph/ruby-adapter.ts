@@ -37,6 +37,7 @@ import type { GraphExtractor, NormalizedGraph } from './types.js';
 import { graphFromState, type FileRecord } from './file-graph.js';
 import { listSourceFiles } from './language.js';
 import { buildConstantIndex, joinRelative, resolveConstant } from './ruby-zeitwerk.js';
+import { readInflections } from './ruby-inflect.js';
 import { RUBY_STDLIB } from './ruby-stdlib.js';
 
 // The Prism WASM parser is loaded once per process and reused for every file +
@@ -165,7 +166,10 @@ export class RubyExtractor implements GraphExtractor {
     if (fileIds.length === 0) return graphFromState(root, { headSha: '', files: {} });
 
     const fileset = new Set(fileIds);
-    const { index: constIndex, roots } = buildConstantIndex(fileIds);
+    // Acronym-aware constant index — with the repo's `inflect.acronym` rules a
+    // referenced `ActivityPub::TagManager` resolves to activitypub/tag_manager.rb.
+    const inflections = readInflections(root, fileIds);
+    const { index: constIndex, roots } = buildConstantIndex(fileIds, inflections);
     const parse = await getPrism();
 
     const files: Record<string, FileRecord> = {};

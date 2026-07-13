@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../detect-util.js';
 import { readRubyDeps } from '../../graph/ruby-manifest.js';
 import { camelize } from '../../graph/ruby-zeitwerk.js';
+import { pluralize, type Inflections } from '../../graph/ruby-inflect.js';
 import { parseRubyScope, type RubyScope } from '../ruby/analyze.js';
 import {
   collectCalls,
@@ -134,11 +135,15 @@ function blockStatements(call: CallNode): Node[] {
 }
 
 /** A `"controller/path#action"` string → the namespaced controller constant. */
-function controllerFromAction(action: string | undefined, modulePrefix: string[]): string | undefined {
+function controllerFromAction(
+  action: string | undefined,
+  modulePrefix: string[],
+  infl: Inflections,
+): string | undefined {
   if (!action || !action.includes('#')) return undefined;
   const ctrlPath = action.split('#')[0];
   if (!ctrlPath) return undefined;
-  const parts = ctrlPath.split('/').filter(Boolean).map(camelize);
+  const parts = ctrlPath.split('/').filter(Boolean).map((p) => camelize(p, infl));
   if (!parts.length) return undefined;
   parts[parts.length - 1] += 'Controller';
   return [...modulePrefix, ...parts].join('::');
@@ -156,45 +161,72 @@ function actionStringOf(call: CallNode): string | undefined {
 }
 
 /**
- * Walk a routes block, namespace-aware, emitting each controller constant a route
- * maps to. Handles namespace/scope blocks, resources/resource (with a `controller:`
- * override + a naive singular→plural fallback), the HTTP verbs + match, and root.
+ * Walk a routes block, namespace-aware, emitting the controller constant(s) each
+ * route maps to. Each `emit` receives ALTERNATIVE candidates for ONE route
+ * directive (resolving any one satisfies it); the caller logs "unresolved" only
+ * when the whole set fails, so a defensive fallback candidate never pollutes the
+ * degraded log.
+ *
+ * Handles namespace/scope blocks; resources/resource with a `controller:` override
+ * (used VERBATIM — Rails never re-pluralizes an explicit controller), a `module:`
+ * kwarg (`resource :inbox, module: :activitypub` → ActivityPub::InboxesController),
+ * and real Rails inflection (a singular `resource :inbox` → the plural
+ * `InboxesController`, not the naive `inboxs`); the HTTP verbs + match; and root.
  */
-function walkRoutes(statements: Node[], modulePrefix: string[], emit: (constName: string) => void): void {
+function walkRoutes(
+  statements: Node[],
+  modulePrefix: string[],
+  infl: Inflections,
+  emit: (candidates: string[]) => void,
+): void {
   for (const stmt of statements) {
     if (!(stmt instanceof CallNode)) continue;
     const name = stmt.name;
 
     if (name === 'namespace') {
       const seg = symbolValue(positionalArgs(stmt)[0]) ?? stringValue(positionalArgs(stmt)[0]);
-      walkRoutes(blockStatements(stmt), seg ? [...modulePrefix, camelize(seg)] : modulePrefix, emit);
+      walkRoutes(blockStatements(stmt), seg ? [...modulePrefix, camelize(seg, infl)] : modulePrefix, infl, emit);
     } else if (name === 'scope') {
       const mod = literalValue(keywordArg(stmt, 'module'));
-      walkRoutes(blockStatements(stmt), mod ? [...modulePrefix, camelize(mod)] : modulePrefix, emit);
+      walkRoutes(blockStatements(stmt), mod ? [...modulePrefix, camelize(mod, infl)] : modulePrefix, infl, emit);
     } else if (name === 'resources' || name === 'resource') {
+      // A `module:` kwarg namespaces this resource's controller (and its nested
+      // routes): `resource :inbox, module: :activitypub` → ActivityPub::Inboxes…
+      const mod = literalValue(keywordArg(stmt, 'module'));
+      const prefix = mod ? [...modulePrefix, camelize(mod, infl)] : modulePrefix;
+      const ctrl = (base: string): string => [...prefix, `${camelize(base, infl)}Controller`].join('::');
       const override = literalValue(keywordArg(stmt, 'controller'));
-      const bases = override
-        ? [override]
-        : (positionalArgs(stmt).map((a) => symbolValue(a) ?? stringValue(a)).filter(Boolean) as string[]);
-      // `resources :posts` -> PostsController (symbol as-is). `resource :profile`
-      // (singular) -> the plural ProfilesController, so try a naive +s too.
-      const singular = name === 'resource';
-      for (const base of bases) {
-        const cands = new Set<string>([base]);
-        if (singular && !base.endsWith('s')) cands.add(`${base}s`);
-        for (const cand of cands) emit([...modulePrefix, `${camelize(cand)}Controller`].join('::'));
+      if (override) {
+        // An explicit controller is used exactly — no pluralization guessing.
+        emit([ctrl(override)]);
+      } else {
+        const bases = positionalArgs(stmt)
+          .map((a) => symbolValue(a) ?? stringValue(a))
+          .filter(Boolean) as string[];
+        for (const base of bases) {
+          // `resource :inbox` (singular) → the PLURAL controller (InboxesController);
+          // `resources :posts` (plural) → the name as-is. Emit both spellings as
+          // alternatives so we resolve either without a false miss.
+          const plural = pluralize(base, infl);
+          const cands = name === 'resource' ? [plural, base] : [base, plural];
+          emit([...new Set(cands)].map(ctrl));
+        }
       }
-      walkRoutes(blockStatements(stmt), modulePrefix, emit); // nested resources / member / collection
+      walkRoutes(blockStatements(stmt), prefix, infl, emit); // nested resources / member / collection
     } else if (name === 'root') {
-      const c = controllerFromAction(stringValue(keywordArg(stmt, 'to')) ?? stringValue(positionalArgs(stmt)[0]), modulePrefix);
-      if (c) emit(c);
+      const c = controllerFromAction(
+        stringValue(keywordArg(stmt, 'to')) ?? stringValue(positionalArgs(stmt)[0]),
+        modulePrefix,
+        infl,
+      );
+      if (c) emit([c]);
     } else if (HTTP_VERBS.has(name)) {
-      const c = controllerFromAction(actionStringOf(stmt), modulePrefix);
-      if (c) emit(c);
+      const c = controllerFromAction(actionStringOf(stmt), modulePrefix, infl);
+      if (c) emit([c]);
     } else if (stmt.block) {
       // an unknown directive carrying a block (concern, constraints, scope variants) —
       // recurse with the same prefix so nested routes aren't lost.
-      walkRoutes(blockStatements(stmt), modulePrefix, emit);
+      walkRoutes(blockStatements(stmt), modulePrefix, infl, emit);
     }
   }
 }
@@ -246,10 +278,12 @@ async function analyzeRails(ctx: FrameworkContext): Promise<RailsAnalysis> {
     if (!isRoutesFile(fileId)) continue;
     for (const draw of collectCalls(parsed.node)) {
       if (draw.name !== 'draw' || !(draw.block instanceof BlockNode)) continue;
-      walkRoutes(blockStatements(draw), [], (constName) => {
-        const target = scope.resolve(constName);
-        if (target) addEdge(edges, fileId, target);
-        else unresolved.add(constName);
+      walkRoutes(blockStatements(draw), [], scope.inflections, (candidates) => {
+        // Resolve the first candidate that hits; a route directive is only
+        // "unresolved" when EVERY spelling it could map to is absent.
+        const hit = candidates.map((c) => scope.resolve(c)).find(Boolean);
+        if (hit) addEdge(edges, fileId, hit);
+        else if (candidates.length) unresolved.add(candidates[0]);
       });
     }
   }
