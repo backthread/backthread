@@ -23,6 +23,7 @@ import { ectoAdapter } from './ecto/ecto.js';
 import { ashAdapter } from './ash/ash.js';
 import { obanAdapter } from './oban/oban.js';
 import { broadwayAdapter } from './broadway/broadway.js';
+import { commandedAdapter } from './commanded/commanded.js';
 import { absintheAdapter } from './absinthe/absinthe.js';
 import { grpcElixirAdapter } from './grpc-elixir/grpc-elixir.js';
 
@@ -45,6 +46,11 @@ export function registerElixirFrameworkAdapters(): void {
   registerFrameworkAdapter(ashAdapter); // data
   registerFrameworkAdapter(obanAdapter); // async
   registerFrameworkAdapter(broadwayAdapter); // async
+  // Commanded (CQRS/event-sourcing) sits between async + protocol — its dispatch
+  // router is a gateway, its handlers/projectors are event-driven jobs. Registered
+  // LATE so a web (phoenix) / data (ecto) adapter's role wins over commanded on any
+  // module they both touch (registration order = co-fire priority).
+  registerFrameworkAdapter(commandedAdapter); // async/protocol (CQRS)
   registerFrameworkAdapter(absintheAdapter); // protocol
   registerFrameworkAdapter(grpcElixirAdapter); // protocol
   console.log('  [elixir] framework fleet registered (mix.exs present)');

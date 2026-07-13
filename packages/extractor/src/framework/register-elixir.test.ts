@@ -16,7 +16,7 @@ import {
 import { registerElixirFrameworkAdapters } from './register-elixir.js';
 
 // The full Elixir fleet, in registration = co-fire priority order.
-const ELIXIR_FLEET = ['phoenix', 'otp', 'ecto', 'ash', 'oban', 'broadway', 'absinthe', 'grpc-elixir'];
+const ELIXIR_FLEET = ['phoenix', 'otp', 'ecto', 'ash', 'oban', 'broadway', 'commanded', 'absinthe', 'grpc-elixir'];
 
 async function repo(files: Record<string, string>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'bt-elixir-gate-'));
