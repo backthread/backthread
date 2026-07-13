@@ -153,6 +153,20 @@ describe('activerecord model-detection tightening', () => {
     expect(pairs).toContain('app/models/account.rb->app/models/group.rb'); // HABTM
   });
 
+  it('an explicit AR base wins over the name/namespace exclusion (never a false drop)', async () => {
+    const roles = await activeRecordAdapter.roleTags!(
+      await repo({
+        Gemfile: "gem 'rails'\n",
+        'app/models/application_record.rb': 'class ApplicationRecord < ActiveRecord::Base\nend\n',
+        // a genuinely-persisted model that happens to match the exclusion heuristics
+        'app/models/form/template.rb': 'class Form::Template < ApplicationRecord\n  has_many :fields\nend\n',
+        'app/models/weird_serializer.rb': 'class WeirdSerializer < ApplicationRecord\n  belongs_to :owner\nend\n',
+      }),
+    );
+    expect(roles.get('app/models/form/template.rb')).toMatchObject({ role: 'model' });
+    expect(roles.get('app/models/weird_serializer.rb')).toMatchObject({ role: 'model' });
+  });
+
   it('a bare has_many is no longer a sufficient model signal (needs a real AR signal)', async () => {
     const roles = await activeRecordAdapter.roleTags!(
       await repo({

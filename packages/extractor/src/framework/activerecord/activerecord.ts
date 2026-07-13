@@ -149,13 +149,16 @@ function isPolymorphicAssociation(call: RubyClass['bodyCalls'][number]): boolean
 // Migrations + the schema dump are historical, not the live domain model.
 const MIGRATION_PATH_RE = /(^|\/)(db\/migrate|db\/schema\.rb)/;
 
-/** Is this class an ActiveRecord model? Serializers + form objects that reuse the
- *  association DSL are excluded FIRST, so only a genuine AR base or persistence
- *  marker qualifies. */
+/** Is this class an ActiveRecord model? An explicit AR base is the strongest signal
+ *  and wins outright; otherwise serializers + form objects that merely reuse the
+ *  association DSL are excluded, and only a genuine persistence marker qualifies.
+ *  (Base-first so a real — if unusual — `Form::Template < ApplicationRecord` or a
+ *  `*Serializer`-named AR model is never dropped by the name/namespace heuristic;
+ *  a true serializer/form never has an AR base, so exclusion still catches them.) */
 function isModel(cls: RubyClass): boolean {
   if (cls.kind !== 'class') return false;
-  if (isNonArDslClass(cls)) return false;
   if (cls.superclass && AR_BASES.has(cls.superclass)) return true;
+  if (isNonArDslClass(cls)) return false;
   return cls.bodyCalls.some((c) => AR_MARKERS.has(c.name));
 }
 
