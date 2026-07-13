@@ -114,3 +114,46 @@ export function readMixDepsDeep(repoDir: string): Set<string> {
   walk(repoDir, 0);
   return deps;
 }
+
+// The Mix `application/0` callback's `mod:` option — `mod: {MyApp.Application, []}` —
+// names the OTP application module (the supervision-tree root). It's present in nearly
+// every runnable Elixir app and ABSENT from a pure library, so it's the cheap manifest
+// signal the OTP framework adapter gates on (OTP itself is dep-less). Syntactic (never
+// eval mix.exs): a `mod:` immediately followed by a `{Module` tuple.
+const APP_MOD_RE = /\bmod:\s*\{\s*[A-Z][A-Za-z0-9_.]*/;
+
+/** Does the mix.exs at `baseDir` declare an `application/0` `mod:` callback? */
+export function mixDeclaresApplicationMod(baseDir: string): boolean {
+  return APP_MOD_RE.test(readOr(join(baseDir, 'mix.exs')));
+}
+
+/**
+ * Does ANY mix.exs in the repo declare an `application/0` `mod:` callback — the root,
+ * an umbrella child (`apps/<child>/mix.exs`), or a deeply-nested app
+ * (`elixir/apps/web/mix.exs`)? Mirrors readMixDepsDeep's bounded walk (build/vendor/
+ * dot-dirs skipped, depth-capped). The OTP adapter uses this as the repo-wide fallback
+ * after a root + shallow scan miss. NEVER throws.
+ */
+export function mixDeclaresApplicationModDeep(repoDir: string): boolean {
+  let found = false;
+  const walk = (dir: string, depth: number): void => {
+    if (found || depth > DEEP_WALK_MAX_DEPTH) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    if (entries.some((e) => e.isFile() && e.name === 'mix.exs') && mixDeclaresApplicationMod(dir)) {
+      found = true;
+      return;
+    }
+    for (const e of entries) {
+      if (found) return;
+      if (!e.isDirectory() || e.name.startsWith('.') || DEEP_WALK_SKIP_DIRS.has(e.name)) continue;
+      walk(join(dir, e.name), depth + 1);
+    }
+  };
+  walk(repoDir, 0);
+  return found;
+}
