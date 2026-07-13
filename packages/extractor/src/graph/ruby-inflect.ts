@@ -19,7 +19,7 @@
 // config/initializers/inflections.rb; `readInflections(repoDir, fileIds)` is the
 // one impure boundary (reads the file[s] once per repo). The resulting
 // `Inflections` object is threaded (as an optional arg) through camelize /
-// pluralize / singularize; with `EMPTY_INFLECTIONS` (no repo file) the built-in
+// pluralize / singularize; with `DEFAULT_INFLECTIONS` (no repo file) the built-in
 // irregular table still applies but behavior is otherwise the pre-inflection one.
 
 import { readFileSync } from 'node:fs';
@@ -72,8 +72,9 @@ const DEFAULT_UNCOUNTABLE: readonly string[] = [
   'metadata',
 ];
 
-/** A shared empty (defaults-only) Inflections for callers with no repo file. */
-export const EMPTY_INFLECTIONS: Inflections = buildInflections([]);
+/** The defaults-only Inflections (built-in irregulars + uncountables, no declared
+ *  acronyms) — the shared fallback for callers with no repo inflections file. */
+export const DEFAULT_INFLECTIONS: Inflections = buildInflections([]);
 
 /** A partial set of declared rules parsed from ONE inflections.rb. */
 export interface ParsedInflections {
@@ -197,7 +198,7 @@ function applyIrregular(word: string, table: Map<string, string>): string | unde
  * inflector for the DECLARED acronyms; an undeclared word gets plain first-letter
  * capitalization (the pre-inflection behavior).
  */
-export function camelize(segment: string, infl: Inflections = EMPTY_INFLECTIONS): string {
+export function camelize(segment: string, infl: Inflections = DEFAULT_INFLECTIONS): string {
   return segment
     .split('_')
     .map((w) => {
@@ -214,7 +215,7 @@ export function camelize(segment: string, infl: Inflections = EMPTY_INFLECTIONS)
  * `person` → `people`). Declared/irregular pairs and uncountables win; then the
  * rules: consonant-`y` → `ies`; sibilant (`s`/`x`/`z`/`ch`/`sh`) → `+es`; else `+s`.
  */
-export function pluralize(word: string, infl: Inflections = EMPTY_INFLECTIONS): string {
+export function pluralize(word: string, infl: Inflections = DEFAULT_INFLECTIONS): string {
   if (!word) return word;
   const lower = word.toLowerCase();
   if (infl.uncountable.has(lower)) return word;
@@ -231,7 +232,7 @@ export function pluralize(word: string, infl: Inflections = EMPTY_INFLECTIONS): 
  * uncountables win; then the rules: consonant-`ies` → `y`; sibilant-`es`
  * (`x`/`ch`/`ss`/`sh`) → strip `es`; a trailing `s` (not `ss`) → strip `s`.
  */
-export function singularize(word: string, infl: Inflections = EMPTY_INFLECTIONS): string {
+export function singularize(word: string, infl: Inflections = DEFAULT_INFLECTIONS): string {
   if (!word) return word;
   const lower = word.toLowerCase();
   if (infl.uncountable.has(lower)) return word;

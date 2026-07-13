@@ -7,7 +7,7 @@ import {
   camelize,
   pluralize,
   singularize,
-  EMPTY_INFLECTIONS,
+  DEFAULT_INFLECTIONS,
 } from './ruby-inflect.js';
 
 // A trimmed-down copy of Mastodon's config/initializers/inflections.rb — the real
@@ -73,7 +73,7 @@ describe('camelize (acronym-aware)', () => {
   it('with no inflections behaves like the plain camelizer', () => {
     expect(camelize('activitypub')).toBe('Activitypub');
     expect(camelize('users_controller')).toBe('UsersController');
-    expect(camelize('', EMPTY_INFLECTIONS)).toBe('');
+    expect(camelize('', DEFAULT_INFLECTIONS)).toBe('');
   });
 });
 

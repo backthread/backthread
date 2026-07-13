@@ -20,7 +20,7 @@
 // instead of `Activitypub::…` — recovering the constant a code-reader would.
 // Absent an Inflections (the default), it degrades to the plain camelizer.
 
-import { camelize, EMPTY_INFLECTIONS, type Inflections } from './ruby-inflect.js';
+import { camelize, DEFAULT_INFLECTIONS, type Inflections } from './ruby-inflect.js';
 
 export { camelize } from './ruby-inflect.js';
 export type { Inflections } from './ruby-inflect.js';
@@ -59,7 +59,7 @@ export function computeAutoloadRoots(fileIds: Iterable<string>): string[] {
 export function fileToConstant(
   fileId: string,
   roots: readonly string[],
-  infl: Inflections = EMPTY_INFLECTIONS,
+  infl: Inflections = DEFAULT_INFLECTIONS,
 ): string | undefined {
   for (const root of roots) {
     const prefix = `${root}/`;
@@ -77,7 +77,7 @@ export function fileToConstant(
  *  (rare) constant collision the smallest file id wins. */
 export function buildConstantIndex(
   fileIds: readonly string[],
-  infl: Inflections = EMPTY_INFLECTIONS,
+  infl: Inflections = DEFAULT_INFLECTIONS,
 ): {
   index: Map<string, string>;
   roots: string[];
