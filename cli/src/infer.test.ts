@@ -134,12 +134,13 @@ test('serverInfer forwards the capture context on the persist leg (ARP-696)', as
     env: {} as NodeJS.ProcessEnv,
     persist: true,
     repo: { owner: 'backthread', name: 'marola-platform' },
-    captured: { branch: 'feat/x', headSha: 'abc123', at: '2026-06-25T09:00:00Z' },
+    captured: { branch: 'feat/x', headSha: 'abc123', gitUser: 'Jane <jane@x.com>', at: '2026-06-25T09:00:00Z' },
   });
 
   const sent = JSON.parse(String(calls[0].init.body));
   assert.equal(sent.capturedBranch, 'feat/x');
   assert.equal(sent.capturedHeadSha, 'abc123');
+  assert.equal(sent.capturedGitUser, 'Jane <jane@x.com>'); // ARP-1208
   assert.equal(sent.capturedAt, '2026-06-25T09:00:00Z');
 });
 

@@ -8007,9 +8007,13 @@ function resolveGitContext(cwd, run = defaultGitRunner) {
   const branch = rawBranch ? rawBranch.trim() : "";
   const rawSha = run(cwd, ["rev-parse", "HEAD"]);
   const sha = rawSha ? rawSha.trim() : "";
+  const name = (run(cwd, ["config", "user.name"]) ?? "").trim();
+  const email3 = (run(cwd, ["config", "user.email"]) ?? "").trim();
+  const gitUser = email3 ? name ? `${name} <${email3}>` : email3 : name || null;
   return {
     branch: branch && branch !== "HEAD" ? branch : null,
-    headSha: sha || null
+    headSha: sha || null,
+    gitUser
   };
 }
 
@@ -8056,6 +8060,7 @@ async function serverInfer(transcript, config2, opts = {}) {
     if (opts.filePaths && opts.filePaths.length > 0) body.filePaths = opts.filePaths;
     if (opts.captured?.branch != null) body.capturedBranch = opts.captured.branch;
     if (opts.captured?.headSha != null) body.capturedHeadSha = opts.captured.headSha;
+    if (opts.captured?.gitUser != null) body.capturedGitUser = opts.captured.gitUser;
     if (opts.captured?.at != null) body.capturedAt = opts.captured.at;
   }
   let res;
@@ -9639,8 +9644,14 @@ async function runCapture(input, deps = {}) {
       stats: redacted.stats
     };
     const repo = input.cwd ? resolveRepo(input.cwd, deps.readRemoteImpl) : null;
-    const gitContext = input.cwd ? resolveGitContext(input.cwd, deps.readGitImpl) : { branch: null, headSha: null };
-    const captured = { branch: gitContext.branch, headSha: gitContext.headSha, at: decidedAt ?? null };
+    const gitContext = input.cwd ? resolveGitContext(input.cwd, deps.readGitImpl) : { branch: null, headSha: null, gitUser: null };
+    const captured = {
+      branch: gitContext.branch,
+      headSha: gitContext.headSha,
+      gitUser: gitContext.gitUser,
+      // ARP-1208 — committer identity for merge scoping
+      at: decidedAt ?? null
+    };
     const result = await inferDecisions(transcript, config2, {
       env,
       fetchImpl: deps.fetchImpl,
@@ -9714,6 +9725,7 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
     // self-persist path, so a held decision waits for the repo to connect + reconcile.
     ...ctx.captured?.branch != null ? { capturedBranch: ctx.captured.branch } : {},
     ...ctx.captured?.headSha != null ? { capturedHeadSha: ctx.captured.headSha } : {},
+    ...ctx.captured?.gitUser != null ? { capturedGitUser: ctx.captured.gitUser } : {},
     ...ctx.captured?.at != null ? { capturedAt: ctx.captured.at } : {},
     decisions: decisions.map((d) => ({
       ...d,

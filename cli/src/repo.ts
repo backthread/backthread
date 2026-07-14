@@ -88,6 +88,11 @@ export interface GitContext {
   branch: string | null;
   /** Current HEAD sha (`git rev-parse HEAD`); null when none. */
   headSha: string | null;
+  /** The configured git user ("Name <email>"), so the server can scope which held
+   * decisions a merge could plausibly release (the user who committed to the merged
+   * branch). Null when git has no user.name/user.email. Public commit metadata — the
+   * same identity every commit already carries — never source. */
+  gitUser: string | null;
 }
 
 /** The git-command runner seam — shells out by default, injectable for tests. */
@@ -117,8 +122,14 @@ export function resolveGitContext(cwd: string, run: GitRunner = defaultGitRunner
   const branch = rawBranch ? rawBranch.trim() : '';
   const rawSha = run(cwd, ['rev-parse', 'HEAD']);
   const sha = rawSha ? rawSha.trim() : '';
+  // The committer identity, formatted "Name <email>" (email-only / name-only when the
+  // other is unset). Best-effort: a repo with no configured user → null.
+  const name = (run(cwd, ['config', 'user.name']) ?? '').trim();
+  const email = (run(cwd, ['config', 'user.email']) ?? '').trim();
+  const gitUser = email ? (name ? `${name} <${email}>` : email) : name || null;
   return {
     branch: branch && branch !== 'HEAD' ? branch : null,
     headSha: sha || null,
+    gitUser,
   };
 }

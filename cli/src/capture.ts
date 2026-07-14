@@ -320,8 +320,13 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // (shown immediately). Reported to BOTH persist paths (worker + ingest-decisions).
     const gitContext = input.cwd
       ? resolveGitContext(input.cwd, deps.readGitImpl)
-      : { branch: null, headSha: null };
-    const captured = { branch: gitContext.branch, headSha: gitContext.headSha, at: decidedAt ?? null };
+      : { branch: null, headSha: null, gitUser: null };
+    const captured = {
+      branch: gitContext.branch,
+      headSha: gitContext.headSha,
+      gitUser: gitContext.gitUser, // ARP-1208 — committer identity for merge scoping
+      at: decidedAt ?? null,
+    };
 
     // (4) Derive decisions via the router. We ask the server to ALSO persist
     // when (and only when) we have a repo to attribute to — that's the membership-
@@ -436,8 +441,9 @@ async function persistDerived(
     log: (m: string) => void;
     /** Session id for the connect-nudge throttle (null → nudge suppressed). */
     sessionId: string | null;
-    /** ARP-696 — the session's git context, sent so the server holds the decision. */
-    captured?: { branch?: string | null; headSha?: string | null; at?: string | null };
+    /** ARP-696 — the session's git context, sent so the server holds the decision.
+     * gitUser (ARP-1208) is the committer identity for the merge-scoping heuristic. */
+    captured?: { branch?: string | null; headSha?: string | null; gitUser?: string | null; at?: string | null };
     /** Test seam: the once-only first-capture confirmation. Defaults to maybeFirstCaptureConfirm. */
     firstCaptureConfirmImpl?: (
       count: number,
@@ -465,6 +471,7 @@ async function persistDerived(
     // self-persist path, so a held decision waits for the repo to connect + reconcile.
     ...(ctx.captured?.branch != null ? { capturedBranch: ctx.captured.branch } : {}),
     ...(ctx.captured?.headSha != null ? { capturedHeadSha: ctx.captured.headSha } : {}),
+    ...(ctx.captured?.gitUser != null ? { capturedGitUser: ctx.captured.gitUser } : {}),
     ...(ctx.captured?.at != null ? { capturedAt: ctx.captured.at } : {}),
     decisions: decisions.map((d) => ({
       ...d,

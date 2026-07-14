@@ -101,7 +101,7 @@ export interface InferOptions {
    * server decides the held state — an old client omits this → `merged`, shown
    * immediately. Individual null fields are omitted from the body.
    */
-  captured?: { branch?: string | null; headSha?: string | null; at?: string | null };
+  captured?: { branch?: string | null; headSha?: string | null; gitUser?: string | null; at?: string | null };
   /** Test/dev seam: inject a fetch. Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
   /** Env override seam (BACKTHREAD_WORKER_URL). Defaults to process.env. */
@@ -235,6 +235,7 @@ export async function serverInfer(
     // that field. A capture with neither branch nor sha → the server keeps it merged.
     if (opts.captured?.branch != null) body.capturedBranch = opts.captured.branch;
     if (opts.captured?.headSha != null) body.capturedHeadSha = opts.captured.headSha;
+    if (opts.captured?.gitUser != null) body.capturedGitUser = opts.captured.gitUser;
     if (opts.captured?.at != null) body.capturedAt = opts.captured.at;
   }
 
