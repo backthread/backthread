@@ -52,8 +52,17 @@ function deps(over: Partial<CaptureDeps> = {}): CaptureDeps {
     readConfigImpl: async () => CONFIG,
     readFileImpl: async () => TRANSCRIPT_JSONL,
     readRemoteImpl: () => 'git@github.com:acme/app.git',
-    // ARP-696 — deterministic git context (never shell out to real git in tests).
-    readGitImpl: (_cwd, args) => (args.includes('--abbrev-ref') ? 'feat/test\n' : 'sha-test\n'),
+    // ARP-696/1208 — deterministic git context (never shell out to real git in tests).
+    readGitImpl: (_cwd, args) =>
+      args.includes('--abbrev-ref')
+        ? 'feat/test\n'
+        : args[0] === 'rev-parse'
+          ? 'sha-test\n'
+          : args[0] === 'config' && args[1] === 'user.name'
+            ? 'Test User\n'
+            : args[0] === 'config' && args[1] === 'user.email'
+              ? 'test@x.com\n'
+              : null,
     ensureAuthImpl: () => {},
     // stub the trust gate + first-capture confirmation to NO-OPS by
     // default so these tests never touch the real ~/.backthread/first-run.json. The
@@ -278,6 +287,7 @@ test('ARP-696 — git context rides the connected /infer-decisions persist body'
   const inferBody = calls[0].body as Record<string, unknown>;
   assert.equal(inferBody.capturedBranch, 'feat/test');
   assert.equal(inferBody.capturedHeadSha, 'sha-test');
+  assert.equal(inferBody.capturedGitUser, 'Test User <test@x.com>'); // ARP-1208
   // `at` is the session timestamp (decidedAt) harvested from the transcript.
   assert.equal(inferBody.capturedAt, '2026-06-03T09:00:00Z');
 });
@@ -294,6 +304,7 @@ test('ARP-696 — git context rides the repo-less /ingest-decisions body too', a
   const ingestBody = calls[1].body as Record<string, unknown>;
   assert.equal(ingestBody.capturedBranch, 'feat/test');
   assert.equal(ingestBody.capturedHeadSha, 'sha-test');
+  assert.equal(ingestBody.capturedGitUser, 'Test User <test@x.com>'); // ARP-1208
   assert.equal(ingestBody.capturedAt, '2026-06-03T09:00:00Z');
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "backthread",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Backthread helps you understand your codebase while AI ships features. It captures the why behind every Codex session so you can ask \"how does X work?\" without digging through PRs.",
   "author": {
     "name": "Backthread",
