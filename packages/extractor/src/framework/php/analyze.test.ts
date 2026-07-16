@@ -59,6 +59,16 @@ describe('buildPhpBindings', () => {
     expect(bindings.resolve('App\\Models\\User')).toBe('app/Models/User.php');
     expect(bindings.resolve('App\\Models\\Missing')).toBeUndefined();
   });
+
+  it('resolves an FQN via the composer PSR-0 map too (parity with the import graph)', async () => {
+    const ctx = await phpRepo({
+      'composer.json': JSON.stringify({ autoload: { 'psr-0': { 'Legacy\\': 'lib/' } } }),
+      // PSR-0 places the FULL namespace under lib/ (Legacy\ is NOT stripped).
+      'lib/Legacy/Models/User.php': '<?php\nnamespace Legacy\\Models;\nclass User {}\n',
+    });
+    const bindings = buildPhpBindings(ctx.repoDir, ['lib/Legacy/Models/User.php']);
+    expect(bindings.resolve('Legacy\\Models\\User')).toBe('lib/Legacy/Models/User.php');
+  });
 });
 
 describe('parsePhpScope', () => {

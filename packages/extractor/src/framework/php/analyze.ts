@@ -8,7 +8,14 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readComposerJson } from '../../graph/php-manifest.js';
-import { parsePsr4Map, resolveFqnToFile, normalizeFqn, type Psr4Entry } from '../../graph/php-psr4.js';
+import {
+  parsePsr4Map,
+  parsePsr0Map,
+  resolveAutoload,
+  normalizeFqn,
+  type Psr4Entry,
+  type Psr0Entry,
+} from '../../graph/php-psr4.js';
 import {
   collectCalls,
   collectClasses,
@@ -33,21 +40,29 @@ export function inScope(fileId: string, rootPath: string): boolean {
 }
 
 /**
- * The PSR-4 FQN→file resolver the framework adapters share — the cross-module
+ * The autoload FQN→file resolver the framework adapters share — the cross-module
  * resolver a Laravel/Symfony/ORM/async adapter uses to turn a referenced class
  * (a controller, a model, a job) into the file that defines it. Wraps the
- * extractor's parsePsr4Map + resolveFqnToFile so the import graph and the
- * framework layer resolve classes identically. PURE of parsing (path/map only) —
- * mirrors Ruby's buildConstantBindings; the parsed class→file refinement is added
- * on top in parsePhpScope.
+ * extractor's parsePsr4Map/parsePsr0Map + resolveAutoload so the import graph and
+ * the framework layer resolve classes identically (PSR-4 → PSR-0; the declared-
+ * class-index tier is layered on top in parsePhpScope, which resolves its own
+ * classToFile first). PURE of parsing (path/map only) — mirrors Ruby's
+ * buildConstantBindings.
  */
 export function buildPhpBindings(
   repoDir: string,
   fileIds: readonly string[],
-): { psr4: Psr4Entry[]; fileset: ReadonlySet<string>; resolve(fqn: string): string | undefined } {
-  const psr4 = parsePsr4Map(readComposerJson(repoDir));
+): {
+  psr4: Psr4Entry[];
+  psr0: Psr0Entry[];
+  fileset: ReadonlySet<string>;
+  resolve(fqn: string): string | undefined;
+} {
+  const composer = readComposerJson(repoDir);
+  const psr4 = parsePsr4Map(composer);
+  const psr0 = parsePsr0Map(composer);
   const fileset = new Set(fileIds);
-  return { psr4, fileset, resolve: (fqn) => resolveFqnToFile(fqn, psr4, fileset) };
+  return { psr4, psr0, fileset, resolve: (fqn) => resolveAutoload(fqn, psr4, psr0, fileset) };
 }
 
 /** One in-scope PHP file: its Program root + pre-collected classes, calls, use-scope. */
@@ -94,7 +109,7 @@ export async function parsePhpScope(ctx: FrameworkContext): Promise<PhpScope> {
     .filter((f) => isPhpFile(f.language) && inScope(f.id, rootPath))
     .map((f) => f.id);
   const internalIds = new Set(phpFiles);
-  const { psr4, resolve: psr4Resolve } = buildPhpBindings(repoDir, phpFiles);
+  const { psr4, resolve: autoloadResolve } = buildPhpBindings(repoDir, phpFiles);
 
   const engine = getPhpEngine();
   const parsed = new Map<string, ParsedPhpFile>();
@@ -121,7 +136,9 @@ export async function parsePhpScope(ctx: FrameworkContext): Promise<PhpScope> {
 
   const resolve = (fqn: string): string | undefined => {
     const clean = normalizeFqn(fqn);
-    return classToFile.get(clean) ?? psr4Resolve(fqn);
+    // The parsed declared-class index first (the ground truth — the real declaring
+    // file), then the autoload map (PSR-4 → PSR-0).
+    return classToFile.get(clean) ?? autoloadResolve(fqn);
   };
 
   return {
