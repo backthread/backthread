@@ -43,6 +43,7 @@ import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../../detect-util.js';
 import { readPubDeps, readPubDepsDeep } from '../../../graph/dart-manifest.js';
 import { parseDartScope, type ParsedDartFile } from '../analyze.js';
+import { sourceLines } from '../dart-ast.js';
 import type {
   DetectMatch,
   FrameworkAdapter,
@@ -244,9 +245,14 @@ function widgetClassNames(parsed: ParsedDartFile): string[] {
   return out;
 }
 
-/** Does this file declare the app entry — a top-level `main` that calls `runApp`? */
+/**
+ * Does this file declare the app entry — a top-level `main` that calls `runApp`?
+ * Comment-aware (via `sourceLines`), like every sibling scanner, so a commented-out
+ * `// runApp(...)` never mis-tags a file as the app entry.
+ */
 function isAppEntry(parsed: ParsedDartFile): boolean {
-  return parsed.functions.includes('main') && /\brunApp\s*\(/.test(parsed.text);
+  if (!parsed.functions.includes('main')) return false;
+  return sourceLines(parsed.text).some((l) => /\brunApp\s*\(/.test(l));
 }
 
 function addEdge(edges: Map<string, FrameworkEdge>, from: string, to: string, relation: string): void {
