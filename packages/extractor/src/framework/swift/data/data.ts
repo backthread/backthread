@@ -83,7 +83,10 @@ export function detectDataSignals(base: string, deps: Set<string>): DataSignals 
           else if (mod === 'Fluent' || mod === 'FluentKit') hasFluent = true;
         }
       }
-      return hasSwiftData && hasCoreData && hasFluent; // all found → early-exit
+      // All found → early-exit. Safe (output-neutral) because the signals are
+      // monotonic: once true they never flip, so stopping the scan early cannot
+      // change the returned booleans.
+      return hasSwiftData && hasCoreData && hasFluent;
     },
     DETECT_FILE_CAP,
   );

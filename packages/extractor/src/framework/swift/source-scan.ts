@@ -67,7 +67,9 @@ export interface SwiftSourceEntry {
  * depth-first). For a FILE, `readFileHead()` lazily reads the file's head (imports live
  * at the top); for a DIR it returns '' (a dir has no head). The dir callback exists so
  * a caller can OBSERVE a bundle dir (e.g. CoreData's `.xcdatamodeld`) BEFORE it is
- * skipped. Return `true` from `onEntry` to early-exit the whole walk.
+ * skipped. Return `true` from `onEntry` to early-exit the whole walk — this should be
+ * driven by a MONOTONIC condition (e.g. "all wanted signals now found"), so stopping
+ * the scan early can never change the caller's accumulated result.
  *
  * A directory is recursed into unless it is dot-prefixed, in SWIFT_EXCLUDE_DIRS
  * (`.build`/`Pods`/`DerivedData`/`Carthage`/`node_modules`), or an Xcode container
