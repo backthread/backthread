@@ -113,8 +113,10 @@ const ROLE_KIND: Record<VaporRole, ModuleKind> = { controller: 'gateway', router
 // as a router. A grouped-builder chain still matches via its opening `app.grouped(…)`.
 const ROUTE_DSL_RE = /\b(?:app|routes)\.(?:get|post|put|patch|delete|on|grouped|group|webSocket)\s*\(/;
 const REGISTER_RE = /\bregister\s*\(\s*collection\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/g;
-// `let x = SomeController()` — a local binding from a lowercase var to its type.
-const CONTROLLER_BINDING_RE = /\b(?:let|var)\s+([a-z_][A-Za-z0-9_]*)\s*=\s*([A-Z][A-Za-z0-9_]*)\s*\(/g;
+// `let x = SomeController()` — a local binding from a lowercase var to its type. An
+// optional `: Type` annotation before the `=` is tolerated (the explicitly-typed
+// `let x: SomeController = SomeController()` form binds off the RHS type too).
+const CONTROLLER_BINDING_RE = /\b(?:let|var)\s+([a-z_][A-Za-z0-9_]*)\s*(?::[^=\n]+)?=\s*([A-Z][A-Za-z0-9_]*)\s*\(/g;
 
 function isRouteCollection(parsed: ParsedSwiftFile): boolean {
   return parsed.decls.some((d) => d.kind !== 'extension' && d.inherits.includes('RouteCollection'));

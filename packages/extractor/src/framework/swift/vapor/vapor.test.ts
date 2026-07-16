@@ -107,4 +107,18 @@ describe('syntheticEdges (route-mount spine)', () => {
     expect(keys).toContain('Sources/App/routes.swift -> Sources/App/Controllers/UserController.swift');
     expect(edges.every((e) => e.kind === 'calls')).toBe(true);
   });
+
+  it('resolves an explicitly-typed local binding (let c: Controller = Controller())', async () => {
+    const ctx = await contextFor(
+      await repo({
+        'Package.swift': APP['Package.swift'],
+        'Sources/App/Controllers/PingController.swift':
+          'import Vapor\nstruct PingController: RouteCollection {\n  func boot(routes: RoutesBuilder) throws {}\n}\n',
+        'Sources/App/routes.swift':
+          'import Vapor\nfunc routes(_ app: Application) throws {\n  let ping: PingController = PingController()\n  try app.register(collection: ping)\n}\n',
+      }),
+    );
+    const keys = new Set((await vaporAdapter.syntheticEdges!(ctx)).map((e) => `${e.source} -> ${e.target}`));
+    expect(keys).toContain('Sources/App/routes.swift -> Sources/App/Controllers/PingController.swift');
+  });
 });
