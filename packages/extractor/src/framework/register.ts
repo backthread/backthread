@@ -20,7 +20,7 @@
 // protocol adapter that co-fires on the same repo.
 
 import { registerFrameworkAdapter } from './registry.js';
-import { hasRubyManifest, hasMixManifestDeep } from '../graph/language.js';
+import { hasRubyManifest, hasMixManifestDeep, hasDartManifestDeep } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
 import { nestAdapter } from './nest/nest.js';
@@ -70,6 +70,7 @@ export function registerBuiltinFrameworkAdapters(): void {
 // so a TS/Python ingest never pulls in either toolchain.
 let rubyRegistered = false;
 let elixirRegistered = false;
+let dartRegistered = false;
 
 /**
  * Register the framework adapters whose toolchain must NOT load for every repo.
@@ -94,5 +95,15 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     elixirRegistered = true;
     const { registerElixirFrameworkAdapters } = await import('./register-elixir.js');
     registerElixirFrameworkAdapters();
+  }
+  // Nested-aware (hasDartManifestDeep): a polyglot monorepo keeping its Flutter app
+  // under a top-level `mobile/` / `app/` dir still loads the Dart fleet. Root-Dart
+  // repos short-circuit on the cheap root check. The Dart toolchain is dep-free (a
+  // hand-rolled scanner + the bundled `yaml` parser), so this gate is about not
+  // module-loading the Dart adapters for a non-Dart repo, not about a native parser.
+  if (!dartRegistered && hasDartManifestDeep(repoDir)) {
+    dartRegistered = true;
+    const { registerDartFrameworkAdapters } = await import('./register-dart.js');
+    registerDartFrameworkAdapters();
   }
 }
