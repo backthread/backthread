@@ -35,7 +35,7 @@
 // Unresolvable nav targets DEGRADE + LOG (no silent caps). Deterministic (sorted
 // outputs, ids derived from paths/names; run-twice is byte-identical).
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { openSync, readSync, closeSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../../detect-util.js';
 import { parseSwiftScope, readSwiftTargets, type ParsedSwiftFile } from '../analyze.js';
@@ -69,6 +69,27 @@ function isXcodeContainer(name: string): boolean {
   return SWIFT_EXCLUDE_SUFFIXES.some((s) => name.endsWith(s));
 }
 
+/** Read only the HEAD of a file (imports live at the top) — cheap detect. Never throws. */
+function readHead(path: string, maxBytes = 4096): string {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const buf = Buffer.allocUnsafe(maxBytes);
+    const n = readSync(fd, buf, 0, maxBytes, 0);
+    return buf.toString('utf8', 0, n);
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
 /**
  * Scan up to DETECT_FILE_CAP `.swift` files under `base` for `import SwiftUI` /
  * `import UIKit`, early-exiting once both are found. Reads only each file's imports
@@ -93,13 +114,8 @@ export function detectUiSignals(base: string): UiSignals {
         walk(join(dir, e.name));
       } else if (e.isFile() && e.name.endsWith('.swift') && e.name !== 'Package.swift') {
         scanned++;
-        let text = '';
-        try {
-          text = readFileSync(join(dir, e.name), 'utf8');
-        } catch {
-          continue;
-        }
-        for (const mod of scanImports(text)) {
+        // Imports are at the top of the file — read only the head (cheap detect).
+        for (const mod of scanImports(readHead(join(dir, e.name)))) {
           if (mod === 'SwiftUI') hasSwiftUI = true;
           else if (mod === 'UIKit') hasUIKit = true;
         }
@@ -191,7 +207,6 @@ const NAV_MARKERS = [
   '.popover',
   'pushViewController',
   'present(',
-  'show(',
   'showDetailViewController',
   'setViewControllers',
 ];
@@ -401,6 +416,11 @@ function analyzeUi(ctx: FrameworkContext): UiAnalysis {
   // app (its only other target is the noise-filtered test target) collapses to one
   // blob under target grouping — useless — so fall back to feature folders, which
   // split the app dir's top-level dirs (UI / Core / Interactors / …) into subsystems.
+  // NOTE: grouping is REPO-WIDE (over every in-scope Swift file, not just UI files) —
+  // for an iOS app the feature/target axis is the primary subsystem layout. By
+  // registration order (ui before data) this wins over the data adapter's models-dir
+  // grouping where they overlap (a `Repositories/` feature vs a 'Data Model' subsystem);
+  // that's the intended web-first precedence, not a bug.
   const uiFiles = [...roleByFile.keys()];
   let groups = buildTargetGroups(scope.swiftFiles, ctx.repoDir);
   if (groups.length < 2) groups = buildFeatureGroups(scope.swiftFiles.length ? scope.swiftFiles : uiFiles);
