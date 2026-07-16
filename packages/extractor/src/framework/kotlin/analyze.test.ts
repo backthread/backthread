@@ -43,6 +43,17 @@ describe('scanTypeDecls', () => {
     expect(byName.get('Marker')?.kind).toBe('annotation');
   });
 
+  it('does not attribute a constructor-parameter annotation to the class', () => {
+    const src = [
+      'package x',
+      '@RestController',
+      'class UserController(@Inject private val svc: UserService) : Base',
+    ].join('\n');
+    const [decl] = scanTypeDecls(src);
+    // @Inject is on the constructor param, NOT the class — only @RestController counts.
+    expect(decl.annotations).toEqual(['RestController']);
+  });
+
   it('reads a multi-line class header supertype', () => {
     const src = [
       'package x',

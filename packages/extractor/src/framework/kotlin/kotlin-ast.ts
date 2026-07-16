@@ -50,6 +50,13 @@ const FUN_HEAD_RE = new RegExp(
 // An annotation token: `@Foo`, `@Foo.Bar`, `@field:Json`, `@Foo(...)`. Captures the
 // annotation NAME (last segment after an optional use-site target `field:`/`get:`/…).
 const ANNOTATION_RE = /@(?:[A-Za-z_][A-Za-z0-9_]*:)?([A-Za-z_][A-Za-z0-9_.]*)/g;
+// The first modifier/declaration keyword on a decl line — the boundary between the
+// annotation zone (which always PRECEDES modifiers + the keyword) and the declaration
+// body. Inline annotations are scanned only up to here, so a constructor-parameter
+// annotation after `(` (`class Foo(@Inject val x: X)`) is never mis-attributed to Foo.
+const DECL_START_RE = new RegExp(
+  `\\b(?:${MODIFIER}|class|interface|object|typealias|fun|val|var)\\b`,
+);
 // An invocation callee: a bare identifier immediately followed by `(` OR a trailing
 // lambda `{` — the DSL/route call shape (`get("/x")`, the paren-less `routing { … }` /
 // `install(X)`). The negative lookbehind stops it matching a member call's method segment
@@ -90,10 +97,13 @@ export function parseSupertypes(header: string): string[] {
 /** The annotation names sitting on the lines DIRECTLY above `index` (+ inline on it). */
 function annotationsFor(lines: string[], index: number): string[] {
   const names: string[] = [];
-  // Inline annotations on the decl line itself (`@Entity class User`) — everything before
-  // the decl keyword. Read the whole line; annotation tokens after the keyword (e.g. a
-  // param default) are rare and harmless.
-  for (const m of lines[index].matchAll(ANNOTATION_RE)) names.push(lastSeg(m[1]));
+  // Inline annotations on the decl line itself (`@Entity class User`) — but ONLY the zone
+  // BEFORE the first modifier/decl keyword, so a constructor-parameter annotation
+  // (`class Foo(@Inject val x: X)`) is not mis-attributed to the class.
+  const line = lines[index];
+  const declAt = line.search(DECL_START_RE);
+  const zone = declAt >= 0 ? line.slice(0, declAt) : line;
+  for (const m of zone.matchAll(ANNOTATION_RE)) names.push(lastSeg(m[1]));
   // Preceding annotation lines: walk up over `@…` / blank lines until a code line.
   for (let i = index - 1; i >= 0; i--) {
     const t = lines[i].trim();
