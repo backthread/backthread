@@ -90,6 +90,19 @@ describe('parsePhpScope', () => {
     expect(scope.resolveRef('User', ctrlFile.useMap, ctrlFile.namespace)).toBe('app/Models/User.php');
   });
 
+  it('excludes `use function` / `use const` from the class use-map', async () => {
+    const ctx = await phpRepo({
+      'composer.json': COMPOSER,
+      'app/Services/Billing.php':
+        '<?php\nnamespace App\\Services;\nuse function App\\Helpers\\format;\nuse const App\\Config\\MAX;\nuse App\\Models\\User;\nclass Billing {}\n',
+    });
+    const scope = await parsePhpScope(ctx);
+    const useMap = scope.parsed.get('app/Services/Billing.php')!.useMap;
+    expect(useMap.has('User')).toBe(true); // a class import
+    expect(useMap.has('format')).toBe(false); // a function import — excluded
+    expect(useMap.has('MAX')).toBe(false); // a const import — excluded
+  });
+
   it('reads PHP-8 attributes + `::class` references + static-call receivers', async () => {
     const ctx = await phpRepo({
       'composer.json': COMPOSER,

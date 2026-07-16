@@ -395,10 +395,14 @@ export function collectUseMap(program: Program): Map<string, string> {
     if (!n) return;
     if (n.kind === 'usegroup') {
       const prefix = typeof n.name === 'string' && n.name ? `${normalizeFqn(n.name)}\\` : '';
+      // A `use function …` / `use const …` marks the type on the GROUP node
+      // (item.type is null) — read it so a function/const import isn't bound as a class.
+      const groupType = typeof n.type === 'string' ? n.type : null;
       for (const raw of Array.isArray(n.items) ? n.items : []) {
         const it = asNode(raw);
         if (!it || it.kind !== 'useitem' || typeof it.name !== 'string') continue;
-        if (it.type === 'function' || it.type === 'const') continue;
+        const useType = (typeof it.type === 'string' ? it.type : null) ?? groupType;
+        if (useType === 'function' || useType === 'const') continue;
         const fqn = normalizeFqn(`${prefix}${it.name}`);
         const aliasNode = asNode(it.alias);
         const alias = aliasNode && typeof aliasNode.name === 'string' ? aliasNode.name : undefined;

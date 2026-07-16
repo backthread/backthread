@@ -86,6 +86,21 @@ describe('PhpExtractor', () => {
     expect(graph.externals.map((x) => x.id)).not.toContain('ext:Exception');
   });
 
+  it('ignores `use function` / `use const` imports (not class imports)', async () => {
+    const dir = await repo({
+      'composer.json': COMPOSER,
+      'app/Services/Billing.php':
+        '<?php\nnamespace App\\Services;\nuse function App\\Helpers\\format;\nuse const App\\Config\\MAX;\nuse Illuminate\\Support\\Str;\nclass Billing {}\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    const exts = graph.externals.map((x) => x.id);
+    // The function/const markers live on the usegroup, not the item — they must not
+    // be mistaken for class imports and mint a spurious first-party `ext:App` box.
+    expect(exts).not.toContain('ext:App');
+    // A real class import still becomes an external.
+    expect(exts).toContain('ext:Illuminate');
+  });
+
   it('excludes Blade views + vendored/storage dirs from the graph', async () => {
     const dir = await repo({
       'composer.json': COMPOSER,

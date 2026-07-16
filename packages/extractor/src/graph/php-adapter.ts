@@ -141,13 +141,17 @@ function collectFileRefs(program: Program): CollectedRefs {
       }
       case 'usegroup': {
         const groupPrefix = typeof n.name === 'string' && n.name ? `${normalizeFqn(n.name)}\\` : '';
+        // The function/const marker of a `use function …` / `use const …` lives on
+        // the GROUP node (item.type is null); read it here so those imports aren't
+        // mistaken for class imports.
+        const groupType = typeof n.type === 'string' ? n.type : null;
         const items = Array.isArray(n.items) ? n.items : [];
         for (const raw of items) {
           const it = raw as Record<string, unknown>;
           if (it.kind !== 'useitem' || typeof it.name !== 'string') continue;
           const aliasNode = it.alias as { name?: string } | null | undefined;
           const alias = aliasNode && typeof aliasNode.name === 'string' ? aliasNode.name : undefined;
-          addUse(`${groupPrefix}${it.name}`, alias, (it.type as string | null) ?? null);
+          addUse(`${groupPrefix}${it.name}`, alias, ((it.type as string | null) ?? null) ?? groupType);
         }
         return; // items handled; don't descend
       }
