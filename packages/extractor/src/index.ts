@@ -1,5 +1,5 @@
 // @backthread/extractor — deterministic, install-free structural extraction for
-// TypeScript, Python, Ruby, and Elixir codebases.
+// TypeScript, Python, Ruby, Elixir, and Kotlin codebases.
 //
 // Turns a working tree into a structural graph: modules (with kinds, god-node
 // flags, and path-derived subsystems), edges, communities, framework roles, and
@@ -59,11 +59,13 @@ export {
   RUBY_SOURCE_EXTENSIONS,
   ELIXIR_SOURCE_EXTENSIONS,
   DART_SOURCE_EXTENSIONS,
+  KOTLIN_SOURCE_EXTENSIONS,
   EXCLUDE_DIRS,
   PYTHON_EXCLUDE_DIRS,
   RUBY_EXCLUDE_DIRS,
   ELIXIR_EXCLUDE_DIRS,
   DART_EXCLUDE_DIRS,
+  KOTLIN_EXCLUDE_DIRS,
   isSourceFilePath,
   isConfigInvalidatorPath,
   EXTRACTOR_VERSION,
@@ -96,6 +98,7 @@ export {
   hasMixManifest,
   hasDartManifest,
   hasDartManifestDeep,
+  hasKotlinManifest,
 } from './graph/language.js';
 export { NOISE_CATEGORIES, NOISE_RULES, classifyNoise, filterNoise, summarizeNoise } from './graph/noise-filter.js';
 export type { NoiseCategory, NoiseRule, DroppedNoise } from './graph/noise-filter.js';

@@ -54,7 +54,15 @@ import { parse as parseYaml } from 'yaml';
 import { parse as parseToml } from 'smol-toml';
 import type { PackageRole } from '../types.js';
 import { compileMatchers, slugify } from './overrides.js';
-import { EXCLUDE_DIRS, PYTHON_EXCLUDE_DIRS, RUBY_EXCLUDE_DIRS, ELIXIR_EXCLUDE_DIRS, DART_EXCLUDE_DIRS } from '../graph/file-graph.js';
+import {
+  EXCLUDE_DIRS,
+  PYTHON_EXCLUDE_DIRS,
+  RUBY_EXCLUDE_DIRS,
+  ELIXIR_EXCLUDE_DIRS,
+  DART_EXCLUDE_DIRS,
+  KOTLIN_EXCLUDE_DIRS,
+} from '../graph/file-graph.js';
+import { parseSettingsIncludes } from '../graph/kotlin-manifest.js';
 import { normalizePyName, requirementName } from '../graph/python-manifest.js';
 
 export interface WorkspacePackage {
@@ -137,6 +145,12 @@ const WORKSPACE_MANIFEST_BASENAMES = new Set([
   // the Dart package boundaries; melos.yaml / the root `workspace:` list declares them.
   'pubspec.yaml',
   'melos.yaml',
+  // Gradle build/settings scripts. A per-module `build.gradle(.kts)` defines a Kotlin
+  // module boundary; the root `settings.gradle(.kts)` `include(...)` declares them.
+  'build.gradle',
+  'build.gradle.kts',
+  'settings.gradle',
+  'settings.gradle.kts',
 ]);
 
 /** Does a repo-relative path name a workspace-layout-defining manifest? */
@@ -191,6 +205,9 @@ export function detectWorkspaceLayout(rootDir: string): WorkspaceLayout {
     // Dart melos.yaml `packages:` globs + a native pub `workspace:` member list — the
     // analogue of package.json `workspaces` / uv members.
     ...collectDartDeclaredGlobs(rootDir),
+    // Gradle `settings.gradle(.kts)` `include(":feature:foo", …)` declares each module's
+    // repo-relative dir — the analogue of package.json `workspaces`.
+    ...collectGradleDeclaredGlobs(rootDir),
   ]);
 
   // 3. Materialize packages. The root scope is ALWAYS present (and always
@@ -335,6 +352,28 @@ export function detectWorkspaceLayout(rootDir: string): WorkspaceLayout {
       declared,
       role: dartRoleOf(dir),
       declaredDeps: [], // Dart cross-package deps aren't wired (path deps rare); left empty
+    });
+  }
+
+  // 3f. Gradle modules. Every non-root dir with a build.gradle(.kts) is a Kotlin/JVM
+  //     module boundary — the build script IS the declaration (like a gemspec), and the
+  //     root settings.gradle `include(...)` additionally marks it declared. Merged into
+  //     the SAME packages list so each module becomes its own subsystem and Louvain runs
+  //     within it. A dir already claimed (JS/Python/Elixir/Ruby/Dart) keeps its boundary
+  //     (first wins). Cross-module `project(":core")` deps aren't wired (declaredDeps
+  //     stays empty) — the import graph already spans modules via FQN imports.
+  for (const dir of findGradlePackageDirs(rootDir)) {
+    if (seenRoots.has(dir)) continue;
+    seenRoots.add(dir);
+    const name = dir.split('/').pop() ?? null;
+    packages.push({
+      root: dir,
+      name: null, // Gradle module names aren't a JS-style registry; group by dir
+      slug: reserveSlug(slugFor(null, name ?? dir)),
+      entryFileIds: [], // Kotlin has no manifest-declared entry; cluster fail-softs
+      declared: matchesDeclared(dir),
+      role: gradleRoleOf(dir),
+      declaredDeps: [],
     });
   }
 
@@ -784,6 +823,57 @@ function mixAppName(absDir: string): string | null {
 function collectElixirDeclaredGlobs(rootDir: string): string[] {
   const m = readMixExs(rootDir).match(/apps_path:\s*"([^"]+)"/);
   return m ? [`${m[1]}/*`] : [];
+}
+
+// ── Gradle module detection ────────────────────────────────────────────────
+const GRADLE_BUILD_FILES = new Set(['build.gradle', 'build.gradle.kts']);
+const GRADLE_EXCLUDE_SET = new Set<string>([...EXCLUDE_DIRS, ...KOTLIN_EXCLUDE_DIRS]);
+
+/** Sorted non-root dirs containing a build.gradle(.kts) — a Gradle/Kotlin module. */
+function findGradlePackageDirs(rootDir: string): string[] {
+  const out = new Set<string>();
+  const walk = (rel: string, depth: number): void => {
+    if (depth > MAX_WALK_DEPTH) return;
+    let entries;
+    try {
+      entries = readdirSync(rel === '' ? rootDir : join(rootDir, rel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        if (ent.name.startsWith('.') || GRADLE_EXCLUDE_SET.has(ent.name)) continue;
+        walk(rel === '' ? ent.name : `${rel}/${ent.name}`, depth + 1);
+      } else if (rel !== '' && ent.isFile() && GRADLE_BUILD_FILES.has(ent.name)) {
+        out.add(rel);
+      }
+    }
+  };
+  walk('', 0);
+  return [...out].sort();
+}
+
+/** Root settings.gradle(.kts) `include(":a:b")` module paths → `["a/b", …]` globs. */
+function collectGradleDeclaredGlobs(rootDir: string): string[] {
+  for (const f of ['settings.gradle.kts', 'settings.gradle']) {
+    const p = join(rootDir, f);
+    if (!existsSync(p)) continue;
+    try {
+      return parseSettingsIncludes(readFileSync(p, 'utf8'));
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** Role for a Gradle module: `app`/`apps/*` → app, tools/config → tooling, else lib. */
+function gradleRoleOf(dir: string): PackageRole {
+  const seg0 = dir.split('/')[0];
+  if (TOOLING_DIRS.has(seg0)) return 'tooling';
+  if (seg0 === 'apps' || seg0 === 'app') return 'app';
+  return 'lib';
 }
 
 /** Best-first entry candidates for an Elixir package (existence checked by caller). */
