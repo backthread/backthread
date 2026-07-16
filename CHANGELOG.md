@@ -5,6 +5,10 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.15.0
+
+**Free plan: a heads-up when you hit your decision limit.** The free plan lets you connect an agent and capture + read your first 50 decisions for free. Past that, the server quietly stops storing new ones — your existing decisions stay exactly where they are (nothing is lost, nothing errors, capture never fails). Until now that was fully silent. Now, once per session, `backthread` prints a single line letting you know new decisions aren't landing and where to upgrade to keep capturing. It's throttled to one line per session (never per capture), best-effort, and can never interrupt a capture.
+
 ## 0.11.0
 
 **`query` learned the blindspot pre-read — "what am I missing about X?" is now a routed question type.** Before you work in an unfamiliar area, call it FIRST: a seconds-cheap, cited briefing of what's already on record — the trade-offs knowingly accepted, standing assumptions, known limitations, and rejected approaches — then do your own pass through the code. The pre-read aims your deep dive; it doesn't replace it.

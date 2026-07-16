@@ -24,7 +24,7 @@
 import { join } from 'node:path';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { configDir, CONFIG_MODE, DIR_MODE } from './config.js';
-import { buildRepoDeepLink } from './urls.js';
+import { buildRepoDeepLink, buildBillingUrl } from './urls.js';
 
 // The piggybacked repo-health signal off the capture (ingest-decisions) response.
 export type RepoStatus = 'connected' | 'not_connected' | 'disconnected';
@@ -146,6 +146,24 @@ export function nudgeMessage(
   );
 }
 
+// The free-plan decision-cap nudge. On the free plan an account can capture (and
+// read) a bounded number of decisions; past that the server SILENTLY SKIPS new
+// captures (a 0-count success, so the always-exit-0 hook never errors) and flags the
+// response with `captureSkipped: 'free_limit_reached'`. That repo is connected +
+// healthy, so no connect/terminal nudge fires — this one-per-session line is the only
+// hint the user gets that new decisions have stopped landing. Tone matches the other
+// capture stderr lines (never the noun "architectural memory"; the surface is the
+// "How it works" diagram). We deliberately DON'T name a specific number — the server
+// owns the limit and doesn't send it here, so a hardcoded count could drift.
+export const FREE_LIMIT_REACHED = 'free_limit_reached';
+
+export function freeLimitMessage(env: NodeJS.ProcessEnv = process.env): string {
+  return (
+    `backthread: you've reached your free-plan decision limit — new decisions aren't ` +
+    `being captured. Upgrade to keep capturing: ${buildBillingUrl(env)}`
+  );
+}
+
 // Slugs that warrant appending the CLI's repo deep-link to the server's copy: the
 // connect-driven next steps point the user at the app's repo page. (The server copy
 // already carries the "why"; the CLI owns the URL — built from its repo config, not
@@ -184,6 +202,14 @@ export interface NudgeDeps {
    *                                  fall back to the `repoStatus` branch.
    */
   nextStep?: ServerNextStep | null | 'absent';
+  /**
+   * The response's `captureSkipped` reason, when the server didn't store this
+   * capture. `'free_limit_reached'` (the account is over its free-plan decision
+   * limit) surfaces the upgrade line and takes PRIORITY over the connect/next-step
+   * logic below (that repo is connected + healthy). Any other / absent value is
+   * ignored here (other skip reasons carry their own repoStatus/nextStep signals).
+   */
+  captureSkipped?: string;
 }
 
 /**
@@ -224,7 +250,12 @@ export async function maybeNudge(
     // repoStatus path when the server didn't send one. A terminal (`null`) or a
     // not-warranted legacy status → no line → suppress.
     let line: string | null = null;
-    if (nextStep === null) {
+    if (deps.captureSkipped === FREE_LIMIT_REACHED) {
+      // Free-plan decision cap reached — takes PRIORITY over the connect/terminal
+      // logic (that repo is connected + healthy, so nextStep is terminal and no
+      // connect nudge would fire). Surface the upgrade line, throttled once/session.
+      line = freeLimitMessage(env);
+    } else if (nextStep === null) {
       // Explicit terminal (fully onboarded) — the server says "no nudge".
       return false;
     } else if (nextStep !== 'absent') {

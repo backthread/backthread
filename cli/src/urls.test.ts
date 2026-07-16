@@ -12,11 +12,20 @@ import {
   buildOnboardingStateUrl,
   buildCliAuthPollUrl,
   buildRepoDeepLink,
+  buildBillingUrl,
   DEFAULT_FUNCTIONS_URL,
 } from './urls.js';
 
 test('appBaseUrl defaults to production', () => {
   assert.equal(appBaseUrl({} as NodeJS.ProcessEnv), DEFAULT_APP_URL);
+});
+
+test('buildBillingUrl points at /account/billing on the app origin', () => {
+  assert.equal(buildBillingUrl({} as NodeJS.ProcessEnv), `${DEFAULT_APP_URL}/account/billing`);
+  assert.equal(
+    buildBillingUrl({ BACKTHREAD_APP_URL: 'http://localhost:5173' } as NodeJS.ProcessEnv),
+    'http://localhost:5173/account/billing',
+  );
 });
 
 test('appBaseUrl honors BACKTHREAD_APP_URL and trims trailing slash', () => {

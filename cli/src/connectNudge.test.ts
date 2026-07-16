@@ -8,6 +8,7 @@ import {
   parseNextStep,
   nudgeMessage,
   nextStepMessage,
+  freeLimitMessage,
   maybeNudge,
   nudgeStatePath,
   type ServerNextStep,
@@ -121,6 +122,51 @@ test('null repoStatus → NO nudge (older server / absent field)', async () => {
     assert.equal(shown, false);
     assert.equal(lines.length, 0);
   });
+});
+
+// --- maybeNudge: the free-plan decision cap ----------------------------------
+
+test('free_limit_reached → upgrade line shown, throttled once/session', async () => {
+  await withTempEnv(async (env) => {
+    const lines: string[] = [];
+    const log = (m: string) => lines.push(m);
+    // A free_limit_reached skip is a CONNECTED, healthy repo: repoStatus 'connected'
+    // + a terminal nextStep (null) — both of which would normally suppress a nudge.
+    const deps = { env, log, nextStep: null, captureSkipped: 'free_limit_reached' } as const;
+    assert.equal(await maybeNudge('connected', REPO, 'sess-A', deps), true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /free-plan decision limit/);
+    assert.match(lines[0], /account\/billing/);
+    // Throttled: a second capture in the same session stays silent.
+    assert.equal(await maybeNudge('connected', REPO, 'sess-A', deps), false);
+    assert.equal(lines.length, 1, 'one upgrade line for the whole session');
+    // A new session re-shows.
+    assert.equal(await maybeNudge('connected', REPO, 'sess-B', deps), true);
+    assert.equal(lines.length, 2);
+  });
+});
+
+test('free_limit_reached takes PRIORITY over a connect nudge', async () => {
+  await withTempEnv(async (env) => {
+    const lines: string[] = [];
+    // Even if repoStatus somehow read not_connected, the cap line wins (and fires once).
+    const shown = await maybeNudge('not_connected', REPO, 'sess-A', {
+      env,
+      log: (m) => lines.push(m),
+      captureSkipped: 'free_limit_reached',
+    });
+    assert.equal(shown, true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /free-plan decision limit/);
+    assert.doesNotMatch(lines[0], /isn't connected/);
+  });
+});
+
+test('freeLimitMessage points at the billing page', () => {
+  const m = freeLimitMessage({ BACKTHREAD_APP_URL: 'https://example.test' } as NodeJS.ProcessEnv);
+  assert.match(m, /^backthread: /);
+  assert.match(m, /free-plan decision limit/);
+  assert.equal(m.includes('https://example.test/account/billing'), true);
 });
 
 test('missing session id → SUPPRESS (degrade rather than nudge every capture)', async () => {
