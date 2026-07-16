@@ -69,7 +69,7 @@ const ORM_GROUP_PREFIXES = [
 
 function depsHaveOrm(deps: ReadonlySet<string>): boolean {
   for (const g of deps) {
-    for (const p of ORM_GROUP_PREFIXES) if (g === p || g.startsWith(p + '.') || g.startsWith(p)) return true;
+    for (const p of ORM_GROUP_PREFIXES) if (g === p || g.startsWith(p + '.')) return true;
   }
   return false;
 }
