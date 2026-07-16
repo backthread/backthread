@@ -165,6 +165,9 @@ export class DartExtractor implements GraphExtractor {
     }
 
     // The ultimate library node a file id belongs to (follow part→parent to a fixpoint).
+    // The guard bounds a pathological mutual-`part` cycle (invalid Dart — two files each
+    // declaring the other as a part): it terminates at the cap on an arbitrary node
+    // rather than looping forever. A defensive bound, never hit on real code.
     const libNode = (id: string): string => {
       let cur = id;
       let guard = 0;
