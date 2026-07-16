@@ -165,17 +165,28 @@ export function simpleTypeName(rawType: string): string | undefined {
 /**
  * Property (`var`/`let`) declarations with their property-wrapper attributes + type.
  * Reads the stripped source. Attribute names are captured from the line prefix
- * (`@Relationship(deleteRule: .cascade) var author: Author` → attribute `Relationship`,
- * type `Author`). Best-effort (a multi-line type annotation is truncated at the line).
+ * Property-wrapper attributes are captured from the SAME line prefix
+ * (`@Relationship(deleteRule: .cascade) var author: Author`) AND from contiguous
+ * attribute-only lines directly above — the idiomatic Fluent/SwiftData layout puts
+ * the wrapper on its own line (`@Parent(key: "userID")` \n `var user: User`).
+ * Best-effort (a multi-line type annotation is truncated at the `var`/`let` line).
  */
 export function properties(text: string): SwiftProperty[] {
   const lines = stripCommentsAndStrings(text).split('\n');
   const out: SwiftProperty[] = [];
-  for (const line of lines) {
-    const m = line.match(PROP_RE);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(PROP_RE);
     if (!m || !m.groups) continue;
     const attributes: string[] = [];
+    // Same-line leading attributes.
     for (const a of (m.groups.pre ?? '').matchAll(LEADING_ATTRS_RE)) attributes.push(a[1]);
+    // Contiguous attribute-only lines directly above (break on the first non-attribute
+    // line — a blank line or another statement ends this property's attribute run).
+    for (let j = i - 1; j >= 0; j--) {
+      if (!ATTR_ONLY_LINE_RE.test(lines[j])) break;
+      const am = lines[j].trim().match(/@([A-Za-z_][A-Za-z0-9_]*)/);
+      if (am) attributes.unshift(am[1]);
+    }
     const rawType = m.groups.type?.trim();
     out.push({
       attributes,
