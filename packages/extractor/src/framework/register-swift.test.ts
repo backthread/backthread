@@ -5,9 +5,9 @@
 // test file in its own process, so the module-level once-flag starts fresh here.)
 
 import { describe, it, expect } from '../testkit.js';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { clearFrameworkAdapters, listFrameworkAdapters } from './registry.js';
 import { registerBuiltinFrameworkAdapters, registerLanguageScopedFrameworkAdapters } from './register.js';
 import { registerSwiftFrameworkAdapters } from './register-swift.js';
@@ -17,25 +17,41 @@ const SWIFT_FLEET = ['swift-ui', 'vapor', 'swift-data'];
 
 async function repo(files: Record<string, string>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'bt-swift-gate-'));
-  for (const [rel, content] of Object.entries(files)) await writeFile(join(dir, rel), content);
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = join(dir, rel);
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, content);
+  }
   return dir;
 }
 
+// NOTE: register.ts keeps a module-level `swiftRegistered` once-flag that
+// clearFrameworkAdapters() does NOT reset, so only ONE test per process may drive the
+// gate to registration. That test uses a NESTED-only manifest — the case ARP-1344 adds
+// (the deep gate). The root short-circuit is covered by language.test.ts's
+// hasSwiftManifestDeep predicate test. (node --test isolates each file in its own
+// process, so the flag starts fresh here.)
 describe('registerLanguageScopedFrameworkAdapters (Swift gate)', () => {
-  it('does not load the Swift fleet for a repo without a Swift manifest', async () => {
+  it('does not load the Swift fleet for a repo without any Swift manifest', async () => {
     clearFrameworkAdapters();
     registerBuiltinFrameworkAdapters();
     const before = listFrameworkAdapters().length;
     const dir = await repo({ 'package.json': '{"name":"x"}' });
-    await registerLanguageScopedFrameworkAdapters(dir); // no Package.swift → no-op
+    await registerLanguageScopedFrameworkAdapters(dir); // no Swift manifest → no-op
     expect(listFrameworkAdapters().length).toBe(before);
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('registers the Swift fleet when a Package.swift is present', async () => {
+  it('registers the Swift fleet for a NESTED-only Swift package under a JS root', async () => {
     clearFrameworkAdapters();
     registerBuiltinFrameworkAdapters();
-    const dir = await repo({ 'Package.swift': 'let p = Package(name: "X")\n' });
+    // JS-root monorepo, iOS app under `mobile/MyApp/` — no root Swift manifest, so the
+    // fleet loads only via the nested-aware deep gate (hasSwiftManifestDeep).
+    const dir = await repo({
+      'package.json': '{"name":"web"}',
+      'mobile/MyApp/Package.swift': 'let p = Package(name: "MyApp")\n',
+      'mobile/MyApp/Sources/App/App.swift': 'import SwiftUI\n',
+    });
     await registerLanguageScopedFrameworkAdapters(dir);
     const names = listFrameworkAdapters().map((a) => a.name);
     for (const adapter of SWIFT_FLEET) expect(names).toContain(adapter);

@@ -14,6 +14,7 @@ import {
   hasMixManifestDeep,
   hasComposerManifest,
   hasSwiftManifest,
+  hasSwiftManifestDeep,
 } from './language.js';
 import type { NormalizedGraph } from './types.js';
 
@@ -359,6 +360,44 @@ describe('hasSwiftManifest', () => {
     expect(hasSwiftManifest(await repo({ 'App.xcworkspace/contents.xcworkspacedata': '<x/>\n' }))).toBe(true);
     expect(hasSwiftManifest(await repo({ 'package.json': '{}' }))).toBe(false);
     expect(hasSwiftManifest(await repo({ Gemfile: "gem 'rails'\n" }))).toBe(false);
+  });
+});
+
+describe('hasSwiftManifestDeep', () => {
+  it('matches hasSwiftManifest at the root (cheap short-circuit)', async () => {
+    expect(hasSwiftManifestDeep(await repo({ 'Package.swift': 'let p = Package(name: "X")\n' }))).toBe(true);
+    expect(hasSwiftManifestDeep(await repo({ Podfile: "pod 'AF'\n" }))).toBe(true);
+    expect(hasSwiftManifestDeep(await repo({ 'MyApp.xcodeproj/project.pbxproj': '// proj\n' }))).toBe(true);
+  });
+
+  it('finds a nested-only Swift package the root-only check misses', async () => {
+    // A JS-root monorepo with the iOS app under `mobile/MyApp/` — no root Swift manifest.
+    const dir = await repo({
+      'package.json': '{"name":"web"}',
+      'mobile/MyApp/Package.swift': 'let p = Package(name: "MyApp")\n',
+      'mobile/MyApp/Sources/App/App.swift': 'import SwiftUI\n',
+    });
+    expect(hasSwiftManifest(dir)).toBe(false); // root-only selector still says no
+    expect(hasSwiftManifestDeep(dir)).toBe(true); // the fleet gate says yes
+  });
+
+  it('finds a nested-only Xcode project (no plain-file manifest)', async () => {
+    const dir = await repo({
+      'package.json': '{"name":"web"}',
+      'ios/MyApp.xcodeproj/project.pbxproj': '// proj\n',
+    });
+    expect(hasSwiftManifest(dir)).toBe(false);
+    expect(hasSwiftManifestDeep(dir)).toBe(true);
+  });
+
+  it('ignores a vendored/build manifest and returns false for a non-Swift repo', async () => {
+    const dir = await repo({
+      'package.json': '{}',
+      '.build/checkouts/SomeDep/Package.swift': 'let p = Package(name: "Dep")\n',
+      'Pods/Vendored/Vendored.xcodeproj/project.pbxproj': '// proj\n',
+    });
+    expect(hasSwiftManifestDeep(dir)).toBe(false);
+    expect(hasSwiftManifestDeep(await repo({ 'README.md': '# hi\n' }))).toBe(false);
   });
 });
 
