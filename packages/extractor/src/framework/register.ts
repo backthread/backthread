@@ -20,7 +20,7 @@
 // protocol adapter that co-fires on the same repo.
 
 import { registerFrameworkAdapter } from './registry.js';
-import { hasRubyManifest, hasMixManifestDeep, hasKotlinManifest } from '../graph/language.js';
+import { hasRubyManifest, hasMixManifestDeep, hasKotlinManifest, hasComposerManifest } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
 import { nestAdapter } from './nest/nest.js';
@@ -71,13 +71,14 @@ export function registerBuiltinFrameworkAdapters(): void {
 let rubyRegistered = false;
 let elixirRegistered = false;
 let kotlinRegistered = false;
+let phpRegistered = false;
 
 /**
  * Register the framework adapters whose toolchain must NOT load for every repo.
  * Both pipeline steps (detect + contribute) call this before detection; it is
  * idempotent (once per process) and never throws. Gated per-language: Ruby on a
- * Ruby manifest (Gemfile / *.gemspec), Elixir on a mix.exs. A future language
- * registers behind the same gate.
+ * Ruby manifest (Gemfile / *.gemspec), Elixir on a mix.exs, PHP on a composer.json.
+ * A future language registers behind the same gate.
  */
 export async function registerLanguageScopedFrameworkAdapters(repoDir: string): Promise<void> {
   if (!rubyRegistered && hasRubyManifest(repoDir)) {
@@ -103,5 +104,14 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     kotlinRegistered = true;
     const { registerKotlinFrameworkAdapters } = await import('./register-kotlin.js');
     registerKotlinFrameworkAdapters();
+  }
+  // PHP fleet — gated on a composer.json / composer.lock. Every PHP adapter's
+  // analysis loads `php-parser` via the shared PHP AST layer, so the module is
+  // imported ONLY here, only for a PHP repo; a TS/Python/Ruby/Elixir/Dart/Kotlin
+  // ingest never module-loads php-parser (the isolation gate).
+  if (!phpRegistered && hasComposerManifest(repoDir)) {
+    phpRegistered = true;
+    const { registerPhpFrameworkAdapters } = await import('./register-php.js');
+    registerPhpFrameworkAdapters();
   }
 }

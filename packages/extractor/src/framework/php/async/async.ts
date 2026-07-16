@@ -97,9 +97,14 @@ function lastSeg(name: string): string {
   return i >= 0 ? name.slice(i + 1) : name;
 }
 
-// Laravel: a queued job implements ShouldQueue.
-function isLaravelJob(cls: PhpClass): boolean {
-  return cls.kind === 'class' && cls.implements.some((i) => lastSeg(i) === 'ShouldQueue');
+// Laravel: a queued job DIRECTLY implements ShouldQueue, OR lives in app/Jobs/ (the
+// convention). The path signal catches a job that inherits ShouldQueue from a base
+// class (`class SyncJob extends QueuedJob`) instead of re-declaring the interface —
+// the transitive-implements case a class-local check misses.
+function isLaravelJob(cls: PhpClass, fileId: string): boolean {
+  if (cls.kind !== 'class') return false;
+  if (cls.implements.some((i) => lastSeg(i) === 'ShouldQueue')) return true;
+  return /(^|\/)app\/Jobs\//.test(fileId);
 }
 
 // Dispatch method names (Laravel + Symfony Messenger share `dispatch`).
@@ -149,7 +154,7 @@ async function analyzeAsync(ctx: FrameworkContext): Promise<AsyncAnalysis> {
   const messageFqnToHandler = new Map<string, string>();
   for (const [fileId, parsed] of scope.parsed) {
     for (const cls of parsed.classes) {
-      if (signals.hasLaravelQueue && isLaravelJob(cls)) {
+      if (signals.hasLaravelQueue && isLaravelJob(cls, fileId)) {
         jobFqnToFile.set(cls.fqn, fileId);
         roles.set(fileId, { role: 'job', kind: ROLE_KIND, priority: ROLE_PRIORITY, metadata: { framework: 'php-async' } });
       }

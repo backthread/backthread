@@ -138,8 +138,13 @@ function lastSeg(name: string): string {
   return i >= 0 ? name.slice(i + 1) : name;
 }
 
+// Any `.php` directly under a `routes/` dir is a route-definition file. The
+// conventional names are web.php / api.php, but real apps split routes (koel's
+// web.base.php / api.base.php, an app's admin.php / channels.php) and load them
+// via a provider — a non-route file there simply has no `Route::` calls, so
+// walking it is harmless.
 function isRouteFile(fileId: string): boolean {
-  return /(^|\/)routes\/(web|api)\.php$/.test(fileId);
+  return /(^|\/)routes\/[^/]+\.php$/.test(fileId);
 }
 
 interface ChainStep {

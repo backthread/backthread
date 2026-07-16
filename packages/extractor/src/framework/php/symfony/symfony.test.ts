@@ -84,6 +84,21 @@ describe('symfony roleTags', () => {
     expect(roles.has('src/Service/Mailer.php')).toBe(false);
   });
 
+  it('tags controllers in a modular bundle Controller/ dir (not just src/Controller)', async () => {
+    const ctx = await symfonyRepo({
+      'composer.json': COMPOSER,
+      // A Sylius-style bundle controller: nested Controller/ dir, extends a
+      // ResourceController base (NOT AbstractController), no #[Route].
+      'src/App/UserBundle/Controller/UserController.php':
+        '<?php\nnamespace App\\UserBundle\\Controller;\nuse App\\ResourceBundle\\Controller\\ResourceController;\nclass UserController extends ResourceController {}\n',
+      'src/App/UserBundle/Command/CleanupCommand.php':
+        '<?php\nnamespace App\\UserBundle\\Command;\nuse Symfony\\Component\\Console\\Command\\Command;\nclass CleanupCommand extends Command {}\n',
+    });
+    const roles = await symfonyAdapter.roleTags!(ctx);
+    expect(roles.get('src/App/UserBundle/Controller/UserController.php')).toMatchObject({ role: 'controller', kind: 'gateway' });
+    expect(roles.get('src/App/UserBundle/Command/CleanupCommand.php')).toMatchObject({ role: 'command', kind: 'job' });
+  });
+
   it('has no route-spine syntheticEdges hook (routes self-declare on controllers)', () => {
     expect(symfonyAdapter.syntheticEdges).toBeUndefined();
   });
