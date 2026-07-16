@@ -83,6 +83,27 @@ describe('classifyNoise — path → category', () => {
       expect(classifyNoise(p)).toBeNull();
     }
   });
+
+  it('classifies Swift noise (SwiftPM Tests/ + *Tests.swift / *Spec.swift)', () => {
+    const cases: [string, string][] = [
+      ['Tests/AppFeatureTests/HomeTests.swift', 'test'],
+      ['Tests/AppFeatureTests/Support.swift', 'test'], // any file under Tests/
+      ['MyAppUITests/LoginUITests.swift', 'test'], // Xcode dir, plural suffix
+      ['Sources/App/AuthSpec.swift', 'test'], // Quick spec
+    ];
+    for (const [path, cat] of cases) expect(classifyNoise(path)).toBe(cat);
+  });
+
+  it('keeps legitimate Swift source (no over-match on Test/Spec substrings)', () => {
+    for (const p of [
+      'Sources/App/HomeView.swift',
+      'Sources/App/Manifest.swift', // ends in "fest", not "Tests"
+      'Sources/App/ABTest.swift', // singular Test → a feature, not a unit test
+      'Sources/App/Latest.swift', // lowercase "test" substring
+    ]) {
+      expect(classifyNoise(p)).toBeNull();
+    }
+  });
 });
 
 // A fixture graph: 3 legitimate source files + one of each noise kind, with

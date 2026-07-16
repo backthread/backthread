@@ -93,6 +93,17 @@ const PYTHON_MIGRATION_DIRS = new Set(['migrations']);
 const PYTHON_TEST_FILE_RE = /(^|\/)(test_[^/]*|[^/]*_test|conftest)\.pyi?$/;
 const PYTHON_SETUP_RE = /(^|\/)setup\.py$/;
 
+// Swift noise. SwiftPM puts test targets in a CAPITALIZED `Tests/` dir (the
+// lowercase `test`/`tests` dirs the Python rule catches don't cover it), and XCTest
+// / Quick test files are conventionally `<Name>Tests.swift` / `<Name>Spec.swift`
+// (the plural `Tests` matches the XCTestCase-subclass naming convention; an Xcode
+// `<App>UITests.swift` is caught by the same suffix). The TS/Python file regexes
+// never match a `.swift` path, so Swift needs its own shapes. `*Test.swift`
+// (singular) is deliberately NOT matched — it would drop a legit feature like
+// `ABTest.swift`; a real unit test is plural or lives under a Tests dir.
+const SWIFT_TEST_DIRS = new Set(['Tests']);
+const SWIFT_TEST_FILE_RE = /(^|\/)[^/]*(Tests|Spec)\.swift$/;
+
 // --- the rule table (config-driven; ORDERED — first match wins for the
 // category label; a file is dropped regardless of which rule claims it) -------
 
@@ -146,6 +157,11 @@ export const NOISE_RULES: readonly NoiseRule[] = [
     category: 'config',
     description: 'Python setup.py packaging config',
     match: (p) => PYTHON_SETUP_RE.test(p),
+  },
+  {
+    category: 'test',
+    description: 'Swift tests: SwiftPM Tests/ dirs and *Tests.swift / *Spec.swift (XCTest/Quick)',
+    match: (p) => hasDirSegment(p, SWIFT_TEST_DIRS) || SWIFT_TEST_FILE_RE.test(p),
   },
 ];
 

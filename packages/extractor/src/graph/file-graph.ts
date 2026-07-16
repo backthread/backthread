@@ -29,11 +29,11 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
  * The extractor languages the pipeline supports. The dispatch (graph/extract.ts)
  * picks ONE per repo; every source-path predicate below is parameterized by it so
  * a single implementation serves the ts-morph (TS), Pyright (Python), Prism
- * (Ruby), and the hand-rolled Elixir adapters. `ts` is the default everywhere the
- * caller can't yet supply a language (the incremental diff classifier is TS-only
- * today).
+ * (Ruby), and the hand-rolled Elixir + Swift adapters. `ts` is the default
+ * everywhere the caller can't yet supply a language (the incremental diff
+ * classifier is TS-only today).
  */
-export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php' | 'kotlin';
+export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php' | 'kotlin' | 'swift';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
@@ -88,6 +88,16 @@ export const PHP_SOURCE_EXTENSIONS = ['php'] as const;
  * repo-code execution.
  */
 export const KOTLIN_SOURCE_EXTENSIONS = ['kt'] as const;
+
+/**
+ * Swift source extensions the hand-rolled Swift scanner parses: just `.swift`
+ * (Swift has one source extension). Xcode's ObjC `.h`/`.m` bridging files are
+ * deliberately NOT parsed (a documented v1 degrade). All plain-text Swift the
+ * syntactic scanner reads; no native grammar, no repo-code execution. `Package.swift`
+ * matches `.swift` but is a MANIFEST (parsed for targets/deps, never a graph node),
+ * so the scanner skips it explicitly.
+ */
+export const SWIFT_SOURCE_EXTENSIONS = ['swift'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -231,6 +241,34 @@ export const KOTLIN_EXCLUDE_DIRS = [
   '.git',
 ] as const;
 
+/**
+ * Directories the Swift scanner's walk excludes: the SwiftPM build tree (`.build`,
+ * the Swift analogue of `_build` / `node_modules` — vendored+built deps we never
+ * read as first-party), CocoaPods' vendored pods (`Pods`), Xcode's build products
+ * (`DerivedData`), and Carthage's checkouts (`Carthage`). `.build` is also caught
+ * by the dot-segment skip; listed explicitly so the policy is self-contained.
+ * `node_modules` is kept because a Swift repo may ship a JS toolchain (docs, a
+ * companion web app). The Xcode CONTAINER dirs (`*.xcodeproj`/`*.xcworkspace`/
+ * `*.xcassets`/`*.playground`) are SUFFIX-named, so they can't be exact-set
+ * members — isSourceFilePath rejects files under them via SWIFT_EXCLUDE_SUFFIXES.
+ */
+export const SWIFT_EXCLUDE_DIRS = [
+  '.build',
+  'Pods',
+  'DerivedData',
+  'Carthage',
+  'node_modules',
+  '.git',
+] as const;
+
+/**
+ * Xcode CONTAINER directory suffixes — bundle-like dirs whose name ends with one of
+ * these. They hold generated project metadata / assets / playground scratch, never
+ * first-party Swift source, so any `.swift` under them is excluded. Suffix-matched
+ * (not exact) because the prefix is the project/app name (`MyApp.xcodeproj`).
+ */
+export const SWIFT_EXCLUDE_SUFFIXES = ['.xcodeproj', '.xcworkspace', '.xcassets', '.playground'] as const;
+
 const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXTENSIONS.join('|')})$`);
 const PYTHON_SOURCE_EXT_RE = new RegExp(`\\.(${PYTHON_SOURCE_EXTENSIONS.join('|')})$`);
 const RUBY_SOURCE_EXT_RE = new RegExp(`\\.(${RUBY_SOURCE_EXTENSIONS.join('|')})$`);
@@ -238,6 +276,7 @@ const ELIXIR_SOURCE_EXT_RE = new RegExp(`\\.(${ELIXIR_SOURCE_EXTENSIONS.join('|'
 const DART_SOURCE_EXT_RE = new RegExp(`\\.(${DART_SOURCE_EXTENSIONS.join('|')})$`);
 const PHP_SOURCE_EXT_RE = new RegExp(`\\.(${PHP_SOURCE_EXTENSIONS.join('|')})$`);
 const KOTLIN_SOURCE_EXT_RE = new RegExp(`\\.(${KOTLIN_SOURCE_EXTENSIONS.join('|')})$`);
+const SWIFT_SOURCE_EXT_RE = new RegExp(`\\.(${SWIFT_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
 const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
@@ -245,6 +284,7 @@ const ELIXIR_EXCLUDE_SET = new Set<string>(ELIXIR_EXCLUDE_DIRS);
 const DART_EXCLUDE_SET = new Set<string>(DART_EXCLUDE_DIRS);
 const PHP_EXCLUDE_SET = new Set<string>(PHP_EXCLUDE_DIRS);
 const KOTLIN_EXCLUDE_SET = new Set<string>(KOTLIN_EXCLUDE_DIRS);
+const SWIFT_EXCLUDE_SET = new Set<string>(SWIFT_EXCLUDE_DIRS);
 
 // A Blade view (`*.blade.php`) ends in `.php` but is a template with no import
 // backbone — an edgeless leaf. Rejected outright so it never becomes a graph node.
@@ -272,7 +312,12 @@ const RUBY_SOURCE_BASENAMES = new Set<string>(['Rakefile']);
  * `.leex` + the Elixir exclude set (`_build`/`deps`/`.elixir_ls`/`cover`); the
  * dot-segment skip drops `.elixir_ls`/`.formatter.exs`. For `kotlin` it's `.kt` ONLY
  * (a `.kts` build script is NOT source) + the Kotlin exclude set
- * (`build`/`.gradle`/`.idea`/`.kotlin`/`buildSrc`/`build-logic`).
+ * (`build`/`.gradle`/`.idea`/`.kotlin`/`buildSrc`/`build-logic`). For `swift` it's
+ * `.swift` + the Swift exclude set (`.build`/`Pods`/`DerivedData`/`Carthage`) PLUS a
+ * reject of any Xcode container-dir segment (`*.xcodeproj`/`*.xcassets`/…,
+ * suffix-matched, since those are name-prefixed by the project). `Package.swift`
+ * matches `.swift` here (it's the swift adapter that filters it out as a manifest,
+ * mirroring the Elixir adapter's mix.exs skip).
  */
 export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean {
   const extRe =
@@ -288,7 +333,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
               ? PHP_SOURCE_EXT_RE
               : lang === 'kotlin'
                 ? KOTLIN_SOURCE_EXT_RE
-                : SOURCE_EXT_RE;
+                : lang === 'swift'
+                  ? SWIFT_SOURCE_EXT_RE
+                  : SOURCE_EXT_RE;
   const excludes =
     lang === 'python'
       ? PYTHON_EXCLUDE_SET
@@ -302,7 +349,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
               ? PHP_EXCLUDE_SET
               : lang === 'kotlin'
                 ? KOTLIN_EXCLUDE_SET
-                : EXCLUDE_SET;
+                : lang === 'swift'
+                  ? SWIFT_EXCLUDE_SET
+                  : EXCLUDE_SET;
   // Ruby has extension-less source files (a `Rakefile`); every other language —
   // and every other Ruby file — must match its language's source extension.
   const base = path.slice(path.lastIndexOf('/') + 1);
@@ -313,6 +362,10 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
   for (const seg of path.split('/')) {
     if (seg.startsWith('.')) return false;
     if (excludes.has(seg)) return false;
+    // Swift: reject a `.swift` file sitting inside an Xcode container bundle dir
+    // (`MyApp.xcodeproj/…`, `Assets.xcassets/…`) — suffix-matched, since the dir is
+    // name-prefixed by the project/app.
+    if (lang === 'swift' && SWIFT_EXCLUDE_SUFFIXES.some((s) => seg.endsWith(s))) return false;
   }
   return true;
 }
