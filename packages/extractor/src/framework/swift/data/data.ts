@@ -96,7 +96,7 @@ function readHead(path: string, maxBytes = 4096): string {
 export function detectDataSignals(base: string, deps: Set<string>): DataSignals {
   let hasSwiftData = false;
   let hasCoreData = false;
-  let hasFluent = FLUENT_DEPS.has([...deps].find((d) => FLUENT_DEPS.has(d)) ?? '');
+  let hasFluent = [...deps].some((d) => FLUENT_DEPS.has(d));
   let scanned = 0;
   const walk = (dir: string): void => {
     if (scanned >= DETECT_FILE_CAP || (hasSwiftData && hasCoreData && hasFluent)) return;
@@ -157,6 +157,13 @@ const ASSOC_ATTRS = new Set<string>([
   'OptionalChild',
   'Siblings',
 ]);
+// The EXPLICIT relationship wrappers (everything but @NSManaged) ALWAYS name a model,
+// so an unresolvable target is a real degrade to LOG. @NSManaged is mixed (it also
+// wraps scalar attributes whose types resolve to nothing legitimately), so it stays
+// silent.
+const EXPLICIT_ASSOC_ATTRS = new Set<string>(
+  [...ASSOC_ATTRS].filter((a) => a !== 'NSManaged'),
+);
 
 // Fluent-model disambiguation: a `: Model` conformance is only a Fluent model when
 // the file imports a Fluent module (SwiftData uses the `@Model` ATTRIBUTE, not a
@@ -284,9 +291,11 @@ function analyzeData(ctx: FrameworkContext): DataAnalysis {
       if (!attr || !prop.type) continue;
       const target = scope.resolve(prop.type);
       if (target === undefined) {
-        // A scalar (@NSManaged var name: String) resolves to nothing — not an
-        // unresolved ASSOCIATION, just a non-model property. Only log when the
-        // property type looks like a model reference we couldn't place.
+        // A scalar (@NSManaged var name: String) resolves to nothing — legitimately
+        // silent. But an EXPLICIT relationship wrapper always names a model, so an
+        // unresolvable target (an ambiguous name, or a type outside the repo) is a
+        // real degrade → log it (no silent caps).
+        if (EXPLICIT_ASSOC_ATTRS.has(attr)) diag.unresolved.add(`${id}: @${attr} → ${prop.type}`);
         continue;
       }
       if (!modelFiles.has(target)) continue; // only model→model edges
@@ -312,7 +321,10 @@ function analyzeData(ctx: FrameworkContext): DataAnalysis {
     );
   }
   if (diag.unresolved.size > 0) {
-    console.log(`  [swift-data] degraded: ${diag.unresolved.size} unresolvable association target(s) (logged)`);
+    console.log(
+      `  [swift-data] degraded: ${diag.unresolved.size} unresolvable association target(s): ` +
+        `${[...diag.unresolved].sort().slice(0, 10).join(' · ')} (logged, not silently dropped)`,
+    );
   }
 
   return { groups, edges: sortedEdges, roles };
