@@ -39,7 +39,13 @@
 // interpolation is not seen; `@objc`/`NSClassFromString`/selector-based references
 // are not tokens; generic type PARAMETERS (`<Element>`) are best-effort (a param
 // name colliding with a declared type is a rare false edge); lowercase-named types
-// are missed (the UpperCamelCase reference filter).
+// are missed (the UpperCamelCase reference filter). CALL edges (v2) add their own
+// accuracy-over-recall tradeoffs: a custom property-wrapper / macro attribute
+// `@Injected(...)` is captured as an init call (a wrapper IS instantiated); an
+// UpperCamelCase FREE-FUNCTION call/decl `Process(...)` that collides with a
+// same-named type is a rare false edge (bounded by the unique-type registry); and a
+// GENERIC initializer `Container<Foo>()` is NOT captured (the head is followed by
+// `<`, not `(`) — a recall loss, no false edge.
 
 // ---------------------------------------------------------------------------
 // Comment + string stripping (the accurate foundation).
