@@ -7,7 +7,7 @@ import { describe, it, expect, afterEach } from '../testkit.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { SwiftExtractor, assignFilesToTargets } from './swift-adapter.js';
+import { SwiftExtractor, assignFilesToTargets, extractFileCalls } from './swift-adapter.js';
 import type { NormalizedGraph } from './types.js';
 
 const dirs: string[] = [];
@@ -30,6 +30,9 @@ function internalEdges(g: NormalizedGraph): Set<string> {
 }
 function externalIds(g: NormalizedGraph): Set<string> {
   return new Set(g.edges.filter((e) => e.external).map((e) => e.to));
+}
+function callEdges(g: NormalizedGraph): Set<string> {
+  return new Set(g.edges.filter((e) => e.kind === 'call' && !e.external).map((e) => `${e.from} -> ${e.to}`));
 }
 
 // A single-module SwiftUI app: no Package.swift, types in separate files referencing
@@ -127,6 +130,86 @@ describe('SwiftExtractor — multi-module SPM', () => {
     // No type ref resolves, but `import Core` draws a module-boundary edge to Core's
     // representative file.
     expect(internalEdges(g)).toContain('Sources/UI/Screen.swift -> Sources/Core/Helpers.swift');
+  });
+});
+
+describe('SwiftExtractor — call edges (v2)', () => {
+  it('resolves an unambiguous in-repo initializer / static call to a call edge', async () => {
+    const dir = await repo({
+      'Sources/App/Home.swift': 'struct Home {\n  func body() { let s = UserStore(); Analytics.track() }\n}\n',
+      'Sources/App/UserStore.swift': 'final class UserStore {}\n',
+      'Sources/App/Analytics.swift': 'enum Analytics { static func track() {} }\n',
+    });
+    const g = await new SwiftExtractor().extract(dir);
+    const calls = callEdges(g);
+    expect(calls).toContain('Sources/App/Home.swift -> Sources/App/UserStore.swift'); // initializer
+    expect(calls).toContain('Sources/App/Home.swift -> Sources/App/Analytics.swift'); // static call
+  });
+
+  it('drops an ambiguous callee (declared in ≥2 files) — no guessed call edge', async () => {
+    const dir = await repo({
+      'Sources/A/Thing.swift': 'struct Thing {}\n',
+      'Sources/B/Thing.swift': 'struct Thing {}\n', // ambiguous → dropped from the registry
+      'Sources/C/Use.swift': 'struct Use { func f() { let t = Thing() } }\n',
+    });
+    const g = await new SwiftExtractor().extract(dir);
+    expect([...callEdges(g)].some((e) => e.startsWith('Sources/C/Use.swift ->'))).toBe(false);
+  });
+
+  it('drops external / Apple-SDK call heads (only in-repo types resolve)', async () => {
+    const dir = await repo({
+      'Sources/App/V.swift': 'import SwiftUI\nimport Foundation\nstruct V { func f() { Text("x"); let u = URLSession() } }\n',
+    });
+    const g = await new SwiftExtractor().extract(dir);
+    expect(callEdges(g).size).toBe(0); // Text (SwiftUI) + URLSession (Foundation) are not in-repo
+  });
+
+  it('drops a self call but keeps a cross-file call', async () => {
+    const dir = await repo({
+      'Sources/App/Factory.swift': 'struct Factory {\n  func make() { let x = Factory(); let y = Widget() }\n}\n',
+      'Sources/App/Widget.swift': 'struct Widget {}\n',
+    });
+    const g = await new SwiftExtractor().extract(dir);
+    const calls = callEdges(g);
+    expect(calls).toContain('Sources/App/Factory.swift -> Sources/App/Widget.swift'); // cross-file kept
+    expect(g.edges.filter((e) => e.kind === 'call').every((e) => e.from !== e.to)).toBe(true); // no self-edge
+  });
+
+  it('is deterministic across runs (call edges included)', async () => {
+    const dir = await repo({
+      'Sources/App/A.swift': 'struct A { func f() { B(); C.go() } }\n',
+      'Sources/App/B.swift': 'struct B {}\n',
+      'Sources/App/C.swift': 'enum C { static func go() {} }\n',
+    });
+    const x = await new SwiftExtractor().extract(dir);
+    const y = await new SwiftExtractor().extract(dir);
+    expect(callEdges(x)).toEqual(callEdges(y));
+  });
+});
+
+describe('extractFileCalls', () => {
+  it('resolves unambiguous heads, drops unresolved/self, weights by count, sorts by target', () => {
+    const nameToFile = new Map([
+      ['Foo', 'a/Foo.swift'],
+      ['Bar', 'a/Bar.swift'],
+    ]);
+    // Foo×2, Bar×1; Unknown unresolved (not in registry); Caller is self-ish (not in map).
+    const edges = extractFileCalls('a/Caller.swift', ['Foo', 'Bar', 'Foo', 'Unknown', 'Caller'], nameToFile);
+    expect(edges).toEqual([
+      { to: 'a/Bar.swift', weight: 1 },
+      { to: 'a/Foo.swift', weight: 2 },
+    ]);
+  });
+
+  it('drops a self head (target === fromId)', () => {
+    const nameToFile = new Map([['SelfType', 'a/SelfType.swift']]);
+    expect(extractFileCalls('a/SelfType.swift', ['SelfType', 'SelfType'], nameToFile)).toEqual([]);
+  });
+
+  it('degrades a god-file (over the per-file call-site cap) to import-only', () => {
+    const nameToFile = new Map([['Foo', 'a/Foo.swift']]);
+    const many = Array.from({ length: 2501 }, () => 'Foo'); // > MAX_CALL_SITES_PER_FILE (2500)
+    expect(extractFileCalls('a/Caller.swift', many, nameToFile)).toEqual([]);
   });
 });
 

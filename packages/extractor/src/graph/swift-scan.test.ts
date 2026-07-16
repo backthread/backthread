@@ -7,6 +7,7 @@ import {
   scanImports,
   scanTypeDecls,
   scanTypeReferences,
+  scanCallSites,
   scanSwiftFile,
 } from './swift-scan.js';
 
@@ -125,13 +126,74 @@ describe('scanTypeReferences', () => {
   });
 });
 
+describe('scanCallSites', () => {
+  it('captures initializer and static-call heads', () => {
+    const src = [
+      'func make() {',
+      '  let s = UserStore()', // initializer call → UserStore
+      '  Analytics.track(event)', // static call → Analytics
+      '  let v = HomeView(store: s)', // initializer with args → HomeView
+      '}',
+    ].join('\n');
+    const c = scanCallSites(src);
+    expect(c).toContain('UserStore');
+    expect(c).toContain('Analytics');
+    expect(c).toContain('HomeView');
+  });
+
+  it('does not capture instance calls, member-access heads, or type annotations', () => {
+    const src = [
+      'func f(store: UserStore) {', // UserStore is a param TYPE (followed by `)`, not `(`)
+      '  store.reload()', // instance call — lowercase head, no resolvable type
+      '  foo.Bar()', // member-access head — `Bar` preceded by `.`, excluded
+      '  let x: Config = y', // type annotation, not a call
+      '}',
+    ].join('\n');
+    expect(scanCallSites(src)).toEqual([]);
+  });
+
+  it('excludes pattern-match lines (case Enum.case(binding) / if case)', () => {
+    const src = [
+      'switch state {',
+      'case LoadState.loaded(let items):', // pattern match — NOT a call
+      '  Renderer.draw(items)', // a real static call on the body line → captured
+      '}',
+      'if case Status.active(let x) = s { Foo() }', // if-case line → whole line skipped
+    ].join('\n');
+    const c = scanCallSites(src);
+    expect(c).not.toContain('LoadState'); // switch-case pattern excluded
+    expect(c).not.toContain('Status'); // if-case pattern excluded
+    expect(c).not.toContain('Foo'); // same line as `if case` → conservatively excluded
+    expect(c).toContain('Renderer'); // a genuine call on a non-case body line is kept
+  });
+
+  it('excludes a single-line switch case pattern (`{ case Enum.val(x): … }`)', () => {
+    // The `case` follows `{`, not the line start — the statement-boundary guard catches it.
+    const c = scanCallSites('switch r { case Result.ok(let v): Handler.run(v) }');
+    expect(c).not.toContain('Result'); // enum pattern, not a call
+    expect(c).not.toContain('Handler'); // same line as the case → conservatively excluded
+  });
+
+  it('ignores call-shaped tokens inside comments and strings', () => {
+    const c = scanCallSites('let s = "Widget()" // Gadget()\nlet r = Real()');
+    expect(c).not.toContain('Widget');
+    expect(c).not.toContain('Gadget');
+    expect(c).toContain('Real');
+  });
+
+  it('excludes import lines', () => {
+    expect(scanCallSites('import Foundation\nlet r = Repo()')).toEqual(['Repo']);
+  });
+});
+
 describe('scanSwiftFile (one-pass)', () => {
-  it('derives imports + decls + references consistently', () => {
-    const src = ['import Combine', 'final class ViewModel {', '  let user: User', '}'].join('\n');
+  it('derives imports + decls + references + call sites consistently', () => {
+    const src = ['import Combine', 'final class ViewModel {', '  let user: User', '  func load() { Repo.fetch() }', '}'].join('\n');
     const s = scanSwiftFile(src);
     expect(s.imports).toEqual(['Combine']);
     expect(s.decls).toEqual(['ViewModel']);
     expect(s.references).toContain('User');
     expect(s.references).not.toContain('Combine');
+    expect(s.callSites).toContain('Repo'); // Repo.fetch() → call-site head
   });
 });

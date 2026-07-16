@@ -30,8 +30,13 @@
 //                   `ext:M` (the MODULE name — external ≠ SPM package name, a
 //                   documented degrade), Apple-SDK / stdlib modules dropped.
 //
-// No CALL edges in v1 (dynamic dispatch makes them weak; the type-reference backbone
-// alone gives a legible Map — the import-first stance every language shipped with).
+// CALL edges (v2 — the Elixir-v2 precedent) ride on top of the reference backbone:
+// an initializer `Foo(…)` or a static call `Foo.member(…)` whose UpperCamelCase head
+// resolves UNAMBIGUOUSLY to an in-repo declaration becomes a `call` edge — the same
+// registry the reference backbone keys on, so accuracy is inherited (an ambiguous /
+// external / dynamic / self callee is dropped, never guessed; ARP-325). Instance
+// dispatch (`foo.bar()`) has no resolvable head and is dropped for free. A per-file
+// call-site cap degrades a god-file to import-only (logged, never a silent cap).
 // `Package.swift` matches the `.swift` extension but is a MANIFEST (targets/deps, not
 // a graph node), so it is skipped. Everything is deterministic (sorted outputs,
 // ids derived from paths/names; run-twice is byte-identical).
@@ -54,6 +59,14 @@ const PACKAGE_SWIFT_RE = /(^|\/)Package\.swift$/;
 // (no silent caps) and degrades to module-import edges only. Mirrors the Elixir
 // adapter's MAX_CALL_SITES_PER_FILE.
 const MAX_REFERENCES_PER_FILE = 8000;
+
+// A DETERMINISTIC per-file bound on inline call resolution, so a pathological generated
+// god-file (thousands of call sites) can't dominate the extract. Bounds by COUNT in the
+// (stable) source order — a time budget would break snapshot determinism. A capped file
+// is LOGGED (no silent caps) and degrades to import-only. Mirrors the Elixir/Python
+// adapters' MAX_CALL_SITES_PER_FILE. (Lower than MAX_REFERENCES_PER_FILE: call sites are
+// a subset of references, and 2500 calls in one file is already pathological.)
+const MAX_CALL_SITES_PER_FILE = 2500;
 
 /** Lines of code for one source file (a size/centrality signal). */
 function locOf(text: string): number {
@@ -101,8 +114,40 @@ export interface SwiftResolution {
 }
 
 /**
+ * Resolve one file's call-site heads into internal `call` edge refs (target file id →
+ * call count). Each head is looked up in the type-declaration registry; a head that
+ * resolves to an in-repo file (other than `fromId`) becomes a weighted edge.
+ * Unresolvable / external / ambiguous (dropped-from-registry) / self heads are dropped
+ * — the same registry the reference backbone keys on, so its accuracy is inherited
+ * (ARP-325: no guessed edge). A file whose call-site count exceeds the cap degrades to
+ * import-only (logged, never a silent cap). Sorted by target for a stable record.
+ */
+export function extractFileCalls(
+  fromId: string,
+  callSites: readonly string[],
+  nameToFile: ReadonlyMap<string, string>,
+): FileEdgeRef[] {
+  if (callSites.length > MAX_CALL_SITES_PER_FILE) {
+    console.log(
+      `  [swift] ${fromId}: ${callSites.length} call sites exceed the ${MAX_CALL_SITES_PER_FILE} cap — ` +
+        `call edges skipped for this file (import-only)`,
+    );
+    return [];
+  }
+  const weights = new Map<string, number>();
+  for (const head of callSites) {
+    const target = nameToFile.get(head);
+    if (target === undefined || target === fromId) continue; // unresolved / external / ambiguous / self
+    weights.set(target, (weights.get(target) ?? 0) + 1);
+  }
+  return [...weights]
+    .map(([to, weight]) => ({ to, weight }))
+    .sort((a, b) => (a.to < b.to ? -1 : a.to > b.to ? 1 : 0));
+}
+
+/**
  * Resolve ONE file's scan into internal import edges (type-references +
- * first-party cross-module imports) + external refs. Never throws.
+ * first-party cross-module imports) + external refs + `call` edges. Never throws.
  */
 export function extractFileRecord(
   fromId: string,
@@ -160,7 +205,8 @@ export function extractFileRecord(
     externals: [...externalWeights]
       .map(([id, v]) => ({ id, specifier: v.specifier, weight: v.weight }))
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-    calls: [], // no call edges in v1
+    // v2: initializer / static call-site heads resolved through the type registry.
+    calls: extractFileCalls(fromId, scan.callSites, res.nameToFile),
     reexports: [],
   };
 }
@@ -220,13 +266,15 @@ export class SwiftExtractor implements GraphExtractor {
     // Positive signal for validation (mirrors the framework fleet's log discipline).
     let internalEdges = 0;
     let externalEdges = 0;
+    let callEdges = 0;
     for (const id of fileIds) {
       internalEdges += files[id].imports.length;
       externalEdges += files[id].externals.length;
+      callEdges += files[id].calls.length;
     }
     console.log(
-      `  [swift] ${nameToFile.size} type(s) registered · ${internalEdges} internal edge(s) · ` +
-        `${externalEdges} external ref(s) · ${targetNames.size} SPM target(s)`,
+      `  [swift] ${nameToFile.size} type(s) registered · ${internalEdges} import edge(s) · ` +
+        `${callEdges} call edge(s) · ${externalEdges} external ref(s) · ${targetNames.size} SPM target(s)`,
     );
     // No silent caps (locked): report ambiguous type names that were dropped.
     if (ambiguous.length > 0) {
