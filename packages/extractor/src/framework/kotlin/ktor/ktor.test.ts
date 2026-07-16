@@ -76,6 +76,15 @@ describe('roleTags + route-composition edges', () => {
     );
   });
 
+  it('does not tag a file whose only `routing {` is in a comment', async () => {
+    const files: Array<[string, string]> = [
+      ['src/Notes.kt', 'package x\n// TODO: add routing { get("/") } here later\nclass Notes'],
+    ];
+    const dir = await repo(Object.fromEntries(files));
+    const roles = await ktorAdapter.roleTags!(ctx(dir, files));
+    expect(roles.has('src/Notes.kt')).toBe(false);
+  });
+
   it('drops an ambiguous function-name target (accuracy over recall)', async () => {
     const files: Array<[string, string]> = [
       ['src/App.kt', 'package x\nimport io.ktor.server.application.*\nfun Application.module() { setup() }'],

@@ -29,6 +29,7 @@
 import { clampConfidence, resolveBase } from '../../detect-util.js';
 import { readGradleDeps, readGradleDepsDeep } from '../../../graph/kotlin-manifest.js';
 import { parseKotlinScope, type KotlinScope, type ParsedKotlinFile } from '../analyze.js';
+import { sourceLines } from '../kotlin-ast.js';
 import type {
   DetectMatch,
   FrameworkAdapter,
@@ -83,7 +84,9 @@ const ANALYSIS_CACHE = new WeakMap<FrameworkContext, KtorAnalysis>();
 /** Is this file a Ktor route/module gateway (declares an app-extension fun OR routing DSL)? */
 function isRouteFile(parsed: ParsedKotlinFile): boolean {
   if (parsed.funs.some((f) => f.receiver !== undefined && APP_RECEIVERS.has(f.receiver))) return true;
-  return ROUTING_DSL_RE.test(parsed.text);
+  // Test the comment/string-stripped source so a `routing {` inside a comment or a string
+  // literal never false-tags a file as a gateway.
+  return sourceLines(parsed.text).some((l) => ROUTING_DSL_RE.test(l));
 }
 
 /**
