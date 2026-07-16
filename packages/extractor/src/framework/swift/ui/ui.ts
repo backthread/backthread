@@ -35,13 +35,11 @@
 // Unresolvable nav targets DEGRADE + LOG (no silent caps). Deterministic (sorted
 // outputs, ids derived from paths/names; run-twice is byte-identical).
 
-import { openSync, readSync, closeSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../../detect-util.js';
 import { parseSwiftScope, readSwiftTargets, type ParsedSwiftFile } from '../analyze.js';
 import { assignFilesToTargets } from '../../../graph/swift-adapter.js';
 import { scanImports, stripCommentsAndStrings } from '../swift-ast.js';
-import { SWIFT_EXCLUDE_DIRS, SWIFT_EXCLUDE_SUFFIXES } from '../../../graph/file-graph.js';
+import { scanSwiftSourceHeads } from '../source-scan.js';
 import type {
   DetectMatch,
   FrameworkAdapter,
@@ -58,36 +56,10 @@ import type { ModuleKind } from '../../../types.js';
 // Detection — a BOUNDED source scan for `import SwiftUI` / `import UIKit`.
 
 const DETECT_FILE_CAP = 600; // stop after scanning this many .swift files
-const DETECT_SKIP = new Set<string>([...SWIFT_EXCLUDE_DIRS]);
 
 export interface UiSignals {
   hasSwiftUI: boolean;
   hasUIKit: boolean;
-}
-
-function isXcodeContainer(name: string): boolean {
-  return SWIFT_EXCLUDE_SUFFIXES.some((s) => name.endsWith(s));
-}
-
-/** Read only the HEAD of a file (imports live at the top) — cheap detect. Never throws. */
-function readHead(path: string, maxBytes = 4096): string {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, 'r');
-    const buf = Buffer.allocUnsafe(maxBytes);
-    const n = readSync(fd, buf, 0, maxBytes, 0);
-    return buf.toString('utf8', 0, n);
-  } catch {
-    return '';
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
 }
 
 /**
@@ -98,31 +70,18 @@ function readHead(path: string, maxBytes = 4096): string {
 export function detectUiSignals(base: string): UiSignals {
   let hasSwiftUI = false;
   let hasUIKit = false;
-  let scanned = 0;
-  const walk = (dir: string): void => {
-    if (scanned >= DETECT_FILE_CAP || (hasSwiftUI && hasUIKit)) return;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (scanned >= DETECT_FILE_CAP || (hasSwiftUI && hasUIKit)) return;
-      if (e.isDirectory()) {
-        if (e.name.startsWith('.') || DETECT_SKIP.has(e.name) || isXcodeContainer(e.name)) continue;
-        walk(join(dir, e.name));
-      } else if (e.isFile() && e.name.endsWith('.swift') && e.name !== 'Package.swift') {
-        scanned++;
-        // Imports are at the top of the file — read only the head (cheap detect).
-        for (const mod of scanImports(readHead(join(dir, e.name)))) {
-          if (mod === 'SwiftUI') hasSwiftUI = true;
-          else if (mod === 'UIKit') hasUIKit = true;
-        }
+  scanSwiftSourceHeads(
+    base,
+    (entry, readFileHead) => {
+      if (entry.kind !== 'file') return;
+      for (const mod of scanImports(readFileHead())) {
+        if (mod === 'SwiftUI') hasSwiftUI = true;
+        else if (mod === 'UIKit') hasUIKit = true;
       }
-    }
-  };
-  walk(base);
+      return hasSwiftUI && hasUIKit; // both found → early-exit
+    },
+    DETECT_FILE_CAP,
+  );
   return { hasSwiftUI, hasUIKit };
 }
 
