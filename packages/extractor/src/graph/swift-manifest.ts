@@ -50,6 +50,13 @@ function balancedParens(text: string, openParenIdx: number): string {
  * Find the string value of `label:` (e.g. `name`, `url`, `path`) at BRACKET-DEPTH 0
  * of `args` — i.e. a top-level argument of this DSL call, not one nested inside a
  * `dependencies: [.product(name: …)]` array/paren. Returns undefined when absent.
+ *
+ * ACCEPTED DEGRADE: depth is counted over the raw text without skipping string
+ * literals, so an UNBALANCED bracket inside a `name:`/`path:` string value (e.g.
+ * `path: "weird[dir"`) would desync the counter and could miss a later top-level
+ * arg. Vanishingly rare for a real Package.swift, and it fails safe — a missed
+ * target `path:` falls back to the SwiftPM convention dir; a missed `name:` skips
+ * that target (the extractor's feature-folder grouping still covers its files).
  */
 function stringArgAtTop(args: string, label: string): string | undefined {
   let depth = 0;

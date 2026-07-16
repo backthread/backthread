@@ -48,6 +48,13 @@ import { isAppleSdkModule } from './swift-apple-sdk.js';
 // `Package.swift` at the repo root OR a nested SPM package dir.
 const PACKAGE_SWIFT_RE = /(^|\/)Package\.swift$/;
 
+// A DETERMINISTIC per-file bound on type-reference resolution, so a pathological
+// generated god-file (tens of thousands of tokens) can't dominate the extract. Set
+// high enough that no ordinary hand-written file is capped; a capped file is LOGGED
+// (no silent caps) and degrades to module-import edges only. Mirrors the Elixir
+// adapter's MAX_CALL_SITES_PER_FILE.
+const MAX_REFERENCES_PER_FILE = 8000;
+
 /** Lines of code for one source file (a size/centrality signal). */
 function locOf(text: string): number {
   if (text.length === 0) return 0;
@@ -110,10 +117,19 @@ export function extractFileRecord(
     importWeights.set(to, (importWeights.get(to) ?? 0) + 1);
   };
 
-  // (a) Type-reference edges — the backbone (intra- + cross-module).
-  for (const token of scan.references) {
-    const target = res.nameToFile.get(token);
-    if (target !== undefined) addImport(target);
+  // (a) Type-reference edges — the backbone (intra- + cross-module). A file whose
+  // reference-token count exceeds the cap degrades to module-import edges only
+  // (logged, never silently dropped).
+  if (scan.references.length > MAX_REFERENCES_PER_FILE) {
+    console.log(
+      `  [swift] ${fromId}: ${scan.references.length} reference tokens exceed the ` +
+        `${MAX_REFERENCES_PER_FILE} cap — type-reference edges skipped for this file (import-only)`,
+    );
+  } else {
+    for (const token of scan.references) {
+      const target = res.nameToFile.get(token);
+      if (target !== undefined) addImport(target);
+    }
   }
 
   // (b/c) Module imports — first-party cross-module edge OR external node.

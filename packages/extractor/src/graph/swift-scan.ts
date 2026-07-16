@@ -259,6 +259,10 @@ export function scanTypeDecls(text: string): string[] {
 // An UpperCamelCase identifier token — the Swift type-name convention. The negative
 // lookbehind `(?<![\w.])` stops matching the tail of a dotted member access
 // (`foo.Bar` → we want the receiver, not the member) and mid-identifier fragments.
+// ACCEPTED DEGRADE: this also skips the tail of a module-qualified type reference,
+// so `Models.Todo` resolves only `Models` (its head), missing `Todo`. Recall loss
+// only (no false edge), and rare in practice — cross-module refs are usually bare
+// (`import Models; … Todo`), so the type-reference backbone still connects them.
 const REF_TOKEN_RE = /(?<![\w.])[A-Z][A-Za-z0-9_]*/g;
 
 /**
