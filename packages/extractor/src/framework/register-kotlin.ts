@@ -20,6 +20,7 @@ import { registerFrameworkAdapter } from './registry.js';
 import { androidAdapter } from './kotlin/android/android.js';
 import { ktorAdapter } from './kotlin/ktor/ktor.js';
 import { springAdapter } from './kotlin/spring/spring.js';
+import { kotlinOrmAdapter } from './kotlin/room/room.js';
 
 /**
  * Register every builtin Kotlin framework adapter. Called (once per process) from
@@ -31,5 +32,6 @@ export function registerKotlinFrameworkAdapters(): void {
   registerFrameworkAdapter(androidAdapter); // web / UI
   registerFrameworkAdapter(ktorAdapter); // web (server)
   registerFrameworkAdapter(springAdapter); // web (server)
+  registerFrameworkAdapter(kotlinOrmAdapter); // data (Room / JPA / Exposed)
   console.log('  [kotlin] framework fleet registered (Gradle manifest present)');
 }
