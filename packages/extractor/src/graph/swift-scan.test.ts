@@ -167,6 +167,13 @@ describe('scanCallSites', () => {
     expect(c).toContain('Renderer'); // a genuine call on a non-case body line is kept
   });
 
+  it('excludes a single-line switch case pattern (`{ case Enum.val(x): … }`)', () => {
+    // The `case` follows `{`, not the line start — the statement-boundary guard catches it.
+    const c = scanCallSites('switch r { case Result.ok(let v): Handler.run(v) }');
+    expect(c).not.toContain('Result'); // enum pattern, not a call
+    expect(c).not.toContain('Handler'); // same line as the case → conservatively excluded
+  });
+
   it('ignores call-shaped tokens inside comments and strings', () => {
     const c = scanCallSites('let s = "Widget()" // Gadget()\nlet r = Real()');
     expect(c).not.toContain('Widget');

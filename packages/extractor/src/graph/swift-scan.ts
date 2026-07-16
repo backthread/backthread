@@ -303,8 +303,13 @@ const STATIC_CALL_RE = /(?<![\w.])([A-Z][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*[ 
 // A pattern-match line — `case Foo.bar(let x)`, `if case Foo.status(x) = y`, … — uses
 // the `Enum.case(binding)` syntax the STATIC_CALL_RE would mistake for a call. Skip
 // call-site scanning on such lines (the type is still a REFERENCE → import edge; it's
-// only the `call` verb we withhold — accuracy over recall). Non-global (used with test).
-const CASE_PATTERN_RE = /^\s*case\b|\b(?:if|guard|while|for)\s+case\b/;
+// only the `call` verb we withhold — accuracy over recall). Matches a `case` keyword at
+// a statement boundary (line start OR after `{`/`;`, so a single-line
+// `switch x { case Foo.bar(y): … }` is caught too) or an `if/guard/while/for case`
+// value binding. `case` is a reserved keyword, so `\bcase\b` never hits an identifier
+// like `showcase`. Non-global (used with .test). ACCEPTED recall loss: a real call on
+// the same physical line as a switch case is withheld — rare, and accuracy > recall.
+const CASE_PATTERN_RE = /(?:^|[{;])\s*case\b|\b(?:if|guard|while|for)\s+case\b/;
 
 /**
  * Every resolvable call-site HEAD token in `text`'s code body, in source order (one
