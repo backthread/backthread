@@ -236,11 +236,18 @@ function analyzeState(ctx: FrameworkContext): StateAnalysis {
     const { providerVars, dynamic } = scanRefReads(parsed.text);
     diag.dynamicRefReads += dynamic;
     for (const v of providerVars) {
-      // The declared binding, else the codegen-name heuristic (`fooProvider` → `Foo`).
-      const cls =
-        providerVarToClass.get(v) ??
-        (v.endsWith('Provider') ? capitalize(v.slice(0, -'Provider'.length)) : undefined);
-      const targetFile = cls ? scope.resolve(cls) : undefined;
+      const declared = providerVarToClass.get(v);
+      let targetFile: string | undefined;
+      if (declared) {
+        // An EXPLICIT `NotifierProvider<TheNotifier, …>` binding — trust it (resolve
+        // the named class to any in-repo file).
+        targetFile = scope.resolve(declared);
+      } else if (v.endsWith('Provider')) {
+        // The codegen NAME heuristic (`fooProvider` → `Foo`) is guessy — an app can
+        // have BOTH a `userProvider` and an unrelated `User` model. Require the guessed
+        // class to be an actual STATE HOLDER, so it can't mis-edge to a plain model.
+        targetFile = stateHolderClassToFile.get(capitalize(v.slice(0, -'Provider'.length)));
+      }
       if (targetFile) addEdge(edges, fileId, targetFile, 'ref-watch');
       else diag.unresolvedProviders.add(v);
     }

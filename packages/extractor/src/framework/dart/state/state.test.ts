@@ -110,6 +110,19 @@ describe('stateAdapter', () => {
     expect(roles.get('lib/store.dart')).toMatchObject({ role: 'provider', kind: 'service' });
   });
 
+  it('does not let the codegen heuristic mis-edge to a same-named non-holder (userProvider vs User model)', async () => {
+    const dir = await makeRepo({
+      'pubspec.yaml': 'name: app\ndependencies:\n  flutter_riverpod: ^2.0.0\n',
+      // A plain model named `User` — NOT a state holder.
+      'lib/user.dart': 'class User {\n  final String name = "";\n}\n',
+      // A view reads `userProvider`, which has no declaration here — the codegen name
+      // heuristic must NOT resolve it to the User model.
+      'lib/user_view.dart': "import 'user.dart';\nWidget b(WidgetRef ref) {\n  final u = ref.watch(userProvider);\n  return Text(u.name);\n}\n",
+    });
+    const edges = await stateAdapter.syntheticEdges!(await ctxFor(dir));
+    expect(edges.some((e) => e.target === 'lib/user.dart')).toBe(false);
+  });
+
   it('is deterministic across runs', async () => {
     const ctx = await ctxFor(await makeRepo(APP));
     const a = await stateAdapter.syntheticEdges!(ctx);
