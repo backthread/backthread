@@ -71,12 +71,14 @@ export function mergeGraphs(root: string, graphs: readonly NormalizedGraph[]): N
 }
 
 /**
- * Pick the structural adapter for a detected language. The Python, Ruby, Elixir,
- * Dart, and PHP adapters are LAZILY imported so a TS ingest never loads
+ * Pick the structural adapter for a detected language. The Python, Ruby, Elixir, Dart,
+ * PHP, and Kotlin adapters are LAZILY imported so a TS ingest never loads
  * `@zzzen/pyright-internal`, `@ruby/prism`, the Elixir scanner, the Dart scanner,
- * or `php-parser` (keeps the TS path — and the worker's TS bundle — free of the
- * other-language toolchains; only a repo of that language pays for its parser).
- * TS stays the default + eager (the pipeline's home turf).
+ * `php-parser`, or the Kotlin scanner (keeps the TS path — and the worker's TS bundle —
+ * free of the other-language toolchains; only a repo of that language pays for its
+ * parser). The Dart and Kotlin scanners are hand-rolled + dep-free, so their lazy import
+ * is purely about not loading dead code for a non-Dart/Kotlin repo. TS stays the default
+ * + eager (the pipeline's home turf).
  */
 async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
   if (language === 'python') {
@@ -98,6 +100,10 @@ async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
   if (language === 'php') {
     const { PhpExtractor } = await import('./php-adapter.js');
     return new PhpExtractor();
+  }
+  if (language === 'kotlin') {
+    const { KotlinExtractor } = await import('./kotlin-adapter.js');
+    return new KotlinExtractor();
   }
   return new TsMorphExtractor();
 }

@@ -17,6 +17,7 @@ import {
   ELIXIR_EXCLUDE_DIRS,
   DART_EXCLUDE_DIRS,
   PHP_EXCLUDE_DIRS,
+  KOTLIN_EXCLUDE_DIRS,
   EXCLUDE_DIRS,
   type SourceLang,
 } from './file-graph.js';
@@ -33,6 +34,16 @@ const DART_MANIFESTS = ['pubspec.yaml', 'pubspec.lock'];
 // Composer is PHP's package manager; `composer.json` (the project file) +
 // `composer.lock` (the resolved dep pins) are the unambiguous PHP-repo manifests.
 const PHP_MANIFESTS = ['composer.json', 'composer.lock'];
+// Gradle is Kotlin/JVM's build tool; a `build.gradle(.kts)` / `settings.gradle(.kts)`
+// project file or a `gradle/libs.versions.toml` version catalog is the unambiguous
+// Kotlin/Gradle-repo manifest set. (`.kts` variants are Kotlin-DSL build scripts.)
+const KOTLIN_MANIFESTS = [
+  'build.gradle',
+  'build.gradle.kts',
+  'settings.gradle',
+  'settings.gradle.kts',
+  'gradle/libs.versions.toml',
+];
 
 /**
  * Does the repo root declare a Ruby project? A `Gemfile` / `Gemfile.lock`, or any
@@ -58,6 +69,18 @@ export function hasRubyManifest(repoDir: string): boolean {
  */
 export function hasMixManifest(repoDir: string): boolean {
   return ELIXIR_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
+}
+
+/**
+ * Does the repo root declare a Kotlin/Gradle project? A `build.gradle(.kts)` /
+ * `settings.gradle(.kts)` project file or a `gradle/libs.versions.toml` version catalog.
+ * Shared by the extractor's language detection AND the Gradle-gated framework-fleet
+ * registration (framework/register.ts), so the "is this Kotlin?" answer has ONE source.
+ * (A pure-Java Gradle repo also carries these; the extractor extracts only its `.kt`
+ * files — a mixed Java+Kotlin repo yields the Kotlin half, a documented degrade.)
+ */
+export function hasKotlinManifest(repoDir: string): boolean {
+  return KOTLIN_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
 }
 
 // Depth cap + skip set for the nested manifest probe — mirrors MAX_WALK_DEPTH /
@@ -182,7 +205,9 @@ export function listSourceFiles(root: string, lang: SourceLang): string[] {
             ? DART_EXCLUDE_DIRS
             : lang === 'php'
               ? PHP_EXCLUDE_DIRS
-              : EXCLUDE_DIRS,
+              : lang === 'kotlin'
+                ? KOTLIN_EXCLUDE_DIRS
+                : EXCLUDE_DIRS,
   );
   const out: string[] = [];
 
@@ -213,13 +238,14 @@ export function listSourceFiles(root: string, lang: SourceLang): string[] {
 function countSources(
   root: string,
   cap = 4000,
-): { ts: number; python: number; ruby: number; elixir: number; dart: number; php: number } {
+): { ts: number; python: number; ruby: number; elixir: number; dart: number; php: number; kotlin: number } {
   let ts = 0;
   let python = 0;
   let ruby = 0;
   let elixir = 0;
   let dart = 0;
   let php = 0;
+  let kotlin = 0;
   const absRoot = resolve(root);
   const tsExcl = new Set<string>(EXCLUDE_DIRS);
   const pyExcl = new Set<string>(PYTHON_EXCLUDE_DIRS);
@@ -227,8 +253,10 @@ function countSources(
   const exExcl = new Set<string>(ELIXIR_EXCLUDE_DIRS);
   const dartExcl = new Set<string>(DART_EXCLUDE_DIRS);
   const phpExcl = new Set<string>(PHP_EXCLUDE_DIRS);
+  const ktExcl = new Set<string>(KOTLIN_EXCLUDE_DIRS);
+  const total = (): number => ts + python + ruby + elixir + dart + php + kotlin;
   const walk = (dir: string): void => {
-    if (ts + python + ruby + elixir + dart + php >= cap) return;
+    if (total() >= cap) return;
     let entries: import('node:fs').Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -236,12 +264,12 @@ function countSources(
       return;
     }
     for (const ent of entries) {
-      if (ts + python + ruby + elixir + dart + php >= cap) return;
+      if (total() >= cap) return;
       const abs = `${dir}/${ent.name}`;
       if (ent.isDirectory()) {
         // Skip a dir excluded by ANY language (or dot-prefixed) — the union keeps
         // the count cheap and can't misread vendored deps (node_modules, .venv,
-        // vendor/bundle, deps/_build, .pub-cache) as source.
+        // vendor/bundle, deps/_build, .pub-cache, build/.gradle) as source.
         if (
           ent.name.startsWith('.') ||
           tsExcl.has(ent.name) ||
@@ -249,7 +277,8 @@ function countSources(
           rbExcl.has(ent.name) ||
           exExcl.has(ent.name) ||
           dartExcl.has(ent.name) ||
-          phpExcl.has(ent.name)
+          phpExcl.has(ent.name) ||
+          ktExcl.has(ent.name)
         ) {
           continue;
         }
@@ -262,11 +291,12 @@ function countSources(
         else if (isSourceFilePath(id, 'elixir')) elixir++;
         else if (isSourceFilePath(id, 'dart')) dart++;
         else if (isSourceFilePath(id, 'php')) php++;
+        else if (isSourceFilePath(id, 'kotlin')) kotlin++;
       }
     }
   };
   walk(absRoot);
-  return { ts, python, ruby, elixir, dart, php };
+  return { ts, python, ruby, elixir, dart, php, kotlin };
 }
 
 /**
@@ -287,19 +317,21 @@ export function detectRepoLanguage(repoDir: string): SourceLang {
   const hasElixir = hasMixManifest(repoDir);
   const hasDart = hasDartManifest(repoDir);
   const hasPhp = hasComposerManifest(repoDir);
-  if (hasPy && !hasTs && !hasRuby && !hasElixir && !hasDart && !hasPhp) return 'python';
-  if (hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp) return 'ts';
-  if (hasRuby && !hasTs && !hasPy && !hasElixir && !hasDart && !hasPhp) return 'ruby';
-  if (hasElixir && !hasTs && !hasPy && !hasRuby && !hasDart && !hasPhp) return 'elixir';
-  if (hasDart && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasPhp) return 'dart';
-  if (hasPhp && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart) return 'php';
+  const hasKotlin = hasKotlinManifest(repoDir);
+  if (hasPy && !hasTs && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin) return 'python';
+  if (hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin) return 'ts';
+  if (hasRuby && !hasTs && !hasPy && !hasElixir && !hasDart && !hasPhp && !hasKotlin) return 'ruby';
+  if (hasElixir && !hasTs && !hasPy && !hasRuby && !hasDart && !hasPhp && !hasKotlin) return 'elixir';
+  if (hasDart && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasPhp && !hasKotlin) return 'dart';
+  if (hasPhp && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasKotlin) return 'php';
+  if (hasKotlin && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp) return 'kotlin';
   return pickDominant(countSources(repoDir));
 }
 
 /**
  * The language with the most source files, ties resolving to the earliest of
- * [ts, python, ruby, elixir, dart] — so `ts` stays the default when nothing is
- * present (byte-identical to the pre-Ruby `python > ts ? 'python' : 'ts'`).
+ * [ts, python, ruby, elixir, dart, php, kotlin] — so `ts` stays the default when nothing
+ * is present (byte-identical to the pre-Ruby `python > ts ? 'python' : 'ts'`).
  */
 function pickDominant(counts: {
   ts: number;
@@ -308,6 +340,7 @@ function pickDominant(counts: {
   elixir: number;
   dart: number;
   php: number;
+  kotlin: number;
 }): SourceLang {
   const ranked: Array<[SourceLang, number]> = [
     ['ts', counts.ts],
@@ -316,6 +349,7 @@ function pickDominant(counts: {
     ['elixir', counts.elixir],
     ['dart', counts.dart],
     ['php', counts.php],
+    ['kotlin', counts.kotlin],
   ];
   let best: SourceLang = 'ts';
   let bestCount = -1;
@@ -345,7 +379,7 @@ const MULTI_MIN_FRACTION = 0.15;
  * is deterministic.
  */
 export function detectRepoLanguages(repoDir: string): SourceLang[] {
-  const { ts, python, ruby, elixir, dart, php } = countSources(repoDir);
+  const { ts, python, ruby, elixir, dart, php, kotlin } = countSources(repoDir);
   const all: Array<{ lang: SourceLang; count: number }> = [
     { lang: 'ts', count: ts },
     { lang: 'python', count: python },
@@ -353,10 +387,11 @@ export function detectRepoLanguages(repoDir: string): SourceLang[] {
     { lang: 'elixir', count: elixir },
     { lang: 'dart', count: dart },
     { lang: 'php', count: php },
+    { lang: 'kotlin', count: kotlin },
   ];
   const counts = all.filter((l) => l.count > 0);
   if (counts.length <= 1) return [detectRepoLanguage(repoDir)];
-  const max = Math.max(ts, python, ruby, elixir, dart, php);
+  const max = Math.max(ts, python, ruby, elixir, dart, php, kotlin);
   const present = counts.filter((l) => l.count >= MULTI_MIN_FILES && l.count / max >= MULTI_MIN_FRACTION);
   if (present.length <= 1) return [detectRepoLanguage(repoDir)];
   return present
@@ -374,5 +409,6 @@ export function graphLanguage(graph: NormalizedGraph): SourceLang {
   if (graph.files.some((f) => ELIXIR_LANG_TAGS.has(f.language))) return 'elixir';
   if (graph.files.some((f) => f.language === 'dart')) return 'dart';
   if (graph.files.some((f) => f.language === 'php')) return 'php';
+  if (graph.files.some((f) => f.language === 'kt')) return 'kotlin';
   return 'ts';
 }

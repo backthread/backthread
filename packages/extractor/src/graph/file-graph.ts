@@ -33,7 +33,7 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
  * caller can't yet supply a language (the incremental diff classifier is TS-only
  * today).
  */
-export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php';
+export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php' | 'kotlin';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
@@ -78,6 +78,16 @@ export const DART_SOURCE_EXTENSIONS = ['dart'] as const;
  * and are excluded for free.
  */
 export const PHP_SOURCE_EXTENSIONS = ['php'] as const;
+
+/**
+ * Kotlin source extensions the hand-rolled Kotlin scanner parses: `.kt` compiled
+ * modules ONLY. `.kts` script files (`build.gradle.kts`, `settings.gradle.kts`) are
+ * Gradle BUILD SCRIPTS — read as manifests (dep coordinates + `include(...)`), never
+ * graph nodes (the `mix.exs`-is-a-manifest precedent) — so `.kts` is deliberately
+ * excluded. Plain-text Kotlin the syntactic scanner reads; no native grammar, no
+ * repo-code execution.
+ */
+export const KOTLIN_SOURCE_EXTENSIONS = ['kt'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -201,18 +211,40 @@ export const PHP_EXCLUDE_DIRS = [
   '.git',
 ] as const;
 
+/**
+ * Directories the Kotlin scanner's walk excludes: Gradle build output (`build`) + its
+ * caches (`.gradle`, `.kotlin`), the IntelliJ project dir (`.idea`), and the Gradle
+ * convention-plugin / build-logic dirs (`buildSrc`, `build-logic` — build TOOLING, not
+ * application code; an accepted degrade). Mirrors the other languages' EXCLUDE_DIRS role
+ * — none hold first-party application source. `.gradle`/`.idea`/`.kotlin` are also caught
+ * by the dot-segment skip; listed explicitly so the policy is self-contained.
+ * `node_modules` is kept because a KMP/Compose-web repo can ship a JS toolchain.
+ */
+export const KOTLIN_EXCLUDE_DIRS = [
+  'build',
+  '.gradle',
+  '.idea',
+  '.kotlin',
+  'buildSrc',
+  'build-logic',
+  'node_modules',
+  '.git',
+] as const;
+
 const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXTENSIONS.join('|')})$`);
 const PYTHON_SOURCE_EXT_RE = new RegExp(`\\.(${PYTHON_SOURCE_EXTENSIONS.join('|')})$`);
 const RUBY_SOURCE_EXT_RE = new RegExp(`\\.(${RUBY_SOURCE_EXTENSIONS.join('|')})$`);
 const ELIXIR_SOURCE_EXT_RE = new RegExp(`\\.(${ELIXIR_SOURCE_EXTENSIONS.join('|')})$`);
 const DART_SOURCE_EXT_RE = new RegExp(`\\.(${DART_SOURCE_EXTENSIONS.join('|')})$`);
 const PHP_SOURCE_EXT_RE = new RegExp(`\\.(${PHP_SOURCE_EXTENSIONS.join('|')})$`);
+const KOTLIN_SOURCE_EXT_RE = new RegExp(`\\.(${KOTLIN_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
 const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
 const ELIXIR_EXCLUDE_SET = new Set<string>(ELIXIR_EXCLUDE_DIRS);
 const DART_EXCLUDE_SET = new Set<string>(DART_EXCLUDE_DIRS);
 const PHP_EXCLUDE_SET = new Set<string>(PHP_EXCLUDE_DIRS);
+const KOTLIN_EXCLUDE_SET = new Set<string>(KOTLIN_EXCLUDE_DIRS);
 
 // A Blade view (`*.blade.php`) ends in `.php` but is a template with no import
 // backbone — an edgeless leaf. Rejected outright so it never becomes a graph node.
@@ -238,7 +270,9 @@ const RUBY_SOURCE_BASENAMES = new Set<string>(['Rakefile']);
  * `.rb`/`.rake`/`.ru` (plus the extension-less `Rakefile`) + the Ruby exclude set
  * (`vendor`/`tmp`/`log`/`storage`). For `elixir` it's `.ex`/`.exs`/`.eex`/`.heex`/
  * `.leex` + the Elixir exclude set (`_build`/`deps`/`.elixir_ls`/`cover`); the
- * dot-segment skip drops `.elixir_ls`/`.formatter.exs`.
+ * dot-segment skip drops `.elixir_ls`/`.formatter.exs`. For `kotlin` it's `.kt` ONLY
+ * (a `.kts` build script is NOT source) + the Kotlin exclude set
+ * (`build`/`.gradle`/`.idea`/`.kotlin`/`buildSrc`/`build-logic`).
  */
 export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean {
   const extRe =
@@ -252,7 +286,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
             ? DART_SOURCE_EXT_RE
             : lang === 'php'
               ? PHP_SOURCE_EXT_RE
-              : SOURCE_EXT_RE;
+              : lang === 'kotlin'
+                ? KOTLIN_SOURCE_EXT_RE
+                : SOURCE_EXT_RE;
   const excludes =
     lang === 'python'
       ? PYTHON_EXCLUDE_SET
@@ -264,7 +300,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
             ? DART_EXCLUDE_SET
             : lang === 'php'
               ? PHP_EXCLUDE_SET
-              : EXCLUDE_SET;
+              : lang === 'kotlin'
+                ? KOTLIN_EXCLUDE_SET
+                : EXCLUDE_SET;
   // Ruby has extension-less source files (a `Rakefile`); every other language —
   // and every other Ruby file — must match its language's source extension.
   const base = path.slice(path.lastIndexOf('/') + 1);
