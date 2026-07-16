@@ -26,6 +26,7 @@ import {
   hasKotlinManifest,
   hasComposerManifest,
   hasDartManifestDeep,
+  hasSwiftManifest,
 } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
@@ -79,6 +80,7 @@ let elixirRegistered = false;
 let kotlinRegistered = false;
 let phpRegistered = false;
 let dartRegistered = false;
+let swiftRegistered = false;
 
 /**
  * Register the framework adapters whose toolchain must NOT load for every repo.
@@ -130,5 +132,13 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     dartRegistered = true;
     const { registerDartFrameworkAdapters } = await import('./register-dart.js');
     registerDartFrameworkAdapters();
+  }
+  // Swift fleet — gated on a Swift manifest (Package.swift / Package.resolved / Podfile
+  // / *.xcodeproj|*.xcworkspace dir). The scanner is hand-rolled + dep-free, so this
+  // gate is purely about not module-loading the Swift adapters for a non-Swift repo.
+  if (!swiftRegistered && hasSwiftManifest(repoDir)) {
+    swiftRegistered = true;
+    const { registerSwiftFrameworkAdapters } = await import('./register-swift.js');
+    registerSwiftFrameworkAdapters();
   }
 }
