@@ -22,8 +22,14 @@ async function repo(files: Record<string, string>): Promise<string> {
   return dir;
 }
 
-const internalEdges = (g: { edges: Array<{ from: string; to: string; external: boolean }> }): string[] =>
-  g.edges.filter((e) => !e.external).map((e) => `${e.from}->${e.to}`);
+const internalEdges = (
+  g: { edges: Array<{ from: string; to: string; external: boolean; kind: string }> },
+): string[] => g.edges.filter((e) => !e.external && e.kind === 'import').map((e) => `${e.from}->${e.to}`);
+
+const callEdges = (
+  g: { edges: Array<{ from: string; to: string; kind: string; weight: number }> },
+): Array<{ edge: string; weight: number }> =>
+  g.edges.filter((e) => e.kind === 'call').map((e) => ({ edge: `${e.from}->${e.to}`, weight: e.weight }));
 
 const COMPOSER = JSON.stringify({
   autoload: { 'psr-4': { 'App\\': 'app/' } },
@@ -160,6 +166,84 @@ describe('PhpExtractor', () => {
     const graph = await new PhpExtractor().extract(dir);
     expect(internalEdges(graph)).toContain('app/Services/Billing.php->app/legacy/UserModel.php');
     expect(graph.externals.map((x) => x.id)).not.toContain('ext:App');
+  });
+
+  it('resolves static + typed-instance call edges to an in-repo class (v2)', async () => {
+    const dir = await repo({
+      'composer.json': COMPOSER,
+      'app/Services/UserService.php':
+        '<?php\nnamespace App\\Services;\nclass UserService {\n  public function run(): void {}\n  public static function make(): self { return new self; }\n}\n',
+      'app/Http/UserController.php':
+        '<?php\nnamespace App\\Http;\n' +
+        'use App\\Services\\UserService;\n' +
+        'class UserController {\n' +
+        '  private UserService $svc;\n' +
+        '  public function index(UserService $s): void {\n' +
+        '    $s->run();\n' + // typed param → call edge
+        '    $this->svc->run();\n' + // typed property → call edge
+        '    UserService::make();\n' + // static → call edge
+        '    $local = new UserService();\n' + // new → import edge only, NOT a call edge
+        '    $local->run();\n' + // typed via new-assignment → call edge
+        '    $this->helper();\n' + // $this-> self call → NO edge
+        '    Auth::user();\n' + // vendor facade → NO edge (unresolvable)
+        '  }\n' +
+        '  private function helper(): void {}\n' +
+        '}\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    const calls = callEdges(graph);
+    const controllerToService = calls.find(
+      (c) => c.edge === 'app/Http/UserController.php->app/Services/UserService.php',
+    );
+    // Four resolvable receivers all point at UserService: $s, $this->svc, static, $local.
+    expect(controllerToService?.weight).toBe(4);
+    // The `use App\Services\UserService` still makes an IMPORT edge (independent of calls).
+    expect(internalEdges(graph)).toContain('app/Http/UserController.php->app/Services/UserService.php');
+    // No self-edge from `$this->helper()`, and no vendor `Auth::user()` edge.
+    expect(calls.map((c) => c.edge)).not.toContain('app/Http/UserController.php->app/Http/UserController.php');
+    expect(calls.every((c) => c.edge.endsWith('->app/Services/UserService.php'))).toBe(true);
+  });
+
+  it('resolves `$this->prop->m()` when the property is constructor-promoted (modern DI)', async () => {
+    const dir = await repo({
+      'composer.json': COMPOSER,
+      'app/Services/Mailer.php': '<?php\nnamespace App\\Services;\nclass Mailer { public function send(): void {} }\n',
+      'app/Http/SignupController.php':
+        '<?php\nnamespace App\\Http;\nuse App\\Services\\Mailer;\n' +
+        'class SignupController {\n' +
+        '  public function __construct(private readonly Mailer $mailer) {}\n' +
+        '  public function store(): void { $this->mailer->send(); }\n' + // promoted → call edge
+        '}\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    expect(callEdges(graph).map((c) => c.edge)).toContain(
+      'app/Http/SignupController.php->app/Services/Mailer.php',
+    );
+  });
+
+  it('does NOT emit a call edge for a bare `new X()` (the import edge already covers it)', async () => {
+    const dir = await repo({
+      'composer.json': COMPOSER,
+      'app/Models/Widget.php': '<?php\nnamespace App\\Models;\nclass Widget {}\n',
+      'app/Services/Factory.php':
+        '<?php\nnamespace App\\Services;\nuse App\\Models\\Widget;\nclass Factory {\n  public function build(): Widget { return new Widget(); }\n}\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    // `new Widget()` with no method call → an import edge, but NO call edge.
+    expect(internalEdges(graph)).toContain('app/Services/Factory.php->app/Models/Widget.php');
+    expect(callEdges(graph)).toEqual([]);
+  });
+
+  it('drops an untyped instance call (accuracy over recall)', async () => {
+    const dir = await repo({
+      'composer.json': COMPOSER,
+      'app/Services/Thing.php': '<?php\nnamespace App\\Services;\nclass Thing { public function go(): void {} }\n',
+      'app/Services/Runner.php':
+        '<?php\nnamespace App\\Services;\nclass Runner {\n  public function run($x): void { $x->go(); }\n}\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    // `$x` is untyped → its type is unknown → no call edge (would be a guess).
+    expect(callEdges(graph)).toEqual([]);
   });
 
   it('degrades an unparseable file to an edgeless node without sinking the extract', async () => {
