@@ -15,6 +15,13 @@ export function appBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   return DEFAULT_APP_URL;
 }
 
+// The app's plan & billing page — where the free-plan upgrade CTA points. The CLI
+// surfaces this when the server skips a capture because the account is over its
+// free-plan decision limit.
+export function buildBillingUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/account/billing', appBaseUrl(env)).toString();
+}
+
 // Build the /cli-auth URL the browser opens for the POLL flow: the high-entropy
 // `session` id + the CLI's ephemeral public key `k` (raw P-256 point, base64url) so the
 // page can encrypt the minted token to us. An optional `label` (the device hostname) is

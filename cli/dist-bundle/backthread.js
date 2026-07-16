@@ -6903,6 +6903,9 @@ function appBaseUrl(env = process.env) {
   if (override && override.trim().length > 0) return override.replace(/\/+$/, "");
   return DEFAULT_APP_URL;
 }
+function buildBillingUrl(env = process.env) {
+  return new URL("/account/billing", appBaseUrl(env)).toString();
+}
 function buildCliAuthUrl(session, clientPubKey, env = process.env, label) {
   const u = new URL("/cli-auth", appBaseUrl(env));
   u.searchParams.set("session", session);
@@ -8184,6 +8187,10 @@ function nudgeMessage(status, repo, env = process.env) {
   }
   return `backthread: captured \u2014 but ${repo.owner}/${repo.name} isn't connected to Backthread yet, so these decisions are held as pending. Connect it to see your "How it works" diagram: ${link}`;
 }
+var FREE_LIMIT_REACHED = "free_limit_reached";
+function freeLimitMessage(env = process.env) {
+  return `backthread: you've reached your free-plan decision limit \u2014 new decisions aren't being captured. Upgrade to keep capturing: ${buildBillingUrl(env)}`;
+}
 var LINKED_SLUGS = /* @__PURE__ */ new Set(["connect_repo", "cold_start"]);
 function nextStepMessage(step, repo, env = process.env) {
   const base = `backthread: ${step.body}`;
@@ -8200,7 +8207,9 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
     const nextStep = rawNext === void 0 ? "absent" : rawNext;
     const env = deps.env ?? process.env;
     let line = null;
-    if (nextStep === null) {
+    if (deps.captureSkipped === FREE_LIMIT_REACHED) {
+      line = freeLimitMessage(env);
+    } else if (nextStep === null) {
       return false;
     } else if (nextStep !== "absent") {
       line = nextStepMessage(nextStep, repo, env);
@@ -9767,7 +9776,11 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
   await maybeNudge(parseRepoStatus(rec.repoStatus), repo, ctx.sessionId, {
     env: ctx.env,
     log: ctx.log,
-    nextStep: parseNextStep(rec.nextStep)
+    nextStep: parseNextStep(rec.nextStep),
+    // The free-plan decision cap: when the server skips a capture over the free
+    // limit it flags `captureSkipped: 'free_limit_reached'`, and maybeNudge surfaces
+    // a one-per-session upgrade line (that repo is connected, so no other nudge fires).
+    captureSkipped: typeof rec.captureSkipped === "string" ? rec.captureSkipped : void 0
   });
   const confirm = ctx.firstCaptureConfirmImpl ?? maybeFirstCaptureConfirm;
   await confirm(count, repoConnected, repo, { env: ctx.env, log: ctx.log }).catch(() => false);
