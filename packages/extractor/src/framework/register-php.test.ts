@@ -40,12 +40,13 @@ describe('registerLanguageScopedFrameworkAdapters (PHP gate)', () => {
     expect(names).toContain('symfony');
     expect(names).toContain('php-orm');
     expect(names).toContain('php-async');
+    expect(names).toContain('api-platform');
     await rm(dir, { recursive: true, force: true });
   });
 });
 
 describe('registerPhpFrameworkAdapters (fleet order)', () => {
-  it('registers the full PHP fleet in priority order (web → data → async)', () => {
+  it('registers the full PHP fleet in priority order (web → data → async → protocol)', () => {
     clearFrameworkAdapters();
     registerPhpFrameworkAdapters();
     expect(listFrameworkAdapters().map((a) => a.name)).toEqual([
@@ -53,6 +54,7 @@ describe('registerPhpFrameworkAdapters (fleet order)', () => {
       'symfony',
       'php-orm',
       'php-async',
+      'api-platform',
     ]);
   });
 });
