@@ -29,10 +29,23 @@
 //     literal resolves in-repo (most are `__DIR__ . '…'` expressions — skipped).
 //
 // Same-namespace no-`use` references are an accepted degrade (same PSR-4 dir →
-// same subsystem anyway). No CALL edges in v1 (dynamic dispatch makes them weak;
-// import edges alone give a legible Map — the import-first stance every prior
-// language shipped with). A file php-parser can't parse degrades to a node with
+// same subsystem anyway). A file php-parser can't parse degrades to a node with
 // no edges (never sinks the extract).
+//
+// CALL edges (v2) ride on top of the import backbone, accuracy over recall (the
+// Elixir-v2 stance — a wrong call edge teaches a false mental model). Only two
+// call shapes resolve, and only to an UNAMBIGUOUS in-repo class:
+//   * static `X::method()` — the receiver class `X` resolved through the file's
+//     `use` scope + namespace → autoload.
+//   * typed-receiver `$var->method()` / `$this->prop->method()` — the receiver's
+//     type recovered from a lightweight intra-method type map (typed params,
+//     `$var = new T()` assignments, and typed `$this->prop` property hints).
+// Everything dynamic (untyped `$o->m()`, facades `\DB::` / `Auth::`, variable-
+// class `$c::m()`, a chained result-type call, an external/self target) yields no
+// in-repo resolvable target and is dropped for free. `new X()` is NOT a call edge
+// (the `use`-import edge a cross-namespace `new` requires already covers it); the
+// `new` is read only to type a variable for its later method calls. A per-file
+// call-site cap degrades a pathological god-file to import-only (logged).
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -102,6 +115,11 @@ interface CollectedRefs {
   /** FQNs of the class/interface/trait/enum this file DECLARES (namespace-aware) —
    *  fed into the repo-wide declared-class→file index (the classmap analogue). */
   declaredClasses: string[];
+  /** As-written class names of resolvable call receivers (a static class, or a
+   *  typed instance receiver's type) — resolved to files in pass 2 (v2 call edges). */
+  callRefs: string[];
+  /** Method-call sites examined in this file (the per-file cap input). */
+  callSiteCount: number;
 }
 
 /** The trailing segment of a `\`-separated FQN (`App\Models\User` → `User`). */
@@ -143,6 +161,8 @@ function collectFileRefs(program: Program): CollectedRefs {
     classRefs: [],
     includes: [],
     declaredClasses: [],
+    callRefs: [],
+    callSiteCount: 0,
   };
   let namespaceSet = false;
 
@@ -235,6 +255,229 @@ function collectFileRefs(program: Program): CollectedRefs {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Call-edge collection (v2).
+
+/** A DETERMINISTIC per-file bound on call resolution, so a pathological god-file
+ *  (thousands of call sites) can't dominate the extract. A capped file is LOGGED
+ *  and degrades to import-only. Mirrors the Elixir/Python adapters' cap. */
+const MAX_CALL_SITES_PER_FILE = 2500;
+
+/** A loose view of a php-parser node (kind + arbitrary fields). */
+type AnyNode = Record<string, unknown> & { kind: string };
+function asAny(v: unknown): AnyNode | undefined {
+  return v && typeof v === 'object' && typeof (v as { kind?: unknown }).kind === 'string'
+    ? (v as AnyNode)
+    : undefined;
+}
+
+/** An `identifier` node's name (or a bare string) — a method/property/param name. */
+function idName(node: unknown): string | undefined {
+  if (typeof node === 'string') return node;
+  const n = asAny(node);
+  return n && n.kind === 'identifier' && typeof n.name === 'string' ? n.name : undefined;
+}
+
+/** A `new X()` expression → the instantiated class name `X` as written, or undefined
+ *  (anonymous class / dynamic `new $var`). */
+function newClassName(node: unknown): string | undefined {
+  const n = asAny(node);
+  return n && n.kind === 'new' ? nameText(n.what) : undefined;
+}
+
+// PHP-keyword static receivers that never denote a distinct in-repo target
+// (self/static/parent are the current class or its parent — a self- or import-edge).
+const SELF_RECEIVERS = new Set(['self', 'static', 'parent']);
+
+/**
+ * The receiver class of a resolvable method call, as WRITTEN, or undefined for an
+ * unresolvable one. Two shapes resolve — static `X::m()` (receiver `X`) and typed
+ * instance `$var->m()` / `$this->prop->m()` (receiver's type from the intra-method
+ * `varTypes` / class `propTypes` maps). `$this->m()`, an untyped `$var`, a chained
+ * result (`$this->svc->a()->b()`), and a free `f()` all return undefined.
+ */
+function callReceiverType(
+  call: AnyNode,
+  varTypes: ReadonlyMap<string, string | null>,
+  propTypes: ReadonlyMap<string, string>,
+): string | undefined {
+  const what = asAny(call.what);
+  if (!what) return undefined;
+
+  // static X::method()
+  if (what.kind === 'staticlookup') {
+    const cls = nameText(what.what);
+    if (!cls) return undefined;
+    if (SELF_RECEIVERS.has(normalizeFqn(cls).toLowerCase())) return undefined;
+    return cls;
+  }
+
+  // instance $var->method() / $this->prop->method()
+  if (what.kind === 'propertylookup' || what.kind === 'nullsafepropertylookup') {
+    const recv = asAny(what.what);
+    if (!recv) return undefined;
+    if (recv.kind === 'variable') {
+      if (recv.name === 'this') return undefined; // self-call
+      const t = typeof recv.name === 'string' ? varTypes.get(recv.name) : undefined;
+      return t ?? undefined; // null = ambiguous → drop
+    }
+    // $this->prop->method(): the inner receiver must be $this; prop's declared type.
+    if (recv.kind === 'propertylookup' || recv.kind === 'nullsafepropertylookup') {
+      const inner = asAny(recv.what);
+      if (inner && inner.kind === 'variable' && inner.name === 'this') {
+        const propName = idName(recv.offset);
+        if (propName) return propTypes.get(propName);
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Walk a subtree, invoking `cb(varName, className)` for each `$var = new T()`
+ *  assignment (the only var-typing form v2 infers besides typed params). */
+function forEachNewAssignment(root: unknown, cb: (varName: string, className: string) => void): void {
+  const visit = (node: unknown): void => {
+    const n = asAny(node);
+    if (!n) return;
+    if (n.kind === 'assign') {
+      const left = asAny(n.left);
+      const cls = newClassName(n.right);
+      if (left && left.kind === 'variable' && typeof left.name === 'string' && cls) cb(left.name, cls);
+    }
+    for (const [key, value] of Object.entries(n)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
+      if (Array.isArray(value)) for (const c of value) visit(c);
+      else if (asAny(value)) visit(value);
+    }
+  };
+  visit(root);
+}
+
+/** The intra-method variable→type map: typed params + `$var = new T()` assignments.
+ *  A variable assigned CONFLICTING types (a `Foo` param later `= new Bar()`, two
+ *  different `new`s) maps to null = ambiguous, so its calls are dropped (accuracy). */
+function methodVarTypes(method: AnyNode): Map<string, string | null> {
+  const types = new Map<string, string | null>();
+  const set = (name: string, type: string): void => {
+    if (!types.has(name)) types.set(name, type);
+    else if (types.get(name) !== type) types.set(name, null); // conflicting → ambiguous
+  };
+  for (const raw of Array.isArray(method.arguments) ? method.arguments : []) {
+    const p = asAny(raw);
+    if (!p || p.kind !== 'parameter') continue;
+    const name = idName(p.name);
+    const type = nameText(p.type);
+    if (name && type) set(name, type);
+  }
+  forEachNewAssignment(method, set);
+  return types;
+}
+
+/** A class body's typed-property map: property name → single-name type hint. Two
+ *  sources: a declared typed property (`private UserService $svc;`) and a
+ *  constructor-PROMOTED param (`__construct(private UserService $svc)` — the
+ *  dominant modern DI idiom; php-parser marks a promoted param with a non-zero
+ *  visibility `flags`). Union/untyped props are omitted. */
+function classPropertyTypes(cls: AnyNode): Map<string, string> {
+  const types = new Map<string, string>();
+  const body = Array.isArray(cls.body) ? cls.body : [];
+
+  // (a) declared typed properties.
+  for (const raw of body) {
+    const stmt = asAny(raw);
+    if (!stmt || stmt.kind !== 'propertystatement') continue;
+    for (const p of Array.isArray(stmt.properties) ? stmt.properties : []) {
+      const prop = asAny(p);
+      if (!prop) continue;
+      const name = idName(prop.name);
+      const type = nameText(prop.type);
+      if (name && type && !types.has(name)) types.set(name, type);
+    }
+  }
+
+  // (b) constructor-promoted properties.
+  for (const raw of body) {
+    const method = asAny(raw);
+    if (!method || method.kind !== 'method' || idName(method.name)?.toLowerCase() !== '__construct') continue;
+    for (const raw2 of Array.isArray(method.arguments) ? method.arguments : []) {
+      const param = asAny(raw2);
+      if (!param || param.kind !== 'parameter' || !param.flags) continue; // flags 0 → not promoted
+      const name = idName(param.name);
+      const type = nameText(param.type);
+      if (name && type && !types.has(name)) types.set(name, type);
+    }
+  }
+  return types;
+}
+
+/** Every `call` node in a subtree (recursive, source order). */
+function collectCallNodes(root: unknown): AnyNode[] {
+  const out: AnyNode[] = [];
+  const visit = (node: unknown): void => {
+    const n = asAny(node);
+    if (!n) return;
+    if (n.kind === 'call') out.push(n);
+    for (const [key, value] of Object.entries(n)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
+      if (Array.isArray(value)) for (const c of value) visit(c);
+      else if (asAny(value)) visit(value);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+// Declaration kinds whose method bodies carry call sites (interfaces have no bodies).
+const CALL_CLASS_KINDS = new Set(['class', 'trait', 'enum']);
+
+/** Every class/trait/enum declaration in a file (namespace-aware descent; does not
+ *  recurse into a class body's nested/anon classes — their method calls are still
+ *  captured via the enclosing method walk). */
+function findCallClassNodes(program: Program): AnyNode[] {
+  const out: AnyNode[] = [];
+  const visit = (node: unknown): void => {
+    const n = asAny(node);
+    if (!n) return;
+    if (CALL_CLASS_KINDS.has(n.kind)) {
+      out.push(n);
+      return;
+    }
+    for (const [key, value] of Object.entries(n)) {
+      if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
+      if (Array.isArray(value)) for (const c of value) visit(c);
+      else if (asAny(value)) visit(value);
+    }
+  };
+  visit(program);
+  return out;
+}
+
+/**
+ * Collect a file's resolvable call receivers (as-written class names) + the total
+ * method-call-site count. Per class: build the property-type map, then per method
+ * build the local var-type map and classify every call site. The as-written names
+ * are resolved to files in pass 2 (through the file's use-scope + autoload), where
+ * external/self/unresolvable targets drop out.
+ */
+function collectFileCalls(program: Program): { callRefs: string[]; callSiteCount: number } {
+  const callRefs: string[] = [];
+  let callSiteCount = 0;
+  for (const cls of findCallClassNodes(program)) {
+    const propTypes = classPropertyTypes(cls);
+    for (const raw of Array.isArray(cls.body) ? cls.body : []) {
+      const method = asAny(raw);
+      if (!method || method.kind !== 'method') continue;
+      const varTypes = methodVarTypes(method);
+      for (const call of collectCallNodes(method)) {
+        callSiteCount += 1;
+        const ref = callReceiverType(call, varTypes, propTypes);
+        if (ref) callRefs.push(ref);
+      }
+    }
+  }
+  return { callRefs, callSiteCount };
+}
+
 /** Resolve a written class-reference name to its fully-qualified name, honoring
  *  the file's `use` scope + current namespace (PHP's name-resolution rules). */
 function resolveRefToFqn(raw: string, useMap: ReadonlyMap<string, string>, currentNs: string): string {
@@ -294,7 +537,11 @@ export class PhpExtractor implements GraphExtractor {
       locByFile.set(id, locOf(text));
       let refs: CollectedRefs;
       try {
-        refs = collectFileRefs(engineInstance.parseCode(text, id));
+        const program = engineInstance.parseCode(text, id);
+        refs = collectFileRefs(program);
+        const calls = collectFileCalls(program); // v2: same parsed AST, second concern
+        refs.callRefs = calls.callRefs;
+        refs.callSiteCount = calls.callSiteCount;
       } catch {
         continue; // php-parser failed on this file — node only (no refs, no declared classes)
       }
@@ -354,6 +601,22 @@ export class PhpExtractor implements GraphExtractor {
         if (target) addImport(target);
       }
 
+      // (4) v2 call edges — resolve each as-written receiver class through the file's
+      // use-scope + autoload; keep only IN-REPO, non-self targets (external / dynamic /
+      // self drop out). A file over the cap degrades to import-only (logged).
+      const callWeights = new Map<string, number>();
+      if (refs.callSiteCount > MAX_CALL_SITES_PER_FILE) {
+        console.log(
+          `  [php] ${id}: ${refs.callSiteCount} call sites exceed the ${MAX_CALL_SITES_PER_FILE} cap — call edges skipped for this file (import-only)`,
+        );
+      } else {
+        for (const raw of refs.callRefs) {
+          const fqn = resolveRefToFqn(raw, refs.useMap, refs.namespace);
+          const target = resolveAutoload(fqn, psr4, psr0, fileset, classToFile);
+          if (target && target !== id) callWeights.set(target, (callWeights.get(target) ?? 0) + 1);
+        }
+      }
+
       files[id] = {
         loc: locByFile.get(id) ?? 0,
         language: 'php',
@@ -363,9 +626,25 @@ export class PhpExtractor implements GraphExtractor {
           specifier: v.specifier,
           weight: v.weight,
         })),
-        calls: [],
+        calls: [...callWeights]
+          .map(([to, weight]) => ({ to, weight }))
+          .sort((a, b) => (a.to < b.to ? -1 : a.to > b.to ? 1 : 0)),
         reexports: [],
       };
+    }
+
+    // Positive signal for validation (mirrors the framework fleet + Elixir logging).
+    let callEdges = 0;
+    let filesWithCalls = 0;
+    for (const id of fileIds) {
+      const n = files[id]?.calls.length ?? 0;
+      if (n > 0) {
+        callEdges += n;
+        filesWithCalls += 1;
+      }
+    }
+    if (callEdges > 0) {
+      console.log(`  [php] ${callEdges} call edge(s) across ${filesWithCalls} file(s)`);
     }
 
     return graphFromState(root, { headSha: '', files });

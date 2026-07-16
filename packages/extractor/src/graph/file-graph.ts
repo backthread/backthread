@@ -423,8 +423,11 @@ export function isConfigInvalidatorPath(path: string): boolean {
  * index (classmap-equivalent) fallback after PSR-4 — more first-party `use`/
  * extends/implements/trait edges resolve for the same `.php` blob, so cached PHP
  * rows must re-parse.
+ * v5: the PHP adapter gained inline CALL edges (static `X::m()` + typed-receiver
+ * `$var->m()`), so per-file output changes for `.php` blobs — cached rows must
+ * re-parse.
  */
-export const EXTRACTOR_VERSION = 4;
+export const EXTRACTOR_VERSION = 5;
 
 // ---------------------------------------------------------------------------
 // State shape.
