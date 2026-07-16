@@ -13,6 +13,7 @@ import {
   hasMixManifest,
   hasMixManifestDeep,
   hasComposerManifest,
+  hasSwiftManifest,
 } from './language.js';
 import type { NormalizedGraph } from './types.js';
 
@@ -142,6 +143,34 @@ describe('detectRepoLanguage', () => {
     });
     expect(detectRepoLanguage(dir)).toBe('php');
   });
+
+  it('selects swift for a Package.swift repo', async () => {
+    const dir = await repo({
+      'Package.swift': 'let p = Package(name: "X")\n',
+      'Sources/X/App.swift': 'struct App {}\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('swift');
+  });
+
+  it('selects swift for a Podfile-only iOS app', async () => {
+    const dir = await repo({ Podfile: "pod 'Alamofire'\n", 'App/AppDelegate.swift': 'class AppDelegate {}\n' });
+    expect(detectRepoLanguage(dir)).toBe('swift');
+  });
+
+  it('selects swift by file count for a manifest-less pure-Xcode app', async () => {
+    const dir = await repo({
+      'App/AppDelegate.swift': 'class AppDelegate {}\n',
+      'App/ViewController.swift': 'class ViewController {}\n',
+      'App/Model.swift': 'struct Model {}\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('swift');
+  });
+
+  it('keeps a TS repo as ts (swift adapter never selected — isolation probe)', async () => {
+    const dir = await repo({ 'package.json': '{"name":"x"}', 'src/index.ts': 'export const x=1;\n' });
+    expect(detectRepoLanguage(dir)).toBe('ts');
+    expect(detectRepoLanguages(dir)).toEqual(['ts']);
+  });
 });
 
 describe('listSourceFiles', () => {
@@ -222,6 +251,31 @@ describe('listSourceFiles', () => {
     // non-source files never appear
     expect(files.some((f) => f.endsWith('.md'))).toBe(false);
   });
+
+  it('lists .swift and skips .build/Pods/DerivedData + Xcode container dirs (swift)', async () => {
+    const dir = await repo({
+      'Sources/App/App.swift': 'struct App {}\n',
+      'Sources/App/View.swift': 'struct View {}\n',
+      'Package.swift': 'let p = Package(name: "X")\n', // kept by walker; adapter skips it
+      'README.md': '# no\n',
+      '.build/checkouts/dep/Dep.swift': 'struct Dep {}\n',
+      'Pods/Alamofire/Source/AF.swift': 'struct AF {}\n',
+      'DerivedData/Build/x.swift': 'struct Built {}\n',
+      'MyApp.xcodeproj/GeneratedModuleMap.swift': 'struct Gen {}\n',
+      'Assets.xcassets/Gen.swift': 'struct AssetGen {}\n',
+    });
+    const files = listSourceFiles(dir, 'swift');
+    expect(files).toContain('Sources/App/App.swift');
+    expect(files).toContain('Sources/App/View.swift');
+    expect(files).toContain('Package.swift'); // walker includes it; SwiftExtractor filters it
+    // build/vendor + Xcode container dirs never appear
+    expect(files.some((f) => f.startsWith('.build/'))).toBe(false);
+    expect(files.some((f) => f.startsWith('Pods/'))).toBe(false);
+    expect(files.some((f) => f.startsWith('DerivedData/'))).toBe(false);
+    expect(files.some((f) => f.includes('.xcodeproj/'))).toBe(false);
+    expect(files.some((f) => f.includes('.xcassets/'))).toBe(false);
+    expect(files.some((f) => f.endsWith('.md'))).toBe(false);
+  });
 });
 
 describe('detectRepoLanguages (multi-language)', () => {
@@ -282,7 +336,7 @@ describe('graphLanguage', () => {
     edges: [],
     externals: [],
   });
-  it('is python for py/pyi, ruby for rb, elixir for ex/exs/heex, php for php, else ts', () => {
+  it('is python for py/pyi, ruby for rb, elixir for ex/exs/heex, php for php, swift for swift, else ts', () => {
     expect(graphLanguage(g(['ts', 'tsx']))).toBe('ts');
     expect(graphLanguage(g(['py']))).toBe('python');
     expect(graphLanguage(g(['pyi']))).toBe('python');
@@ -291,7 +345,20 @@ describe('graphLanguage', () => {
     expect(graphLanguage(g(['exs']))).toBe('elixir');
     expect(graphLanguage(g(['heex']))).toBe('elixir');
     expect(graphLanguage(g(['php']))).toBe('php');
+    expect(graphLanguage(g(['swift']))).toBe('swift');
     expect(graphLanguage(g([]))).toBe('ts');
+  });
+});
+
+describe('hasSwiftManifest', () => {
+  it('detects Package.swift / Package.resolved / Podfile / *.xcodeproj dir, else false', async () => {
+    expect(hasSwiftManifest(await repo({ 'Package.swift': 'let p = Package(name: "X")\n' }))).toBe(true);
+    expect(hasSwiftManifest(await repo({ 'Package.resolved': '{"pins":[],"version":2}\n' }))).toBe(true);
+    expect(hasSwiftManifest(await repo({ Podfile: "pod 'AF'\n" }))).toBe(true);
+    expect(hasSwiftManifest(await repo({ 'MyApp.xcodeproj/project.pbxproj': '// proj\n' }))).toBe(true);
+    expect(hasSwiftManifest(await repo({ 'App.xcworkspace/contents.xcworkspacedata': '<x/>\n' }))).toBe(true);
+    expect(hasSwiftManifest(await repo({ 'package.json': '{}' }))).toBe(false);
+    expect(hasSwiftManifest(await repo({ Gemfile: "gem 'rails'\n" }))).toBe(false);
   });
 });
 

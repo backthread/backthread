@@ -72,12 +72,12 @@ export function mergeGraphs(root: string, graphs: readonly NormalizedGraph[]): N
 
 /**
  * Pick the structural adapter for a detected language. The Python, Ruby, Elixir, Dart,
- * PHP, and Kotlin adapters are LAZILY imported so a TS ingest never loads
- * `@zzzen/pyright-internal`, `@ruby/prism`, the Elixir scanner, the Dart scanner,
- * `php-parser`, or the Kotlin scanner (keeps the TS path — and the worker's TS bundle —
- * free of the other-language toolchains; only a repo of that language pays for its
- * parser). The Dart and Kotlin scanners are hand-rolled + dep-free, so their lazy import
- * is purely about not loading dead code for a non-Dart/Kotlin repo. TS stays the default
+ * PHP, Kotlin, and Swift adapters are LAZILY imported so a TS ingest never loads
+ * `@zzzen/pyright-internal`, `@ruby/prism`, `php-parser`, or the hand-rolled Elixir /
+ * Dart / Kotlin / Swift scanners (keeps the TS path — and the worker's TS bundle — free
+ * of the other-language toolchains; only a repo of that language pays for its parser).
+ * The Dart, Kotlin, and Swift scanners are hand-rolled + dep-free, so their lazy import
+ * is purely about not loading dead code for a non-matching repo. TS stays the default
  * + eager (the pipeline's home turf).
  */
 async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
@@ -104,6 +104,10 @@ async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
   if (language === 'kotlin') {
     const { KotlinExtractor } = await import('./kotlin-adapter.js');
     return new KotlinExtractor();
+  }
+  if (language === 'swift') {
+    const { SwiftExtractor } = await import('./swift-adapter.js');
+    return new SwiftExtractor();
   }
   return new TsMorphExtractor();
 }
