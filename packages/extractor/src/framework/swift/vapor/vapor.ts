@@ -20,12 +20,10 @@
 // of the SAME controller — self-edges, no cross-file wiring — so the register spine is
 // the meaningful edge. Deterministic; unresolvable mounts DEGRADE + LOG.
 
-import { openSync, readSync, closeSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../../detect-util.js';
 import { parseSwiftScope, readSwiftDeps, type ParsedSwiftFile } from '../analyze.js';
 import { scanImports, stripCommentsAndStrings } from '../swift-ast.js';
-import { SWIFT_EXCLUDE_DIRS, SWIFT_EXCLUDE_SUFFIXES } from '../../../graph/file-graph.js';
+import { scanSwiftSourceHeads } from '../source-scan.js';
 import type {
   DetectMatch,
   FrameworkAdapter,
@@ -40,56 +38,20 @@ import type { ModuleKind } from '../../../types.js';
 // Detection — the SPM `vapor` dependency (+ a nested-package fallback scan).
 
 const DETECT_FILE_CAP = 400;
-const DETECT_SKIP = new Set<string>([...SWIFT_EXCLUDE_DIRS]);
-
-function isXcodeContainer(name: string): boolean {
-  return SWIFT_EXCLUDE_SUFFIXES.some((s) => name.endsWith(s));
-}
-function readHead(path: string, maxBytes = 4096): string {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, 'r');
-    const buf = Buffer.allocUnsafe(maxBytes);
-    const n = readSync(fd, buf, 0, maxBytes, 0);
-    return buf.toString('utf8', 0, n);
-  } catch {
-    return '';
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-}
 
 /** Does any in-scope Swift file `import Vapor`? A bounded source fallback for a repo
  *  that pulls Vapor transitively without a root `vapor` dep line. */
 function anyImportsVapor(base: string): boolean {
   let found = false;
-  let scanned = 0;
-  const walk = (dir: string): void => {
-    if (found || scanned >= DETECT_FILE_CAP) return;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (found || scanned >= DETECT_FILE_CAP) return;
-      if (e.isDirectory()) {
-        if (e.name.startsWith('.') || DETECT_SKIP.has(e.name) || isXcodeContainer(e.name)) continue;
-        walk(join(dir, e.name));
-      } else if (e.isFile() && e.name.endsWith('.swift') && e.name !== 'Package.swift') {
-        scanned++;
-        if (scanImports(readHead(join(dir, e.name))).includes('Vapor')) found = true;
-      }
-    }
-  };
-  walk(base);
+  scanSwiftSourceHeads(
+    base,
+    (entry, readFileHead) => {
+      if (entry.kind !== 'file') return;
+      if (scanImports(readFileHead()).includes('Vapor')) found = true;
+      return found; // first Vapor import → early-exit
+    },
+    DETECT_FILE_CAP,
+  );
   return found;
 }
 

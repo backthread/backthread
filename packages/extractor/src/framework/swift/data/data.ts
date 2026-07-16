@@ -33,12 +33,10 @@
 //
 // Unresolvable association targets DEGRADE + LOG (no silent caps). Deterministic.
 
-import { openSync, readSync, closeSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
 import { clampConfidence, resolveBase } from '../../detect-util.js';
 import { parseSwiftScope, readSwiftDeps, type ParsedSwiftFile, type SwiftScope } from '../analyze.js';
 import { scanImports } from '../swift-ast.js';
-import { SWIFT_EXCLUDE_DIRS, SWIFT_EXCLUDE_SUFFIXES } from '../../../graph/file-graph.js';
+import { scanSwiftSourceHeads } from '../source-scan.js';
 import type {
   DetectMatch,
   FrameworkAdapter,
@@ -56,36 +54,12 @@ import type { ModuleKind } from '../../../types.js';
 // `.xcdatamodeld` existence check.
 
 const DETECT_FILE_CAP = 600;
-const DETECT_SKIP = new Set<string>([...SWIFT_EXCLUDE_DIRS]);
 const FLUENT_DEPS = new Set(['fluent', 'fluent-kit', 'fluentkit']);
 
 export interface DataSignals {
   hasSwiftData: boolean;
   hasCoreData: boolean;
   hasFluent: boolean;
-}
-
-function isXcodeContainer(name: string): boolean {
-  return SWIFT_EXCLUDE_SUFFIXES.some((s) => name.endsWith(s));
-}
-function readHead(path: string, maxBytes = 4096): string {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, 'r');
-    const buf = Buffer.allocUnsafe(maxBytes);
-    const n = readSync(fd, buf, 0, maxBytes, 0);
-    return buf.toString('utf8', 0, n);
-  } catch {
-    return '';
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
 }
 
 /**
@@ -97,32 +71,25 @@ export function detectDataSignals(base: string, deps: Set<string>): DataSignals 
   let hasSwiftData = false;
   let hasCoreData = false;
   let hasFluent = [...deps].some((d) => FLUENT_DEPS.has(d));
-  let scanned = 0;
-  const walk = (dir: string): void => {
-    if (scanned >= DETECT_FILE_CAP || (hasSwiftData && hasCoreData && hasFluent)) return;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (scanned >= DETECT_FILE_CAP) return;
-      if (e.isDirectory()) {
-        if (e.name.endsWith('.xcdatamodeld')) hasCoreData = true; // the CoreData model bundle
-        if (e.name.startsWith('.') || DETECT_SKIP.has(e.name) || isXcodeContainer(e.name)) continue;
-        walk(join(dir, e.name));
-      } else if (e.isFile() && e.name.endsWith('.swift') && e.name !== 'Package.swift') {
-        scanned++;
-        for (const mod of scanImports(readHead(join(dir, e.name)))) {
+  scanSwiftSourceHeads(
+    base,
+    (entry, readFileHead) => {
+      if (entry.kind === 'dir') {
+        if (entry.name.endsWith('.xcdatamodeld')) hasCoreData = true; // the CoreData model bundle
+      } else {
+        for (const mod of scanImports(readFileHead())) {
           if (mod === 'SwiftData') hasSwiftData = true;
           else if (mod === 'CoreData') hasCoreData = true;
           else if (mod === 'Fluent' || mod === 'FluentKit') hasFluent = true;
         }
       }
-    }
-  };
-  walk(base);
+      // All found → early-exit. Safe (output-neutral) because the signals are
+      // monotonic: once true they never flip, so stopping the scan early cannot
+      // change the returned booleans.
+      return hasSwiftData && hasCoreData && hasFluent;
+    },
+    DETECT_FILE_CAP,
+  );
   return { hasSwiftData, hasCoreData, hasFluent };
 }
 
