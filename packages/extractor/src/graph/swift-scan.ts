@@ -1,7 +1,8 @@
 // Pure, hand-rolled SYNTACTIC scanner for Swift source — the install-free,
 // native-dependency-free backbone of the Swift extractor (the Elixir-scanner
 // precedent: no tree-sitter, no WASM, no repo-code execution — just deterministic
-// string scanning). It reads the three things the Swift graph needs:
+// string scanning). It reads the four things the Swift graph needs (imports + type
+// decls + type refs for the import backbone; call sites for v2 `call` edges):
 //
 //   1. IMPORTS      — `import Foo`, `@testable import Foo`, `public import Foo`,
 //                     `import class Foundation.NSData` — the MODULE name (first
@@ -22,6 +23,10 @@
 //                     `import`-kind edge. A token that names no registered type (a
 //                     local, an Apple SDK type, a generic param) simply doesn't
 //                     resolve — the registry lookup is the filter.
+//   4. CALL SITES   — an initializer `Foo(…)` or a static call `Foo.member(…)` whose
+//                     head is an UpperCamelCase type. The adapter resolves the head to
+//                     its declaring file → a `call` edge (v2). Instance/dynamic calls
+//                     have no resolvable head; pattern-match lines are excluded.
 //
 // Everything runs over a COMMENT- and STRING-STRIPPED copy of the source, so a
 // `class Foo` inside a `//` comment or a `"..."` literal never registers as a decl
@@ -282,7 +287,44 @@ export function scanTypeReferences(text: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// One-pass parse (strip once, derive all three) — the adapter's entry point.
+// Call sites (v2 — resolved against the registry by the adapter as `call` edges).
+//
+// Two Swift call forms have a resolvable UpperCamelCase TYPE head:
+//   * INITIALIZER  `Foo(…)`        — constructing a value = calling Foo's init.
+//   * STATIC CALL  `Foo.member(…)` — a type/static method or property call on Foo.
+// Both resolve the HEAD type to its declaring file → a `call` edge. INSTANCE calls
+// (`foo.bar()`) and dynamic dispatch have no UpperCamelCase head, so they never resolve
+// — accuracy over recall (a wrong call edge teaches a false mental model). The head's
+// `(?<![\w.])` lookbehind excludes a member access (`x.Foo(` is not a head) and a
+// mid-identifier fragment, exactly like REF_TOKEN_RE.
+const INIT_CALL_RE = /(?<![\w.])([A-Z][A-Za-z0-9_]*)[ \t]*\(/g;
+const STATIC_CALL_RE = /(?<![\w.])([A-Z][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/g;
+
+// A pattern-match line — `case Foo.bar(let x)`, `if case Foo.status(x) = y`, … — uses
+// the `Enum.case(binding)` syntax the STATIC_CALL_RE would mistake for a call. Skip
+// call-site scanning on such lines (the type is still a REFERENCE → import edge; it's
+// only the `call` verb we withhold — accuracy over recall). Non-global (used with test).
+const CASE_PATTERN_RE = /^\s*case\b|\b(?:if|guard|while|for)\s+case\b/;
+
+/**
+ * Every resolvable call-site HEAD token in `text`'s code body, in source order (one
+ * entry per occurrence, so the adapter can weight a `call` edge by count). Import lines
+ * and pattern-match lines are excluded. Reads the stripped source; the adapter resolves
+ * each token through the registry and drops everything that doesn't name a type declared
+ * (unambiguously) in ANOTHER file.
+ */
+export function scanCallSites(text: string): string[] {
+  const out: string[] = [];
+  for (const line of stripCommentsAndStrings(text).split('\n')) {
+    if (isImportLine(line) || CASE_PATTERN_RE.test(line)) continue;
+    for (const m of line.matchAll(INIT_CALL_RE)) out.push(m[1]);
+    for (const m of line.matchAll(STATIC_CALL_RE)) out.push(m[1]);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// One-pass parse (strip once, derive all four) — the adapter's entry point.
 
 export interface SwiftFileScan {
   /** Imported module names (first path segment), in source order. */
@@ -291,20 +333,26 @@ export interface SwiftFileScan {
   decls: string[];
   /** UpperCamelCase reference tokens in the code body (import lines excluded). */
   references: string[];
+  /** Resolvable call-site HEAD tokens (initializer / static call), in source order. */
+  callSites: string[];
 }
 
-/** Strip once, then derive imports + decls + references from the stripped text. */
+/** Strip once, then derive imports + decls + references + call sites from stripped text. */
 export function scanSwiftFile(text: string): SwiftFileScan {
   const stripped = stripCommentsAndStrings(text);
   const imports: string[] = [];
   const references: string[] = [];
+  const callSites: string[] = [];
   for (const line of stripped.split('\n')) {
     const im = line.match(IMPORT_RE);
     if (im) {
       imports.push(im[1] ?? im[2]);
-      continue; // an import line contributes no type references
+      continue; // an import line contributes no type references / call sites
     }
     for (const m of line.matchAll(REF_TOKEN_RE)) references.push(m[0]);
+    if (CASE_PATTERN_RE.test(line)) continue; // pattern-match line: refs yes, calls no
+    for (const m of line.matchAll(INIT_CALL_RE)) callSites.push(m[1]);
+    for (const m of line.matchAll(STATIC_CALL_RE)) callSites.push(m[1]);
   }
   const decls: string[] = [];
   for (const m of stripped.matchAll(DECL_RE)) {
@@ -312,5 +360,5 @@ export function scanSwiftFile(text: string): SwiftFileScan {
     if (m[1] === 'class' && MEMBER_AFTER_MODIFIER.has(name)) continue;
     decls.push(name);
   }
-  return { imports, decls, references };
+  return { imports, decls, references, callSites };
 }

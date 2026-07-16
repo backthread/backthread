@@ -426,8 +426,11 @@ export function isConfigInvalidatorPath(path: string): boolean {
  * v5: the PHP adapter gained inline CALL edges (static `X::m()` + typed-receiver
  * `$var->m()`), so per-file output changes for `.php` blobs — cached rows must
  * re-parse.
+ * v6: the Swift adapter gained inline CALL edges (initializer `Foo(…)` + static
+ * `Foo.member(…)` heads resolved through the type registry), so per-file output
+ * changes for `.swift` blobs — cached rows must re-parse.
  */
-export const EXTRACTOR_VERSION = 5;
+export const EXTRACTOR_VERSION = 6;
 
 // ---------------------------------------------------------------------------
 // State shape.
