@@ -19,6 +19,7 @@ import {
   PHP_EXCLUDE_DIRS,
   KOTLIN_EXCLUDE_DIRS,
   SWIFT_EXCLUDE_DIRS,
+  SWIFT_EXCLUDE_SUFFIXES,
   EXCLUDE_DIRS,
   type SourceLang,
 } from './file-graph.js';
@@ -105,6 +106,60 @@ export function hasSwiftManifest(repoDir: string): boolean {
   } catch {
     return false;
   }
+}
+
+// Depth cap + skip set for the nested Swift-manifest probe — mirrors MIX_PROBE_* /
+// PUB_PROBE_*. Real Swift packages sit 1-3 levels deep (a monorepo's `ios/`/`mobile/`/
+// `apple/`, an SPM child under `packages/`); 8 is generous. Skips build/vendor + dot
+// dirs (so a `.build/**/Package.swift` or a checked-out dependency's manifest can't
+// fake it) + Xcode container bundles (they hold no nested first-party package).
+const SWIFT_PROBE_MAX_DEPTH = 8;
+const SWIFT_PROBE_SKIP = new Set<string>([...EXCLUDE_DIRS, ...SWIFT_EXCLUDE_DIRS]);
+const SWIFT_MANIFEST_SET = new Set<string>(SWIFT_MANIFESTS);
+
+/**
+ * Does the repo declare a Swift project ANYWHERE — the root OR a nested app / package?
+ * A polyglot monorepo commonly keeps its iOS/Swift app under a top-level `ios/` /
+ * `mobile/` / `apple/` dir (a nested `Package.swift` or a `*.xcodeproj`), which the
+ * root-only `hasSwiftManifest` misses. A BOUNDED walk (skips build/vendor + dot +
+ * Xcode-container dirs, depth-capped, EARLY-EXITS on the first Swift manifest) finds it.
+ * Mirrors `hasMixManifestDeep` / `hasDartManifestDeep`.
+ *
+ * The root-only `hasSwiftManifest` stays the graph-language selector (unchanged — a
+ * nested-Swift repo already extracts via the dominant-source-count path); this broader
+ * probe gates the Swift framework FLEET registration, so its adapters load + run for a
+ * repo whose Swift lives below the root instead of silently no-op-ing. NEVER throws.
+ */
+export function hasSwiftManifestDeep(repoDir: string): boolean {
+  if (hasSwiftManifest(repoDir)) return true; // cheap root check short-circuits
+  const walk = (dir: string, depth: number): boolean => {
+    if (depth > SWIFT_PROBE_MAX_DEPTH) return false;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false; // unreadable dir → skip subtree, never throw
+    }
+    // A Swift manifest in THIS dir: a SwiftPM/CocoaPods file OR an Xcode project /
+    // workspace bundle dir — the same two forms `hasSwiftManifest` checks at the root.
+    for (const e of entries) {
+      if (e.isFile() && SWIFT_MANIFEST_SET.has(e.name)) return true;
+      if (e.isDirectory() && (e.name.endsWith('.xcodeproj') || e.name.endsWith('.xcworkspace'))) return true;
+    }
+    for (const e of entries) {
+      if (
+        !e.isDirectory() ||
+        e.name.startsWith('.') ||
+        SWIFT_PROBE_SKIP.has(e.name) ||
+        SWIFT_EXCLUDE_SUFFIXES.some((s) => e.name.endsWith(s))
+      ) {
+        continue;
+      }
+      if (walk(join(dir, e.name), depth + 1)) return true;
+    }
+    return false;
+  };
+  return walk(resolve(repoDir), 0);
 }
 
 // Depth cap + skip set for the nested manifest probe — mirrors MAX_WALK_DEPTH /

@@ -26,7 +26,7 @@ import {
   hasKotlinManifest,
   hasComposerManifest,
   hasDartManifestDeep,
-  hasSwiftManifest,
+  hasSwiftManifestDeep,
 } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
@@ -133,10 +133,14 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     const { registerDartFrameworkAdapters } = await import('./register-dart.js');
     registerDartFrameworkAdapters();
   }
-  // Swift fleet — gated on a Swift manifest (Package.swift / Package.resolved / Podfile
-  // / *.xcodeproj|*.xcworkspace dir). The scanner is hand-rolled + dep-free, so this
-  // gate is purely about not module-loading the Swift adapters for a non-Swift repo.
-  if (!swiftRegistered && hasSwiftManifest(repoDir)) {
+  // Nested-aware (hasSwiftManifestDeep): a polyglot monorepo keeping its iOS/Swift app
+  // under a top-level `ios/` / `mobile/` / `apple/` dir (a nested Package.swift /
+  // Podfile / *.xcodeproj) still loads the Swift fleet. Root-Swift repos short-circuit
+  // on the cheap root check. The scanner is hand-rolled + dep-free, so this gate is
+  // about not module-loading the Swift adapters for a non-Swift repo, not a native
+  // parser. Mirrors the Elixir/Dart split — the graph-language SELECTOR stays root-only
+  // (hasSwiftManifest), since a nested-Swift repo already extracts via dominant-count.
+  if (!swiftRegistered && hasSwiftManifestDeep(repoDir)) {
     swiftRegistered = true;
     const { registerSwiftFrameworkAdapters } = await import('./register-swift.js');
     registerSwiftFrameworkAdapters();
