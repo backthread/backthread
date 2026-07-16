@@ -15,6 +15,7 @@ import {
   PYTHON_EXCLUDE_DIRS,
   RUBY_EXCLUDE_DIRS,
   ELIXIR_EXCLUDE_DIRS,
+  DART_EXCLUDE_DIRS,
   EXCLUDE_DIRS,
   type SourceLang,
 } from './file-graph.js';
@@ -25,6 +26,9 @@ const RUBY_MANIFESTS = ['Gemfile', 'Gemfile.lock'];
 // Mix is Elixir's build tool; `mix.exs` (the project file) + `mix.lock` (the
 // resolved dep pins) are the unambiguous Elixir-repo manifests.
 const ELIXIR_MANIFESTS = ['mix.exs', 'mix.lock'];
+// Pub is Dart's package manager; `pubspec.yaml` (the project file) + `pubspec.lock`
+// (the resolved dep pins) are the unambiguous Dart/Flutter-repo manifests.
+const DART_MANIFESTS = ['pubspec.yaml', 'pubspec.lock'];
 
 /**
  * Does the repo root declare a Ruby project? A `Gemfile` / `Gemfile.lock`, or any
@@ -92,6 +96,56 @@ export function hasMixManifestDeep(repoDir: string): boolean {
 }
 
 /**
+ * Does the repo root declare a Dart/Flutter project? A `pubspec.yaml` / `pubspec.lock`
+ * — the unambiguous Dart-repo manifest (its native `ios/`/`android/` hosts carry
+ * their own build files, so only pubspec is decisive). Shared by the extractor's
+ * language detection AND the pubspec-gated framework-fleet registration
+ * (framework/register.ts), so the "is this Dart?" answer has ONE source.
+ */
+export function hasDartManifest(repoDir: string): boolean {
+  return DART_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
+}
+
+// Depth cap + skip set for the nested pubspec probe — mirrors MIX_PROBE_* above.
+// Real Flutter apps sit 1-3 levels deep (a monorepo's `mobile/`/`app/`, a melos
+// `packages/<child>`); 8 is generous. Skips build/vendor + dot dirs so a
+// `.pub-cache/**/pubspec.yaml` can't fake it.
+const PUB_PROBE_MAX_DEPTH = 8;
+const PUB_PROBE_SKIP = new Set<string>([...EXCLUDE_DIRS, ...DART_EXCLUDE_DIRS]);
+
+/**
+ * Does the repo declare a Dart project ANYWHERE — the root OR a nested app / package?
+ * A polyglot monorepo commonly keeps its Flutter app under a top-level `mobile/` /
+ * `app/` dir (`mobile/pubspec.yaml`), which the root-only `hasDartManifest` misses. A
+ * BOUNDED walk (skips build/vendor + dot dirs, depth-capped, EARLY-EXITS on the first
+ * pubspec.yaml) finds it. Mirrors `hasMixManifestDeep`.
+ *
+ * The root-only `hasDartManifest` stays the graph-language selector (unchanged — a
+ * nested-Dart repo already extracts via the dominant-source-count path); this broader
+ * probe gates the Dart framework FLEET registration, so its adapters load + run for a
+ * repo whose Dart lives below the root instead of silently no-op-ing. NEVER throws.
+ */
+export function hasDartManifestDeep(repoDir: string): boolean {
+  if (hasDartManifest(repoDir)) return true; // cheap root check short-circuits
+  const walk = (dir: string, depth: number): boolean => {
+    if (depth > PUB_PROBE_MAX_DEPTH) return false;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false; // unreadable dir → skip subtree, never throw
+    }
+    if (entries.some((e) => e.isFile() && e.name === 'pubspec.yaml')) return true;
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || PUB_PROBE_SKIP.has(e.name)) continue;
+      if (walk(join(dir, e.name), depth + 1)) return true;
+    }
+    return false;
+  };
+  return walk(resolve(repoDir), 0);
+}
+
+/**
  * Repo-relative POSIX paths of every source file for `lang` under `root`.
  * Walks the tree directly (the Pyright adapter needs an explicit file list; it
  * doesn't glob like ts-morph). Skips excluded + dot-prefixed directories and
@@ -108,7 +162,9 @@ export function listSourceFiles(root: string, lang: SourceLang): string[] {
         ? RUBY_EXCLUDE_DIRS
         : lang === 'elixir'
           ? ELIXIR_EXCLUDE_DIRS
-          : EXCLUDE_DIRS,
+          : lang === 'dart'
+            ? DART_EXCLUDE_DIRS
+            : EXCLUDE_DIRS,
   );
   const out: string[] = [];
 
@@ -139,18 +195,20 @@ export function listSourceFiles(root: string, lang: SourceLang): string[] {
 function countSources(
   root: string,
   cap = 4000,
-): { ts: number; python: number; ruby: number; elixir: number } {
+): { ts: number; python: number; ruby: number; elixir: number; dart: number } {
   let ts = 0;
   let python = 0;
   let ruby = 0;
   let elixir = 0;
+  let dart = 0;
   const absRoot = resolve(root);
   const tsExcl = new Set<string>(EXCLUDE_DIRS);
   const pyExcl = new Set<string>(PYTHON_EXCLUDE_DIRS);
   const rbExcl = new Set<string>(RUBY_EXCLUDE_DIRS);
   const exExcl = new Set<string>(ELIXIR_EXCLUDE_DIRS);
+  const dartExcl = new Set<string>(DART_EXCLUDE_DIRS);
   const walk = (dir: string): void => {
-    if (ts + python + ruby + elixir >= cap) return;
+    if (ts + python + ruby + elixir + dart >= cap) return;
     let entries: import('node:fs').Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -158,18 +216,19 @@ function countSources(
       return;
     }
     for (const ent of entries) {
-      if (ts + python + ruby + elixir >= cap) return;
+      if (ts + python + ruby + elixir + dart >= cap) return;
       const abs = `${dir}/${ent.name}`;
       if (ent.isDirectory()) {
         // Skip a dir excluded by ANY language (or dot-prefixed) — the union keeps
         // the count cheap and can't misread vendored deps (node_modules, .venv,
-        // vendor/bundle, deps/_build) as source.
+        // vendor/bundle, deps/_build, .pub-cache) as source.
         if (
           ent.name.startsWith('.') ||
           tsExcl.has(ent.name) ||
           pyExcl.has(ent.name) ||
           rbExcl.has(ent.name) ||
-          exExcl.has(ent.name)
+          exExcl.has(ent.name) ||
+          dartExcl.has(ent.name)
         ) {
           continue;
         }
@@ -180,11 +239,12 @@ function countSources(
         else if (isSourceFilePath(id, 'python')) python++;
         else if (isSourceFilePath(id, 'ruby')) ruby++;
         else if (isSourceFilePath(id, 'elixir')) elixir++;
+        else if (isSourceFilePath(id, 'dart')) dart++;
       }
     }
   };
   walk(absRoot);
-  return { ts, python, ruby, elixir };
+  return { ts, python, ruby, elixir, dart };
 }
 
 /**
@@ -203,29 +263,33 @@ export function detectRepoLanguage(repoDir: string): SourceLang {
   const hasTs = TS_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
   const hasRuby = hasRubyManifest(repoDir);
   const hasElixir = hasMixManifest(repoDir);
-  if (hasPy && !hasTs && !hasRuby && !hasElixir) return 'python';
-  if (hasTs && !hasPy && !hasRuby && !hasElixir) return 'ts';
-  if (hasRuby && !hasTs && !hasPy && !hasElixir) return 'ruby';
-  if (hasElixir && !hasTs && !hasPy && !hasRuby) return 'elixir';
+  const hasDart = hasDartManifest(repoDir);
+  if (hasPy && !hasTs && !hasRuby && !hasElixir && !hasDart) return 'python';
+  if (hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart) return 'ts';
+  if (hasRuby && !hasTs && !hasPy && !hasElixir && !hasDart) return 'ruby';
+  if (hasElixir && !hasTs && !hasPy && !hasRuby && !hasDart) return 'elixir';
+  if (hasDart && !hasTs && !hasPy && !hasRuby && !hasElixir) return 'dart';
   return pickDominant(countSources(repoDir));
 }
 
 /**
  * The language with the most source files, ties resolving to the earliest of
- * [ts, python, ruby, elixir] — so `ts` stays the default when nothing is present
- * (byte-identical to the pre-Ruby `python > ts ? 'python' : 'ts'`).
+ * [ts, python, ruby, elixir, dart] — so `ts` stays the default when nothing is
+ * present (byte-identical to the pre-Ruby `python > ts ? 'python' : 'ts'`).
  */
 function pickDominant(counts: {
   ts: number;
   python: number;
   ruby: number;
   elixir: number;
+  dart: number;
 }): SourceLang {
   const ranked: Array<[SourceLang, number]> = [
     ['ts', counts.ts],
     ['python', counts.python],
     ['ruby', counts.ruby],
     ['elixir', counts.elixir],
+    ['dart', counts.dart],
   ];
   let best: SourceLang = 'ts';
   let bestCount = -1;
@@ -255,16 +319,17 @@ const MULTI_MIN_FRACTION = 0.15;
  * is deterministic.
  */
 export function detectRepoLanguages(repoDir: string): SourceLang[] {
-  const { ts, python, ruby, elixir } = countSources(repoDir);
+  const { ts, python, ruby, elixir, dart } = countSources(repoDir);
   const all: Array<{ lang: SourceLang; count: number }> = [
     { lang: 'ts', count: ts },
     { lang: 'python', count: python },
     { lang: 'ruby', count: ruby },
     { lang: 'elixir', count: elixir },
+    { lang: 'dart', count: dart },
   ];
   const counts = all.filter((l) => l.count > 0);
   if (counts.length <= 1) return [detectRepoLanguage(repoDir)];
-  const max = Math.max(ts, python, ruby, elixir);
+  const max = Math.max(ts, python, ruby, elixir, dart);
   const present = counts.filter((l) => l.count >= MULTI_MIN_FILES && l.count / max >= MULTI_MIN_FRACTION);
   if (present.length <= 1) return [detectRepoLanguage(repoDir)];
   return present
@@ -280,5 +345,6 @@ export function graphLanguage(graph: NormalizedGraph): SourceLang {
   if (graph.files.some((f) => f.language === 'py' || f.language === 'pyi')) return 'python';
   if (graph.files.some((f) => f.language === 'rb')) return 'ruby';
   if (graph.files.some((f) => ELIXIR_LANG_TAGS.has(f.language))) return 'elixir';
+  if (graph.files.some((f) => f.language === 'dart')) return 'dart';
   return 'ts';
 }

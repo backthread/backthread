@@ -54,7 +54,7 @@ import { parse as parseYaml } from 'yaml';
 import { parse as parseToml } from 'smol-toml';
 import type { PackageRole } from '../types.js';
 import { compileMatchers, slugify } from './overrides.js';
-import { EXCLUDE_DIRS, PYTHON_EXCLUDE_DIRS, RUBY_EXCLUDE_DIRS, ELIXIR_EXCLUDE_DIRS } from '../graph/file-graph.js';
+import { EXCLUDE_DIRS, PYTHON_EXCLUDE_DIRS, RUBY_EXCLUDE_DIRS, ELIXIR_EXCLUDE_DIRS, DART_EXCLUDE_DIRS } from '../graph/file-graph.js';
 import { normalizePyName, requirementName } from '../graph/python-manifest.js';
 
 export interface WorkspacePackage {
@@ -132,6 +132,11 @@ const WORKSPACE_MANIFEST_BASENAMES = new Set([
   // Elixir Mix project file. A repo-root mix.exs plus one per umbrella app
   // (`apps/*/mix.exs`) defines the Elixir package boundaries.
   'mix.exs',
+  // Dart/Flutter pub project file (one per package) + the melos monorepo manifest.
+  // A repo-root pubspec.yaml plus one per member (`packages/*/pubspec.yaml`) defines
+  // the Dart package boundaries; melos.yaml / the root `workspace:` list declares them.
+  'pubspec.yaml',
+  'melos.yaml',
 ]);
 
 /** Does a repo-relative path name a workspace-layout-defining manifest? */
@@ -183,6 +188,9 @@ export function detectWorkspaceLayout(rootDir: string): WorkspaceLayout {
     // Elixir umbrella `apps_path` (root mix.exs) declares `apps/*` members — the
     // analogue of package.json `workspaces` / uv members.
     ...collectElixirDeclaredGlobs(rootDir),
+    // Dart melos.yaml `packages:` globs + a native pub `workspace:` member list — the
+    // analogue of package.json `workspaces` / uv members.
+    ...collectDartDeclaredGlobs(rootDir),
   ]);
 
   // 3. Materialize packages. The root scope is ALWAYS present (and always
@@ -303,6 +311,30 @@ export function detectWorkspaceLayout(rootDir: string): WorkspaceLayout {
       declared: false,
       role: rubyRoleOf(dir),
       declaredDeps: [], // Ruby cross-package deps aren't wired (rare); left empty
+    });
+  }
+
+  // 3e. Dart/Flutter packages. Every non-root dir with a pubspec.yaml — a melos /
+  //     pub-workspace member (`packages/<child>/pubspec.yaml`), OR a Flutter app under
+  //     `mobile/`/`app/` in a polyglot repo — is a boundary (the pubspec IS the
+  //     declaration; its `name:` names the package, which also scopes that member's
+  //     `package:<self>` URI resolution in the extractor). Merged into the SAME packages
+  //     list so each member becomes its own subsystem and Louvain runs within it. A dir
+  //     already claimed (JS/Python/Elixir/Ruby) keeps its boundary (first wins).
+  for (const dir of findDartPackageDirs(rootDir)) {
+    if (seenRoots.has(dir)) continue;
+    const name = dartPackageName(join(rootDir, dir));
+    const declared = matchesDeclared(dir);
+    if (!declared && name === null) continue;
+    seenRoots.add(dir);
+    packages.push({
+      root: dir,
+      name,
+      slug: reserveSlug(slugFor(name, dir.split('/').pop() ?? dir)),
+      entryFileIds: dartEntryCandidates(dir, name),
+      declared,
+      role: dartRoleOf(dir),
+      declaredDeps: [], // Dart cross-package deps aren't wired (path deps rare); left empty
     });
   }
 
@@ -928,6 +960,124 @@ function rubyRoleOf(dir: string): PackageRole {
   const seg0 = dir.split('/')[0];
   if (TOOLING_DIRS.has(seg0)) return 'tooling';
   if (seg0 === 'apps') return 'app';
+  return 'lib';
+}
+
+// ---------------------------------------------------------------------------
+// Dart/Flutter package / melos-monorepo detection. A pubspec.yaml-bearing dir is a
+// boundary (a pub package / melos member / a nested Flutter app). Pure + fs-reading +
+// never-throws (a malformed pubspec degrades to fewer boundaries).
+
+// Skip both JS and Dart excludes — a vendored `.pub-cache/**/pubspec.yaml` or a
+// native `ios/`/`android/` host is never a first-party boundary.
+const DART_PKG_EXCLUDE_SET = new Set<string>([...EXCLUDE_DIRS, ...DART_EXCLUDE_DIRS]);
+
+/** Sorted non-root dirs containing a `pubspec.yaml`. */
+function findDartPackageDirs(rootDir: string): string[] {
+  const out = new Set<string>();
+  const walk = (rel: string, depth: number): void => {
+    if (depth > MAX_WALK_DEPTH) return;
+    let entries;
+    try {
+      entries = readdirSync(rel === '' ? rootDir : join(rootDir, rel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        if (ent.name.startsWith('.') || DART_PKG_EXCLUDE_SET.has(ent.name)) continue;
+        walk(rel === '' ? ent.name : `${rel}/${ent.name}`, depth + 1);
+      } else if (rel !== '' && ent.isFile() && ent.name === 'pubspec.yaml') {
+        out.add(rel);
+      }
+    }
+  };
+  walk('', 0);
+  return [...out].sort();
+}
+
+/** Parse a dir's pubspec.yaml into an object; null on absence/any failure. */
+function readPubspecObject(absDir: string): Record<string, unknown> | null {
+  try {
+    const p = join(absDir, 'pubspec.yaml');
+    if (!existsSync(p)) return null;
+    const parsed: unknown = parseYaml(readFileSync(p, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The package `name:` a dir's pubspec.yaml declares, or null. */
+function dartPackageName(absDir: string): string | null {
+  const pub = readPubspecObject(absDir);
+  const n = pub?.name;
+  return typeof n === 'string' && n.trim() ? n.trim() : null;
+}
+
+/**
+ * Declared Dart workspace globs: melos.yaml `packages:` glob list + a native pub
+ * `workspace:` member list in the root pubspec.yaml (Dart 3.6+). Both are the
+ * analogue of package.json `workspaces` / uv `members`. Normalized; each parse
+ * failure skips that source only.
+ */
+function collectDartDeclaredGlobs(rootDir: string): string[] {
+  const globs: string[] = [];
+  const push = (v: unknown): void => {
+    if (!Array.isArray(v)) return;
+    for (const raw of v) {
+      if (typeof raw !== 'string') continue;
+      let g = raw.trim().replace(/\\/g, '/');
+      if (g.startsWith('!')) continue;
+      if (g.startsWith('./')) g = g.slice(2);
+      g = g.replace(/\/+$/, '');
+      if (g) globs.push(g);
+    }
+  };
+  // melos.yaml `packages:` (glob patterns like `packages/**`).
+  try {
+    const doc: unknown = parseYaml(readFileSync(join(rootDir, 'melos.yaml'), 'utf8'));
+    if (doc && typeof doc === 'object' && !Array.isArray(doc)) {
+      push((doc as Record<string, unknown>).packages);
+    }
+  } catch {
+    // absent or malformed → skip this source
+  }
+  // Native pub `workspace:` members in the root pubspec.yaml (explicit paths).
+  const pub = readPubspecObject(rootDir);
+  if (pub) push(pub.workspace);
+  return globs;
+}
+
+/** Best-first candidate entry files for a Dart package (its conventional lib entry). */
+function dartEntryCandidates(dir: string, name: string | null): string[] {
+  const out: string[] = [];
+  const push = (p: string): void => {
+    if (!out.includes(p)) out.push(p);
+  };
+  const rel = (f: string): string => (dir ? `${dir}/${f}` : f);
+  if (name) push(rel(`lib/${name}.dart`));
+  const base = dir.split('/').pop() ?? '';
+  if (base) push(rel(`lib/${base}.dart`));
+  push(rel('lib/main.dart'));
+  push(rel('lib/src/main.dart'));
+  return out;
+}
+
+/**
+ * Classify a Dart package: apps/app/mobile → app; packages/libs → lib; tools/config →
+ * tooling; else lib (a pub package / melos member is a reusable unit by convention).
+ * Pure — role is descriptive metadata, so a dir-convention heuristic (mirroring the
+ * Ruby/Elixir role helpers) is sufficient.
+ */
+function dartRoleOf(dir: string): PackageRole {
+  const seg0 = dir.split('/')[0];
+  if (TOOLING_DIRS.has(seg0)) return 'tooling';
+  if (seg0 === 'apps' || seg0 === 'app' || seg0 === 'mobile') return 'app';
+  if (seg0 === 'packages' || seg0 === 'libs') return 'lib';
   return 'lib';
 }
 

@@ -412,3 +412,51 @@ test('a *.gemspec dir is a package boundary — a mountable Rails engine is part
   expect(layout.packageOf('engines/billing/app/models/invoice.rb').root).toBe('engines/billing');
   expect(layout.packageOf('app/models/user.rb').root).toBe('');
 });
+
+// ── Dart/Flutter package/workspace detection ────────────────────────────────
+
+test('melos monorepo: each packages/* member (its pubspec name) becomes a package', () => {
+  const dir = fixture({
+    'melos.yaml': 'name: mono\npackages:\n  - packages/**\n',
+    'packages/core/pubspec.yaml': 'name: core\n',
+    'packages/core/lib/core.dart': 'class Core {}\n',
+    'packages/ui/pubspec.yaml': 'name: ui_kit\n',
+    'packages/ui/lib/ui.dart': 'class Button {}\n',
+  });
+  const layout = detectWorkspaceLayout(dir);
+  expect(rootsOf(layout)).toEqual(['', 'packages/core', 'packages/ui']);
+  const core = layout.packages.find((p) => p.root === 'packages/core')!;
+  expect(core).toMatchObject({ name: 'core', slug: 'core', role: 'lib', declared: true });
+  expect(layout.packages.find((p) => p.root === 'packages/ui')!.name).toBe('ui_kit');
+  // files inside a member belong to that member, not the root scope
+  expect(layout.packageOf('packages/ui/lib/ui.dart').root).toBe('packages/ui');
+});
+
+test('native pub `workspace:` members in the root pubspec declare Dart packages', () => {
+  const dir = fixture({
+    'pubspec.yaml': 'name: app\nworkspace:\n  - pkgs/shared\n',
+    'pkgs/shared/pubspec.yaml': 'name: shared\n',
+    'pkgs/shared/lib/shared.dart': 'class Shared {}\n',
+  });
+  const layout = detectWorkspaceLayout(dir);
+  expect(rootsOf(layout)).toContain('pkgs/shared');
+  expect(layout.packages.find((p) => p.root === 'pkgs/shared')!.declared).toBe(true);
+});
+
+test('an inferred (named, undeclared) nested pubspec is still a Dart package boundary', () => {
+  const dir = fixture({
+    'package.json': pkgJson({ name: 'server' }), // a polyglot repo whose root is JS
+    'mobile/pubspec.yaml': 'name: mobile_app\n',
+    'mobile/lib/main.dart': 'void main() {}\n',
+  });
+  const layout = detectWorkspaceLayout(dir);
+  const mobile = layout.packages.find((p) => p.root === 'mobile')!;
+  expect(mobile).toMatchObject({ name: 'mobile_app', declared: false, role: 'app' });
+  expect(layout.packageOf('mobile/lib/main.dart').root).toBe('mobile');
+});
+
+test('isWorkspaceManifestPath recognizes Dart manifests (recompute trigger)', () => {
+  expect(isWorkspaceManifestPath('pubspec.yaml')).toBe(true);
+  expect(isWorkspaceManifestPath('packages/a/pubspec.yaml')).toBe(true);
+  expect(isWorkspaceManifestPath('melos.yaml')).toBe(true);
+});
