@@ -85,6 +85,25 @@ const SYMFONY_COMPOSER = JSON.stringify({
   require: { 'symfony/messenger': '^7.0' },
 });
 
+describe('php-async — Laravel Queues (transitive ShouldQueue via app/Jobs)', () => {
+  it('detects a job that inherits ShouldQueue from a base class + links a custom-facade dispatch', async () => {
+    const ctx = await asyncRepo({
+      'composer.json': LARAVEL_COMPOSER,
+      // The base implements ShouldQueue; the concrete job just extends it.
+      'app/Jobs/QueuedJob.php':
+        '<?php\nnamespace App\\Jobs;\nuse Illuminate\\Contracts\\Queue\\ShouldQueue;\nabstract class QueuedJob implements ShouldQueue {}\n',
+      'app/Jobs/ScrobbleJob.php': '<?php\nnamespace App\\Jobs;\nclass ScrobbleJob extends QueuedJob {}\n',
+      'app/Http/Controllers/ScrobbleController.php':
+        '<?php\nnamespace App\\Http\\Controllers;\nuse App\\Jobs\\ScrobbleJob;\nuse App\\Facades\\Dispatcher;\nclass ScrobbleController {\n  public function store() { Dispatcher::dispatch(new ScrobbleJob()); }\n}\n',
+    });
+    const [roles, edges] = await Promise.all([asyncAdapter.roleTags!(ctx), asyncAdapter.syntheticEdges!(ctx)]);
+    // The subclass has no direct `implements ShouldQueue`, but lives in app/Jobs/.
+    expect(roles.get('app/Jobs/ScrobbleJob.php')).toMatchObject({ role: 'job', kind: 'job' });
+    // A `new J()` first-arg dispatch resolves regardless of the (custom-facade) receiver.
+    expect(edges.map(edgeKey)).toContain('app/Http/Controllers/ScrobbleController.php→app/Jobs/ScrobbleJob.php');
+  });
+});
+
 describe('php-async — Symfony Messenger', () => {
   it('tags handlers job (attribute + __invoke) + draws $bus->dispatch publishes edges', async () => {
     const ctx = await asyncRepo({

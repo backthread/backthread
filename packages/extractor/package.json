@@ -1,7 +1,7 @@
 {
   "name": "@backthread/extractor",
-  "version": "0.4.1",
-  "description": "Deterministic, install-free structural extraction for TypeScript, Python, Ruby, and Elixir codebases — AST → communities → god-nodes → framework & infra adapters, zero LLM/DB/network.",
+  "version": "0.5.0",
+  "description": "Deterministic, install-free structural extraction for TypeScript, Python, Ruby, Elixir, and PHP codebases — AST → communities → god-nodes → framework & infra adapters, zero LLM/DB/network.",
   "type": "module",
   "license": "MIT",
   "author": "Backthread",
@@ -20,6 +20,7 @@
     "python",
     "ruby",
     "elixir",
+    "php",
     "louvain",
     "architecture"
   ],

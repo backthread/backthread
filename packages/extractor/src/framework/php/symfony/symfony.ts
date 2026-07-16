@@ -86,8 +86,15 @@ function lastSeg(name: string): string {
   return i >= 0 ? name.slice(i + 1) : name;
 }
 
-function inSrc(fileId: string, sub: string): boolean {
-  return new RegExp(`(^|/)src/${sub}/`).test(fileId);
+// A `Controller/` / `Command/` directory anywhere — not just `src/Controller/`.
+// A standard app keeps controllers in `src/Controller/`, but a modular / bundle
+// app (Sylius, an API-Platform or bundle-structured project) nests them under
+// `src/<Vendor>/<Bundle>/Controller/`; matching the dir name (singular, Symfony's
+// convention — Laravel uses plural `Controllers`) catches both. Safe: this only
+// runs for a symfony/framework-bundle repo, and a `Command/` match additionally
+// requires a Command class.
+function inDir(fileId: string, dir: string): boolean {
+  return new RegExp(`(^|/)${dir}/`).test(fileId);
 }
 
 /** Any `#[Route]` attribute on the class or one of its methods. */
@@ -126,8 +133,8 @@ function isCommand(cls: PhpClass): boolean {
  * role per file.
  */
 function symfonyRole(fileId: string, classes: readonly PhpClass[]): SymfonyRole | undefined {
-  if (inSrc(fileId, 'Controller') || classes.some(isController)) return 'controller';
-  if (inSrc(fileId, 'Command') && classes.some(isCommand)) return 'command';
+  if (inDir(fileId, 'Controller') || classes.some(isController)) return 'controller';
+  if (inDir(fileId, 'Command') && classes.some(isCommand)) return 'command';
   return undefined;
 }
 

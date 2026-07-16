@@ -115,6 +115,18 @@ describe('laravel route spine', () => {
     expect(edges.length).toBe(3);
   });
 
+  it('walks non-standard route files (admin.php / *.base.php), not just web/api.php', async () => {
+    const ctx = await laravelRepo({
+      'composer.json': COMPOSER,
+      'app/Http/Controllers/AdminController.php':
+        '<?php\nnamespace App\\Http\\Controllers;\nclass AdminController extends Controller {}\n',
+      'routes/admin.php':
+        "<?php\nuse App\\Http\\Controllers\\AdminController;\nRoute::get('/admin', [AdminController::class, 'index']);\n",
+    });
+    const edges = await laravelAdapter.syntheticEdges!(ctx);
+    expect(edges.map(edgeKey)).toContain('routes/admin.php→app/Http/Controllers/AdminController.php');
+  });
+
   it('resolves a legacy Ctrl@method string best-effort', async () => {
     const ctx = await laravelRepo({
       'composer.json': COMPOSER,
