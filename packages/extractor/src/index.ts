@@ -58,10 +58,12 @@ export {
   PYTHON_SOURCE_EXTENSIONS,
   RUBY_SOURCE_EXTENSIONS,
   ELIXIR_SOURCE_EXTENSIONS,
+  DART_SOURCE_EXTENSIONS,
   EXCLUDE_DIRS,
   PYTHON_EXCLUDE_DIRS,
   RUBY_EXCLUDE_DIRS,
   ELIXIR_EXCLUDE_DIRS,
+  DART_EXCLUDE_DIRS,
   isSourceFilePath,
   isConfigInvalidatorPath,
   EXTRACTOR_VERSION,
@@ -92,6 +94,8 @@ export {
   graphLanguage,
   hasRubyManifest,
   hasMixManifest,
+  hasDartManifest,
+  hasDartManifestDeep,
 } from './graph/language.js';
 export { NOISE_CATEGORIES, NOISE_RULES, classifyNoise, filterNoise, summarizeNoise } from './graph/noise-filter.js';
 export type { NoiseCategory, NoiseRule, DroppedNoise } from './graph/noise-filter.js';

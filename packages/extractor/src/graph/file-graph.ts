@@ -33,7 +33,7 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
  * caller can't yet supply a language (the incremental diff classifier is TS-only
  * today).
  */
-export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir';
+export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
@@ -58,6 +58,16 @@ export const RUBY_SOURCE_EXTENSIONS = ['rb', 'rake', 'ru'] as const;
  * scanner skips it explicitly.
  */
 export const ELIXIR_SOURCE_EXTENSIONS = ['ex', 'exs', 'eex', 'heex', 'leex'] as const;
+
+/**
+ * Dart source extension the hand-rolled Dart scanner parses. Just `.dart` — Dart
+ * has one source extension (there is no `.dart`-adjacent template family). Generated
+ * files (`*.g.dart`, `*.freezed.dart`) ARE `.dart` and are enumerated, but the
+ * adapter folds each into its parent library node via the `part`/`part of` merge, so
+ * they never surface as their own diagram box. `pubspec.yaml` / `pubspec.lock` are
+ * MANIFESTS (dep declarations, not graph nodes) and are `.yaml`, so they never match.
+ */
+export const DART_SOURCE_EXTENSIONS = ['dart'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -135,14 +145,41 @@ export const ELIXIR_EXCLUDE_DIRS = [
   '.git',
 ] as const;
 
+/**
+ * Directories the Dart scanner's walk excludes: the pub tool cache + build
+ * artifacts (`.dart_tool` / `build`), the resolved-dependency cache (`.pub-cache` —
+ * the Dart analogue of `node_modules`; walking it would misread installed packages
+ * as first-party source), the Flutter version-manager cache (`.fvm`), the CocoaPods
+ * symlink tree (`.symlinks`), and the native-platform host projects (`ios` /
+ * `android` — Swift/Kotlin/ObjC/Java, not Dart, and `android/`'s Gradle tree can
+ * hide vendored `.dart`). The dot-prefixed entries (`.dart_tool` / `.pub-cache` /
+ * `.fvm` / `.symlinks`, plus the generated `.flutter-plugins*` FILES) are also
+ * caught by the dot-segment skip in `isSourceFilePath`; listed explicitly so the
+ * policy is self-contained. `node_modules` is kept because a Flutter `web/` build or
+ * a polyglot repo can ship a JS toolchain.
+ */
+export const DART_EXCLUDE_DIRS = [
+  '.dart_tool',
+  'build',
+  'ios',
+  'android',
+  '.pub-cache',
+  '.symlinks',
+  '.fvm',
+  'node_modules',
+  '.git',
+] as const;
+
 const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXTENSIONS.join('|')})$`);
 const PYTHON_SOURCE_EXT_RE = new RegExp(`\\.(${PYTHON_SOURCE_EXTENSIONS.join('|')})$`);
 const RUBY_SOURCE_EXT_RE = new RegExp(`\\.(${RUBY_SOURCE_EXTENSIONS.join('|')})$`);
 const ELIXIR_SOURCE_EXT_RE = new RegExp(`\\.(${ELIXIR_SOURCE_EXTENSIONS.join('|')})$`);
+const DART_SOURCE_EXT_RE = new RegExp(`\\.(${DART_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
 const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
 const ELIXIR_EXCLUDE_SET = new Set<string>(ELIXIR_EXCLUDE_DIRS);
+const DART_EXCLUDE_SET = new Set<string>(DART_EXCLUDE_DIRS);
 
 // Extension-less Ruby source basenames. A `Rakefile` is Ruby; `config.ru` already
 // matches the `.ru` extension. `Gemfile` is intentionally NOT here — it's a
@@ -172,7 +209,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
         ? RUBY_SOURCE_EXT_RE
         : lang === 'elixir'
           ? ELIXIR_SOURCE_EXT_RE
-          : SOURCE_EXT_RE;
+          : lang === 'dart'
+            ? DART_SOURCE_EXT_RE
+            : SOURCE_EXT_RE;
   const excludes =
     lang === 'python'
       ? PYTHON_EXCLUDE_SET
@@ -180,7 +219,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
         ? RUBY_EXCLUDE_SET
         : lang === 'elixir'
           ? ELIXIR_EXCLUDE_SET
-          : EXCLUDE_SET;
+          : lang === 'dart'
+            ? DART_EXCLUDE_SET
+            : EXCLUDE_SET;
   // Ruby has extension-less source files (a `Rakefile`); every other language —
   // and every other Ruby file — must match its language's source extension.
   const base = path.slice(path.lastIndexOf('/') + 1);
