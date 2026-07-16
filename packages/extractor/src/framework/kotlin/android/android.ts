@@ -357,36 +357,33 @@ export function scanNavTargets(
 
 /**
  * The first composable INVOCATION (`XScreen(...)`) inside the brace block a `composable`
- * call opens, scanning from `start` to the matching `}` (bounded). Returns the invoked
- * composable's simple name, or undefined (an inline lambda with no single screen call).
+ * call opens — the destination screen. Extracts the block INTERIOR (from the first `{` to
+ * its matching `}`, across up to 40 lines) then takes the first `PascalCase(` invocation,
+ * so single-line (`composable("x") { Home() }`) and multi-line routes resolve uniformly.
+ * Returns the invoked composable's simple name, or undefined (an inline lambda with no
+ * single screen call). A wrapper composable WITH parens (`Surface(mod) { Home() }`) is
+ * matched first and — being an external — drops (a documented recall degrade, not a false
+ * edge); a paren-less wrapper (`Surface { Home() }`) is skipped so `Home` wins.
  */
 function firstComposableInBlock(lines: string[], start: number): string | undefined {
-  // Find the `{` that opens the route lambda (this line or a following one).
+  const text = lines.slice(start, start + 40).join('\n');
+  const open = text.indexOf('{');
+  if (open < 0) return undefined;
   let depth = 0;
-  let opened = false;
-  for (let i = start; i < lines.length && i < start + 40; i++) {
-    for (const ch of lines[i]) {
-      if (ch === '{') {
-        depth++;
-        opened = true;
-      } else if (ch === '}') {
-        depth--;
-        if (opened && depth <= 0) return undefined; // block closed with no screen call
+  let end = text.length;
+  for (let k = open; k < text.length; k++) {
+    if (text[k] === '{') depth++;
+    else if (text[k] === '}') {
+      depth--;
+      if (depth === 0) {
+        end = k;
+        break;
       }
     }
-    if (!opened) continue;
-    // Inside the block: the first PascalCase invocation that is NOT the `composable` call.
-    const m = lines[i].match(COMPOSABLE_INVOKE_RE);
-    if (m && i > start) return m[1];
-    if (i === start) {
-      // On the opening line, look AFTER the `{`.
-      const brace = lines[i].indexOf('{');
-      const after = brace >= 0 ? lines[i].slice(brace + 1) : '';
-      const mm = after.match(COMPOSABLE_INVOKE_RE);
-      if (mm) return mm[1];
-    }
   }
-  return undefined;
+  const interior = text.slice(open + 1, end);
+  const m = interior.match(COMPOSABLE_INVOKE_RE);
+  return m ? m[1] : undefined;
 }
 
 // ---------------------------------------------------------------------------

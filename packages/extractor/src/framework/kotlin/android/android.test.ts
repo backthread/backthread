@@ -183,4 +183,15 @@ describe('roleTags + nav edges (integration)', () => {
     const nav = scanNavTargets(scope.parsed.get('a/Nav.kt')!, scope);
     expect(nav.edges.map((e) => e.target)).toContain('a/HomeRoute.kt');
   });
+
+  it('resolves a SINGLE-LINE composable route destination', async () => {
+    const files: Array<[string, string]> = [
+      ['a/Nav.kt', 'package com.x\nfun graph() { composable("home") { HomeRoute() } }'],
+      ['a/HomeRoute.kt', 'package com.x\nimport androidx.compose.runtime.Composable\n@Composable\nfun HomeRoute() {}'],
+    ];
+    const dir = await repo(Object.fromEntries(files));
+    const scope = parseKotlinScope(ctx(dir, files));
+    const nav = scanNavTargets(scope.parsed.get('a/Nav.kt')!, scope);
+    expect(nav.edges.map((e) => e.target)).toContain('a/HomeRoute.kt');
+  });
 });

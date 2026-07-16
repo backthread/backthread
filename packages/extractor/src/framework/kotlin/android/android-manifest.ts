@@ -99,9 +99,7 @@ export function scanAndroidManifests(repoDir: string, rootPath: string): Manifes
       return;
     }
     for (const e of entries) {
-      if (e.isFile() && e.name === 'AndroidManifest.xml') {
-        const childRel = rel === '' ? e.name : `${rel}/${e.name}`;
-        if (!inScope(rel === '' ? '' : rel, rootPath)) continue;
+      if (e.isFile() && e.name === 'AndroidManifest.xml' && inScope(rel, rootPath)) {
         try {
           for (const comp of parseAndroidManifest(readFileSync(join(abs, e.name), 'utf8'))) {
             const key = `${comp.tag}:${comp.fqn || comp.simpleName}`;
@@ -113,7 +111,6 @@ export function scanAndroidManifests(repoDir: string, rootPath: string): Manifes
         } catch {
           // unreadable manifest — skip
         }
-        void childRel;
       }
     }
     for (const e of entries) {
