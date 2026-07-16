@@ -20,7 +20,7 @@
 // protocol adapter that co-fires on the same repo.
 
 import { registerFrameworkAdapter } from './registry.js';
-import { hasRubyManifest, hasMixManifestDeep } from '../graph/language.js';
+import { hasRubyManifest, hasMixManifestDeep, hasKotlinManifest } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
 import { nestAdapter } from './nest/nest.js';
@@ -70,6 +70,7 @@ export function registerBuiltinFrameworkAdapters(): void {
 // so a TS/Python ingest never pulls in either toolchain.
 let rubyRegistered = false;
 let elixirRegistered = false;
+let kotlinRegistered = false;
 
 /**
  * Register the framework adapters whose toolchain must NOT load for every repo.
@@ -94,5 +95,13 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     elixirRegistered = true;
     const { registerElixirFrameworkAdapters } = await import('./register-elixir.js');
     registerElixirFrameworkAdapters();
+  }
+  // Kotlin gates on a Gradle manifest (build.gradle(.kts) / settings.gradle(.kts) /
+  // libs.versions.toml). The scanner is hand-rolled + dep-free, so this gate is purely
+  // about not module-loading the Kotlin adapters for a non-Kotlin repo.
+  if (!kotlinRegistered && hasKotlinManifest(repoDir)) {
+    kotlinRegistered = true;
+    const { registerKotlinFrameworkAdapters } = await import('./register-kotlin.js');
+    registerKotlinFrameworkAdapters();
   }
 }
