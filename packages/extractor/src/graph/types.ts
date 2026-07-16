@@ -95,3 +95,17 @@ export function pythonExternalIdFor(moduleName: string): { id: string; specifier
   const top = moduleName.replace(/^\.+/, '').split('.')[0];
   return { id: `ext:${top}`, specifier: top };
 }
+
+// Collapse a PHP class FQN to its vendor node id — the analogue of externalIdFor
+// for the php-parser adapter. PHP FQNs are backslash-separated (`Symfony\Component\
+// Routing\Route`); a class from a Composer package always sits under that package's
+// TOP namespace segment (`Symfony`, `Illuminate`, `Doctrine`), mirroring how a
+// dotted Python module collapses to its top package and `@scope/pkg/sub` collapses
+// to `@scope/pkg`. The top segment (what a code-reader recognizes) is the id — one
+// `ext:Symfony` box reads better than 40 `symfony/*` boxes. A leading namespace
+// separator (`\Symfony\…`) is stripped first; a caller must never pass a
+// first-party FQN (those resolve to a file, not an external).
+export function phpExternalIdFor(fqn: string): { id: string; specifier: string } {
+  const top = fqn.replace(/^\\+/, '').split('\\')[0];
+  return { id: `ext:${top}`, specifier: top };
+}

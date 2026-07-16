@@ -72,11 +72,11 @@ export function mergeGraphs(root: string, graphs: readonly NormalizedGraph[]): N
 
 /**
  * Pick the structural adapter for a detected language. The Python, Ruby, Elixir,
- * and Dart adapters are LAZILY imported so a TS ingest never loads
- * `@zzzen/pyright-internal`, `@ruby/prism`, the Elixir scanner, or the Dart scanner
- * (keeps the TS path — and the worker's TS bundle — free of the other-language
- * toolchains; only a repo of that language pays for its parser). TS stays the default
- * + eager (the pipeline's home turf).
+ * Dart, and PHP adapters are LAZILY imported so a TS ingest never loads
+ * `@zzzen/pyright-internal`, `@ruby/prism`, the Elixir scanner, the Dart scanner,
+ * or `php-parser` (keeps the TS path — and the worker's TS bundle — free of the
+ * other-language toolchains; only a repo of that language pays for its parser).
+ * TS stays the default + eager (the pipeline's home turf).
  */
 async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
   if (language === 'python') {
@@ -94,6 +94,10 @@ async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
   if (language === 'dart') {
     const { DartExtractor } = await import('./dart-adapter.js');
     return new DartExtractor();
+  }
+  if (language === 'php') {
+    const { PhpExtractor } = await import('./php-adapter.js');
+    return new PhpExtractor();
   }
   return new TsMorphExtractor();
 }

@@ -33,7 +33,7 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
  * caller can't yet supply a language (the incremental diff classifier is TS-only
  * today).
  */
-export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart';
+export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
@@ -68,6 +68,16 @@ export const ELIXIR_SOURCE_EXTENSIONS = ['ex', 'exs', 'eex', 'heex', 'leex'] as 
  * MANIFESTS (dep declarations, not graph nodes) and are `.yaml`, so they never match.
  */
 export const DART_SOURCE_EXTENSIONS = ['dart'] as const;
+
+/**
+ * PHP source extension the php-parser adapter parses: `.php`. Blade views
+ * (`*.blade.php`) also END in `.php` but carry NO import backbone (they're
+ * templates — edgeless leaves), so they're rejected by an explicit guard in
+ * isSourceFilePath (the shipped Rails/Phoenix adapters exclude `.erb`/`.eex`
+ * views the same way). Twig (`.twig`) and `.phtml` templates don't match `.php`
+ * and are excluded for free.
+ */
+export const PHP_SOURCE_EXTENSIONS = ['php'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -170,16 +180,45 @@ export const DART_EXCLUDE_DIRS = [
   '.git',
 ] as const;
 
+/**
+ * Directories the PHP adapter's walk excludes: Composer's vendored dependency
+ * tree (`vendor` — the PHP analogue of `node_modules` / `vendor/bundle`; walking
+ * it would misread installed packages as first-party source, blowing the
+ * install-free promise), the framework runtime scratch (`var` — Symfony's cache/
+ * logs; `cache`; `storage` — Laravel's on-disk root incl. compiled Blade views),
+ * and any JS-bundler deps. These are single dir-name segments. Built frontend
+ * assets under `public/build` (Vite/Mix output) are a two-segment path — `public`
+ * itself is NOT excluded (a legacy front controller can hold PHP), only its
+ * `build/` output — so that one is handled by a path-prefix guard in
+ * isSourceFilePath rather than this single-segment set.
+ */
+export const PHP_EXCLUDE_DIRS = [
+  'vendor',
+  'var',
+  'cache',
+  'storage',
+  'node_modules',
+  '.git',
+] as const;
+
 const SOURCE_EXT_RE = new RegExp(`\\.(${SOURCE_EXTENSIONS.join('|')})$`);
 const PYTHON_SOURCE_EXT_RE = new RegExp(`\\.(${PYTHON_SOURCE_EXTENSIONS.join('|')})$`);
 const RUBY_SOURCE_EXT_RE = new RegExp(`\\.(${RUBY_SOURCE_EXTENSIONS.join('|')})$`);
 const ELIXIR_SOURCE_EXT_RE = new RegExp(`\\.(${ELIXIR_SOURCE_EXTENSIONS.join('|')})$`);
 const DART_SOURCE_EXT_RE = new RegExp(`\\.(${DART_SOURCE_EXTENSIONS.join('|')})$`);
+const PHP_SOURCE_EXT_RE = new RegExp(`\\.(${PHP_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
 const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
 const ELIXIR_EXCLUDE_SET = new Set<string>(ELIXIR_EXCLUDE_DIRS);
 const DART_EXCLUDE_SET = new Set<string>(DART_EXCLUDE_DIRS);
+const PHP_EXCLUDE_SET = new Set<string>(PHP_EXCLUDE_DIRS);
+
+// A Blade view (`*.blade.php`) ends in `.php` but is a template with no import
+// backbone — an edgeless leaf. Rejected outright so it never becomes a graph node.
+const BLADE_RE = /\.blade\.php$/;
+// Vite/Mix build output under public/ — an asset dir, not first-party PHP.
+const PHP_PUBLIC_BUILD_RE = /(^|\/)public\/build\//;
 
 // Extension-less Ruby source basenames. A `Rakefile` is Ruby; `config.ru` already
 // matches the `.ru` extension. `Gemfile` is intentionally NOT here — it's a
@@ -211,7 +250,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
           ? ELIXIR_SOURCE_EXT_RE
           : lang === 'dart'
             ? DART_SOURCE_EXT_RE
-            : SOURCE_EXT_RE;
+            : lang === 'php'
+              ? PHP_SOURCE_EXT_RE
+              : SOURCE_EXT_RE;
   const excludes =
     lang === 'python'
       ? PYTHON_EXCLUDE_SET
@@ -221,11 +262,16 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
           ? ELIXIR_EXCLUDE_SET
           : lang === 'dart'
             ? DART_EXCLUDE_SET
-            : EXCLUDE_SET;
+            : lang === 'php'
+              ? PHP_EXCLUDE_SET
+              : EXCLUDE_SET;
   // Ruby has extension-less source files (a `Rakefile`); every other language —
   // and every other Ruby file — must match its language's source extension.
   const base = path.slice(path.lastIndexOf('/') + 1);
   if (!extRe.test(path) && !(lang === 'ruby' && RUBY_SOURCE_BASENAMES.has(base))) return false;
+  // PHP: Blade views end in `.php` but are edgeless templates, and public/build
+  // holds bundled front-end assets — neither is a first-party PHP graph node.
+  if (lang === 'php' && (BLADE_RE.test(path) || PHP_PUBLIC_BUILD_RE.test(path))) return false;
   for (const seg of path.split('/')) {
     if (seg.startsWith('.')) return false;
     if (excludes.has(seg)) return false;

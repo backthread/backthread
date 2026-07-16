@@ -16,6 +16,7 @@ import {
   RUBY_EXCLUDE_DIRS,
   ELIXIR_EXCLUDE_DIRS,
   DART_EXCLUDE_DIRS,
+  PHP_EXCLUDE_DIRS,
   EXCLUDE_DIRS,
   type SourceLang,
 } from './file-graph.js';
@@ -29,6 +30,9 @@ const ELIXIR_MANIFESTS = ['mix.exs', 'mix.lock'];
 // Pub is Dart's package manager; `pubspec.yaml` (the project file) + `pubspec.lock`
 // (the resolved dep pins) are the unambiguous Dart/Flutter-repo manifests.
 const DART_MANIFESTS = ['pubspec.yaml', 'pubspec.lock'];
+// Composer is PHP's package manager; `composer.json` (the project file) +
+// `composer.lock` (the resolved dep pins) are the unambiguous PHP-repo manifests.
+const PHP_MANIFESTS = ['composer.json', 'composer.lock'];
 
 /**
  * Does the repo root declare a Ruby project? A `Gemfile` / `Gemfile.lock`, or any
@@ -106,6 +110,18 @@ export function hasDartManifest(repoDir: string): boolean {
   return DART_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
 }
 
+/**
+ * Does the repo root declare a PHP project? A `composer.json` / `composer.lock`.
+ * Composer's `composer.json` is the single decisive PHP-repo manifest (a Laravel/
+ * Symfony app's JS toolchain lives under a separate package.json for its bundler).
+ * Shared by the extractor's language detection AND the composer.json-gated
+ * framework-fleet registration (framework/register.ts), so the "is this PHP?"
+ * answer — and the php-parser isolation gate — has ONE source. Cheap: existsSync.
+ */
+export function hasComposerManifest(repoDir: string): boolean {
+  return PHP_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
+}
+
 // Depth cap + skip set for the nested pubspec probe — mirrors MIX_PROBE_* above.
 // Real Flutter apps sit 1-3 levels deep (a monorepo's `mobile/`/`app/`, a melos
 // `packages/<child>`); 8 is generous. Skips build/vendor + dot dirs so a
@@ -164,7 +180,9 @@ export function listSourceFiles(root: string, lang: SourceLang): string[] {
           ? ELIXIR_EXCLUDE_DIRS
           : lang === 'dart'
             ? DART_EXCLUDE_DIRS
-            : EXCLUDE_DIRS,
+            : lang === 'php'
+              ? PHP_EXCLUDE_DIRS
+              : EXCLUDE_DIRS,
   );
   const out: string[] = [];
 
@@ -195,20 +213,22 @@ export function listSourceFiles(root: string, lang: SourceLang): string[] {
 function countSources(
   root: string,
   cap = 4000,
-): { ts: number; python: number; ruby: number; elixir: number; dart: number } {
+): { ts: number; python: number; ruby: number; elixir: number; dart: number; php: number } {
   let ts = 0;
   let python = 0;
   let ruby = 0;
   let elixir = 0;
   let dart = 0;
+  let php = 0;
   const absRoot = resolve(root);
   const tsExcl = new Set<string>(EXCLUDE_DIRS);
   const pyExcl = new Set<string>(PYTHON_EXCLUDE_DIRS);
   const rbExcl = new Set<string>(RUBY_EXCLUDE_DIRS);
   const exExcl = new Set<string>(ELIXIR_EXCLUDE_DIRS);
   const dartExcl = new Set<string>(DART_EXCLUDE_DIRS);
+  const phpExcl = new Set<string>(PHP_EXCLUDE_DIRS);
   const walk = (dir: string): void => {
-    if (ts + python + ruby + elixir + dart >= cap) return;
+    if (ts + python + ruby + elixir + dart + php >= cap) return;
     let entries: import('node:fs').Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -216,7 +236,7 @@ function countSources(
       return;
     }
     for (const ent of entries) {
-      if (ts + python + ruby + elixir + dart >= cap) return;
+      if (ts + python + ruby + elixir + dart + php >= cap) return;
       const abs = `${dir}/${ent.name}`;
       if (ent.isDirectory()) {
         // Skip a dir excluded by ANY language (or dot-prefixed) — the union keeps
@@ -228,7 +248,8 @@ function countSources(
           pyExcl.has(ent.name) ||
           rbExcl.has(ent.name) ||
           exExcl.has(ent.name) ||
-          dartExcl.has(ent.name)
+          dartExcl.has(ent.name) ||
+          phpExcl.has(ent.name)
         ) {
           continue;
         }
@@ -240,11 +261,12 @@ function countSources(
         else if (isSourceFilePath(id, 'ruby')) ruby++;
         else if (isSourceFilePath(id, 'elixir')) elixir++;
         else if (isSourceFilePath(id, 'dart')) dart++;
+        else if (isSourceFilePath(id, 'php')) php++;
       }
     }
   };
   walk(absRoot);
-  return { ts, python, ruby, elixir, dart };
+  return { ts, python, ruby, elixir, dart, php };
 }
 
 /**
@@ -264,11 +286,13 @@ export function detectRepoLanguage(repoDir: string): SourceLang {
   const hasRuby = hasRubyManifest(repoDir);
   const hasElixir = hasMixManifest(repoDir);
   const hasDart = hasDartManifest(repoDir);
-  if (hasPy && !hasTs && !hasRuby && !hasElixir && !hasDart) return 'python';
-  if (hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart) return 'ts';
-  if (hasRuby && !hasTs && !hasPy && !hasElixir && !hasDart) return 'ruby';
-  if (hasElixir && !hasTs && !hasPy && !hasRuby && !hasDart) return 'elixir';
-  if (hasDart && !hasTs && !hasPy && !hasRuby && !hasElixir) return 'dart';
+  const hasPhp = hasComposerManifest(repoDir);
+  if (hasPy && !hasTs && !hasRuby && !hasElixir && !hasDart && !hasPhp) return 'python';
+  if (hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp) return 'ts';
+  if (hasRuby && !hasTs && !hasPy && !hasElixir && !hasDart && !hasPhp) return 'ruby';
+  if (hasElixir && !hasTs && !hasPy && !hasRuby && !hasDart && !hasPhp) return 'elixir';
+  if (hasDart && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasPhp) return 'dart';
+  if (hasPhp && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart) return 'php';
   return pickDominant(countSources(repoDir));
 }
 
@@ -283,6 +307,7 @@ function pickDominant(counts: {
   ruby: number;
   elixir: number;
   dart: number;
+  php: number;
 }): SourceLang {
   const ranked: Array<[SourceLang, number]> = [
     ['ts', counts.ts],
@@ -290,6 +315,7 @@ function pickDominant(counts: {
     ['ruby', counts.ruby],
     ['elixir', counts.elixir],
     ['dart', counts.dart],
+    ['php', counts.php],
   ];
   let best: SourceLang = 'ts';
   let bestCount = -1;
@@ -319,17 +345,18 @@ const MULTI_MIN_FRACTION = 0.15;
  * is deterministic.
  */
 export function detectRepoLanguages(repoDir: string): SourceLang[] {
-  const { ts, python, ruby, elixir, dart } = countSources(repoDir);
+  const { ts, python, ruby, elixir, dart, php } = countSources(repoDir);
   const all: Array<{ lang: SourceLang; count: number }> = [
     { lang: 'ts', count: ts },
     { lang: 'python', count: python },
     { lang: 'ruby', count: ruby },
     { lang: 'elixir', count: elixir },
     { lang: 'dart', count: dart },
+    { lang: 'php', count: php },
   ];
   const counts = all.filter((l) => l.count > 0);
   if (counts.length <= 1) return [detectRepoLanguage(repoDir)];
-  const max = Math.max(ts, python, ruby, elixir, dart);
+  const max = Math.max(ts, python, ruby, elixir, dart, php);
   const present = counts.filter((l) => l.count >= MULTI_MIN_FILES && l.count / max >= MULTI_MIN_FRACTION);
   if (present.length <= 1) return [detectRepoLanguage(repoDir)];
   return present
@@ -346,5 +373,6 @@ export function graphLanguage(graph: NormalizedGraph): SourceLang {
   if (graph.files.some((f) => f.language === 'rb')) return 'ruby';
   if (graph.files.some((f) => ELIXIR_LANG_TAGS.has(f.language))) return 'elixir';
   if (graph.files.some((f) => f.language === 'dart')) return 'dart';
+  if (graph.files.some((f) => f.language === 'php')) return 'php';
   return 'ts';
 }
