@@ -101,7 +101,11 @@ const PYTHON_SETUP_RE = /(^|\/)setup\.py$/;
 // never match a `.swift` path, so Swift needs its own shapes. `*Test.swift`
 // (singular) is deliberately NOT matched — it would drop a legit feature like
 // `ABTest.swift`; a real unit test is plural or lives under a Tests dir.
-const SWIFT_TEST_DIRS = new Set(['Tests']);
+// SwiftPM uses `Tests/`; Xcode test TARGETS conventionally live in `*Tests`/`*UITests`
+// dirs, but the two universal fixed names are `UnitTests` / `UITests` (+ SwiftPM's
+// `Tests`). Non-`*Tests.swift`-named helpers/mocks inside them would otherwise survive
+// the filename rule and form a spurious "tests" subsystem.
+const SWIFT_TEST_DIRS = new Set(['Tests', 'UnitTests', 'UITests']);
 const SWIFT_TEST_FILE_RE = /(^|\/)[^/]*(Tests|Spec)\.swift$/;
 
 // --- the rule table (config-driven; ORDERED — first match wins for the
