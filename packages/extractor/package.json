@@ -54,6 +54,7 @@
     "@zzzen/pyright-internal": "1.2.0-dev.20251207",
     "graphology": "^0.25.4",
     "graphology-communities-louvain": "^2.0.2",
+    "php-parser": "^3.7.0",
     "smol-toml": "^1.7.0",
     "ts-morph": "^23.0.0",
     "yaml": "^2.9.0"

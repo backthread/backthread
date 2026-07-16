@@ -12,6 +12,7 @@ import {
   hasRubyManifest,
   hasMixManifest,
   hasMixManifestDeep,
+  hasComposerManifest,
 } from './language.js';
 import type { NormalizedGraph } from './types.js';
 
@@ -121,6 +122,26 @@ describe('detectRepoLanguage', () => {
     });
     expect(detectRepoLanguage(dir)).toBe('elixir');
   });
+
+  it('selects php for a composer.json repo with no other manifest', async () => {
+    const dir = await repo({
+      'composer.json': '{"require":{"laravel/framework":"^11.0"}}',
+      'app/Models/User.php': '<?php\nnamespace App\\Models;\nclass User {}\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('php');
+  });
+
+  it('selects php for a Laravel app that also ships a package.json (Vite) — .php dominates', async () => {
+    const dir = await repo({
+      'composer.json': '{"require":{"laravel/framework":"^11.0"}}',
+      'package.json': '{"name":"app"}',
+      'app/Models/User.php': '<?php\nnamespace App\\Models;\nclass User {}\n',
+      'app/Http/Controllers/UserController.php': '<?php\nnamespace App\\Http\\Controllers;\nclass UserController {}\n',
+      'app/Console/Kernel.php': '<?php\nnamespace App\\Console;\nclass Kernel {}\n',
+      'resources/js/app.js': 'console.log(1)\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('php');
+  });
 });
 
 describe('listSourceFiles', () => {
@@ -212,12 +233,20 @@ describe('detectRepoLanguages (multi-language)', () => {
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`app/models/m${i}.rb`, `class M${i}; end\n`]));
   const ex = (n: number): Record<string, string> =>
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`lib/my_app/m${i}.ex`, `defmodule M${i} do\nend\n`]));
+  const php = (n: number): Record<string, string> =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`app/M${i}.php`, `<?php\nnamespace App;\nclass M${i} {}\n`]));
 
   it('returns a SINGLE language for a single-language repo (no behavior change)', async () => {
     expect(await detectRepoLanguages(await repo({ 'package.json': '{}', ...ts(6) }))).toEqual(['ts']);
     expect(await detectRepoLanguages(await repo({ 'pyproject.toml': '[project]\nname="x"\n', ...py(6) }))).toEqual(['python']);
     expect(await detectRepoLanguages(await repo({ Gemfile: "gem 'rails'\n", ...rb(6) }))).toEqual(['ruby']);
     expect(await detectRepoLanguages(await repo({ 'mix.exs': 'defmodule X.MixProject do\nend\n', ...ex(6) }))).toEqual(['elixir']);
+    expect(await detectRepoLanguages(await repo({ 'composer.json': '{}', ...php(6) }))).toEqual(['php']);
+  });
+
+  it('returns BOTH languages (php dominant) for a Laravel backend + large Vue/Inertia frontend', async () => {
+    const dir = await repo({ 'composer.json': '{"require":{"laravel/framework":"^11"}}', 'package.json': '{}', ...php(40), ...ts(20) });
+    expect(detectRepoLanguages(dir)).toEqual(['php', 'ts']);
   });
 
   it('keeps a Phoenix repo single-language (elixir) despite an assets/ JS toolchain below threshold', async () => {
@@ -253,7 +282,7 @@ describe('graphLanguage', () => {
     edges: [],
     externals: [],
   });
-  it('is python for py/pyi, ruby for rb, elixir for ex/exs/heex, else ts', () => {
+  it('is python for py/pyi, ruby for rb, elixir for ex/exs/heex, php for php, else ts', () => {
     expect(graphLanguage(g(['ts', 'tsx']))).toBe('ts');
     expect(graphLanguage(g(['py']))).toBe('python');
     expect(graphLanguage(g(['pyi']))).toBe('python');
@@ -261,6 +290,7 @@ describe('graphLanguage', () => {
     expect(graphLanguage(g(['ex']))).toBe('elixir');
     expect(graphLanguage(g(['exs']))).toBe('elixir');
     expect(graphLanguage(g(['heex']))).toBe('elixir');
+    expect(graphLanguage(g(['php']))).toBe('php');
     expect(graphLanguage(g([]))).toBe('ts');
   });
 });
@@ -271,6 +301,15 @@ describe('hasRubyManifest', () => {
     expect(hasRubyManifest(await repo({ 'Gemfile.lock': 'GEM\n' }))).toBe(true);
     expect(hasRubyManifest(await repo({ 'foo.gemspec': 'Gem::Specification.new\n' }))).toBe(true);
     expect(hasRubyManifest(await repo({ 'package.json': '{}' }))).toBe(false);
+  });
+});
+
+describe('hasComposerManifest', () => {
+  it('detects composer.json / composer.lock, else false', async () => {
+    expect(hasComposerManifest(await repo({ 'composer.json': '{}' }))).toBe(true);
+    expect(hasComposerManifest(await repo({ 'composer.lock': '{"packages":[]}' }))).toBe(true);
+    expect(hasComposerManifest(await repo({ 'package.json': '{}' }))).toBe(false);
+    expect(hasComposerManifest(await repo({ Gemfile: "gem 'rails'\n" }))).toBe(false);
   });
 });
 
