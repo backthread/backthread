@@ -119,6 +119,49 @@ describe('PhpExtractor', () => {
     expect(ids.some((i) => i.startsWith('storage/'))).toBe(false); // runtime scratch — excluded
   });
 
+  it('resolves first-party `use` edges in a PSR-0 repo (prefix not stripped, no ext leak)', async () => {
+    const dir = await repo({
+      'composer.json': JSON.stringify({ autoload: { 'psr-0': { 'Legacy\\': 'lib/' } } }),
+      // PSR-0 places the FULL namespace under lib/ (Legacy\ is NOT stripped).
+      'lib/Legacy/Models/User.php': '<?php\nnamespace Legacy\\Models;\nclass User {}\n',
+      'lib/Legacy/Services/Billing.php':
+        '<?php\nnamespace Legacy\\Services;\nuse Legacy\\Models\\User;\nclass Billing { public function u(): User { return new User; } }\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    // `use Legacy\Models\User` resolves via PSR-0 → a first-party edge, not ext:Legacy.
+    expect(internalEdges(graph)).toContain('lib/Legacy/Services/Billing.php->lib/Legacy/Models/User.php');
+    expect(graph.externals.map((x) => x.id)).not.toContain('ext:Legacy');
+  });
+
+  it('resolves first-party `use` edges in a classmap repo via the declared-class index', async () => {
+    const dir = await repo({
+      // No psr-4 / psr-0 map at all — a classmap-style repo. The declared-class
+      // index (built by parsing every file) is the only resolution path.
+      'composer.json': JSON.stringify({ autoload: { classmap: ['src/'] } }),
+      'src/anywhere/User.php': '<?php\nnamespace Shop\\Models;\nclass User {}\n',
+      'src/other/Billing.php':
+        '<?php\nnamespace Shop\\Services;\nuse Shop\\Models\\User;\nclass Billing { public function u(): User { return new User; } }\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    expect(internalEdges(graph)).toContain('src/other/Billing.php->src/anywhere/User.php');
+    // The class is first-party, so no spurious ext:Shop external box.
+    expect(graph.externals.map((x) => x.id)).not.toContain('ext:Shop');
+  });
+
+  it('resolves a PSR-4-declared class that is NOT at its conventional path (index fallback)', async () => {
+    const dir = await repo({
+      'composer.json': JSON.stringify({ autoload: { 'psr-4': { 'App\\': 'app/' } } }),
+      // Declares App\Models\User but lives at a non-conventional path — PSR-4 misses,
+      // the declared-class index recovers the first-party edge.
+      'app/legacy/UserModel.php': '<?php\nnamespace App\\Models;\nclass User {}\n',
+      'app/Services/Billing.php':
+        '<?php\nnamespace App\\Services;\nuse App\\Models\\User;\nclass Billing {}\n',
+    });
+    const graph = await new PhpExtractor().extract(dir);
+    expect(internalEdges(graph)).toContain('app/Services/Billing.php->app/legacy/UserModel.php');
+    expect(graph.externals.map((x) => x.id)).not.toContain('ext:App');
+  });
+
   it('degrades an unparseable file to an edgeless node without sinking the extract', async () => {
     const dir = await repo({
       'composer.json': COMPOSER,

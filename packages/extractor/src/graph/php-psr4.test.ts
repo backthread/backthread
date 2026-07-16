@@ -1,7 +1,14 @@
 // Pure PSR-4 namespace↔path resolution — the PHP Zeitwerk analogue.
 
 import { describe, it, expect } from '../testkit.js';
-import { parsePsr4Map, resolveFqnToFile, normalizeFqn } from './php-psr4.js';
+import {
+  parsePsr4Map,
+  resolveFqnToFile,
+  normalizeFqn,
+  parsePsr0Map,
+  resolvePsr0ToFile,
+  resolveAutoload,
+} from './php-psr4.js';
 
 describe('parsePsr4Map', () => {
   it('reads autoload + autoload-dev psr-4, longest-prefix first', () => {
@@ -70,5 +77,79 @@ describe('normalizeFqn', () => {
   it('strips leading namespace separators', () => {
     expect(normalizeFqn('\\App\\Foo')).toBe('App\\Foo');
     expect(normalizeFqn('App\\Foo')).toBe('App\\Foo');
+  });
+});
+
+describe('parsePsr0Map', () => {
+  it('reads autoload + autoload-dev psr-0, longest-prefix first, prefix verbatim', () => {
+    const entries = parsePsr0Map({
+      autoload: { 'psr-0': { 'App\\': 'lib/', 'Twig_': 'vendor-src/' } },
+      'autoload-dev': { 'psr-0': { 'Test_': 'tests/' } },
+    });
+    // Longest prefix first; equal-length prefixes tiebreak lexically (Test_ < Twig_);
+    // underscore-style prefixes kept verbatim (no forced `\`).
+    expect(entries.map((e) => e.prefix)).toEqual(['Test_', 'Twig_', 'App\\']);
+    expect(entries.find((e) => e.prefix === 'App\\')?.baseDirs).toEqual(['lib']);
+  });
+
+  it('never throws on a malformed manifest', () => {
+    expect(parsePsr0Map(null)).toEqual([]);
+    expect(parsePsr0Map({ autoload: { 'psr-0': { 'App\\': 42 } } })).toEqual([]);
+  });
+});
+
+describe('resolvePsr0ToFile', () => {
+  it('places the FULL namespace under the base dir (prefix NOT stripped)', () => {
+    const entries = parsePsr0Map({ autoload: { 'psr-0': { 'App\\': 'lib/' } } });
+    const fileset = new Set(['lib/App/Models/User.php']);
+    // Unlike PSR-4, App\ is not stripped → lib/App/Models/User.php.
+    expect(resolvePsr0ToFile('App\\Models\\User', entries, fileset)).toBe('lib/App/Models/User.php');
+  });
+
+  it('converts underscores in the CLASS NAME to separators (the legacy quirk)', () => {
+    const entries = parsePsr0Map({ autoload: { 'psr-0': { 'Twig_': 'src/' } } });
+    const fileset = new Set(['src/Twig/Environment.php']);
+    // Twig_Environment → src/Twig/Environment.php (underscores → dirs).
+    expect(resolvePsr0ToFile('Twig_Environment', entries, fileset)).toBe('src/Twig/Environment.php');
+  });
+
+  it('keeps namespace underscores but splits class-name underscores', () => {
+    const entries = parsePsr0Map({ autoload: { 'psr-0': { '': 'src/' } } });
+    const fileset = new Set(['src/Vendor_Ns/My/Class.php']);
+    // Namespace `Vendor_Ns` keeps its underscore (only `\`→`/`); the trailing class
+    // name `My_Class` splits on `_` → My/Class.php (the PSR-0 legacy quirk).
+    expect(resolvePsr0ToFile('Vendor_Ns\\My_Class', entries, fileset)).toBe('src/Vendor_Ns/My/Class.php');
+  });
+
+  it('returns undefined for an unmapped prefix or missing file', () => {
+    const entries = parsePsr0Map({ autoload: { 'psr-0': { 'App\\': 'lib/' } } });
+    expect(resolvePsr0ToFile('Other\\Thing', entries, new Set(['lib/App/X.php']))).toBeUndefined();
+  });
+});
+
+describe('resolveAutoload', () => {
+  const psr4 = parsePsr4Map({ autoload: { 'psr-4': { 'App\\': 'app/' } } });
+  const psr0 = parsePsr0Map({ autoload: { 'psr-0': { 'Legacy\\': 'lib/' } } });
+
+  it('tries PSR-4 first, then PSR-0, then the class index', () => {
+    const fileset = new Set([
+      'app/Models/User.php', // PSR-4
+      'lib/Legacy/Thing.php', // PSR-0
+      'weird/place/Orphan.php', // classmap-only (not at any conventional path)
+    ]);
+    const classIndex = new Map([['Vendor\\Orphan', 'weird/place/Orphan.php']]);
+    expect(resolveAutoload('App\\Models\\User', psr4, psr0, fileset, classIndex)).toBe('app/Models/User.php');
+    expect(resolveAutoload('Legacy\\Thing', psr4, psr0, fileset, classIndex)).toBe('lib/Legacy/Thing.php');
+    // Neither PSR-4 nor PSR-0 maps it — the declared-class index catches it.
+    expect(resolveAutoload('Vendor\\Orphan', psr4, psr0, fileset, classIndex)).toBe('weird/place/Orphan.php');
+  });
+
+  it('normalizes a leading separator against the class index', () => {
+    const classIndex = new Map([['Vendor\\Orphan', 'weird/place/Orphan.php']]);
+    expect(resolveAutoload('\\Vendor\\Orphan', psr4, psr0, new Set(), classIndex)).toBe('weird/place/Orphan.php');
+  });
+
+  it('returns undefined for a vendor class none of the strategies map', () => {
+    expect(resolveAutoload('Symfony\\Component\\Foo', psr4, psr0, new Set(), new Map())).toBeUndefined();
   });
 });

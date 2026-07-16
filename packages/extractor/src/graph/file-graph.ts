@@ -419,8 +419,12 @@ export function isConfigInvalidatorPath(path: string): boolean {
  *
  * v3: the Elixir adapter gained inline CALL edges (was import-only) — a change to
  * per-file extraction output for `.ex`/`.exs` blobs, so cached rows must re-parse.
+ * v4: the PHP adapter's import resolution gained PSR-0 + a declared-class→file
+ * index (classmap-equivalent) fallback after PSR-4 — more first-party `use`/
+ * extends/implements/trait edges resolve for the same `.php` blob, so cached PHP
+ * rows must re-parse.
  */
-export const EXTRACTOR_VERSION = 3;
+export const EXTRACTOR_VERSION = 4;
 
 // ---------------------------------------------------------------------------
 // State shape.

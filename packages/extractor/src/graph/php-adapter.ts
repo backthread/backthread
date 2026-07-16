@@ -12,10 +12,14 @@
 // imported by extract.ts only for a PHP repo), so a TS/Python/Ruby/Elixir ingest
 // never module-loads php-parser.
 //
-// The import backbone is the `use` statement, resolved via Composer's PSR-4 map
+// The import backbone is the `use` statement, resolved via Composer's autoload map
 // (the Zeitwerk analogue): PHP requires an explicit `use` to reference any class
 // in another namespace, so `use` statements are COMPLETE for the architecturally
-// load-bearing cross-boundary edges. Three reference sources feed it:
+// load-bearing cross-boundary edges. Resolution tries each autoload strategy in
+// turn — PSR-4 (the convention) → PSR-0 (the legacy convention) → a declared-class
+// index (the classmap-equivalent, built by parsing every file's declared classes;
+// it also recovers a first-party class that simply isn't at its PSR-4-conventional
+// path). See graph/php-psr4.ts. Three reference sources feed it:
 //   * `use` / grouped-`use` — resolve the imported FQN to its file (first-party
 //     import edge) or to a vendor node (`ext:<TopSegment>`); the require analogue.
 //   * class `extends` / `implements` + trait `use` (inside a class body) —
@@ -39,7 +43,14 @@ import { phpExternalIdFor } from './types.js';
 import { graphFromState, type FileRecord } from './file-graph.js';
 import { listSourceFiles } from './language.js';
 import { readComposerJson } from './php-manifest.js';
-import { parsePsr4Map, resolveFqnToFile, normalizeFqn, type Psr4Entry } from './php-psr4.js';
+import {
+  parsePsr4Map,
+  parsePsr0Map,
+  resolveAutoload,
+  normalizeFqn,
+  type Psr4Entry,
+  type Psr0Entry,
+} from './php-psr4.js';
 import { PHP_GLOBALS } from './php-stdlib.js';
 
 // php-parser ships its Engine as a CommonJS default export, but its bundled
@@ -88,6 +99,9 @@ interface CollectedRefs {
   classRefs: string[];
   /** `require`/`include` string literals to resolve as relative first-party paths. */
   includes: string[];
+  /** FQNs of the class/interface/trait/enum this file DECLARES (namespace-aware) —
+   *  fed into the repo-wide declared-class→file index (the classmap analogue). */
+  declaredClasses: string[];
 }
 
 /** The trailing segment of a `\`-separated FQN (`App\Models\User` → `User`). */
@@ -105,6 +119,17 @@ function nameText(node: unknown): string | undefined {
   return undefined;
 }
 
+/** A declaration node's simple name (`class UserController` → `UserController`).
+ *  php-parser gives `.name` as an `identifier` node or a bare string. */
+function declName(node: unknown): string | undefined {
+  if (!node || typeof node !== 'object') return undefined;
+  const n = node as { name?: unknown };
+  if (typeof n.name === 'string') return n.name;
+  const id = n.name as { kind?: string; name?: unknown } | undefined;
+  if (id && id.kind === 'identifier' && typeof id.name === 'string') return id.name;
+  return undefined;
+}
+
 /**
  * Walk one file's AST, collecting its namespace, `use` scope, class references,
  * and require/include literals. A `use` with `type: 'function' | 'const'` imports
@@ -117,6 +142,7 @@ function collectFileRefs(program: Program): CollectedRefs {
     uses: [],
     classRefs: [],
     includes: [],
+    declaredClasses: [],
   };
   let namespaceSet = false;
 
@@ -128,16 +154,20 @@ function collectFileRefs(program: Program): CollectedRefs {
     out.useMap.set(alias ?? lastSegment(fqn), fqn);
   };
 
-  const visit = (node: Node | null | undefined): void => {
+  // ns is the enclosing namespace of the node (`` for the global namespace) — carried
+  // so a declared class gets its true FQN even in a multi-namespace file.
+  const visit = (node: Node | null | undefined, ns: string): void => {
     if (!node || typeof node !== 'object') return;
     const n = node as Node & Record<string, unknown>;
     switch (n.kind) {
       case 'namespace': {
+        const inner = typeof n.name === 'string' ? normalizeFqn(n.name) : ns;
         if (!namespaceSet && typeof n.name === 'string') {
-          out.namespace = normalizeFqn(n.name);
+          out.namespace = inner;
           namespaceSet = true;
         }
-        break; // children walked below
+        for (const child of (n.children as Node[]) ?? []) visit(child, inner);
+        return;
       }
       case 'usegroup': {
         const groupPrefix = typeof n.name === 'string' && n.name ? `${normalizeFqn(n.name)}\\` : '';
@@ -155,21 +185,26 @@ function collectFileRefs(program: Program): CollectedRefs {
         }
         return; // items handled; don't descend
       }
-      case 'class': {
-        const ext = nameText(n.extends);
-        if (ext) out.classRefs.push(ext);
-        for (const impl of (n.implements as unknown[]) ?? []) {
-          const t = nameText(impl);
-          if (t) out.classRefs.push(t);
+      case 'class':
+      case 'interface':
+      case 'trait':
+      case 'enum': {
+        const simple = declName(n);
+        if (simple) out.declaredClasses.push(ns ? `${ns}\\${simple}` : simple);
+        if (n.kind === 'class') {
+          const ext = nameText(n.extends);
+          if (ext) out.classRefs.push(ext);
+          for (const impl of (n.implements as unknown[]) ?? []) {
+            const t = nameText(impl);
+            if (t) out.classRefs.push(t);
+          }
+        } else if (n.kind === 'interface') {
+          for (const ext of (n.extends as unknown[]) ?? []) {
+            const t = nameText(ext);
+            if (t) out.classRefs.push(t);
+          }
         }
-        break; // descend into the body for trait use + nested defs
-      }
-      case 'interface': {
-        for (const ext of (n.extends as unknown[]) ?? []) {
-          const t = nameText(ext);
-          if (t) out.classRefs.push(t);
-        }
-        break;
+        break; // descend into the body for trait use + nested defs (same ns)
       }
       case 'traituse': {
         for (const tr of (n.traits as unknown[]) ?? []) {
@@ -189,14 +224,14 @@ function collectFileRefs(program: Program): CollectedRefs {
     for (const [key, value] of Object.entries(n)) {
       if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
       if (Array.isArray(value)) {
-        for (const child of value) visit(child as Node);
+        for (const child of value) visit(child as Node, ns);
       } else if (value && typeof value === 'object' && 'kind' in (value as object)) {
-        visit(value as Node);
+        visit(value as Node, ns);
       }
     }
   };
 
-  visit(program);
+  visit(program, '');
   return out;
 }
 
@@ -236,25 +271,47 @@ export class PhpExtractor implements GraphExtractor {
     if (fileIds.length === 0) return graphFromState(root, { headSha: '', files: {} });
 
     const fileset = new Set(fileIds);
-    const psr4: Psr4Entry[] = parsePsr4Map(readComposerJson(root));
+    const composer = readComposerJson(root);
+    const psr4: Psr4Entry[] = parsePsr4Map(composer);
+    const psr0: Psr0Entry[] = parsePsr0Map(composer);
     const engineInstance = getEngine();
 
-    const files: Record<string, FileRecord> = {};
+    // Pass 1 — parse each file once; collect its refs + LOC, and index every class
+    // it declares (FQN → file). The index is the classmap-equivalent + the "class not
+    // at its PSR-4 path" fallback the autoload resolver consults after PSR-4/PSR-0.
+    // First declaration in sorted-id order wins (deterministic; fileIds is sorted).
+    const refsByFile = new Map<string, CollectedRefs>();
+    const locByFile = new Map<string, number>();
+    const classToFile = new Map<string, string>();
     for (const id of fileIds) {
-      const abs = `${root}/${id}`;
       let text: string;
       try {
-        text = readFileSync(abs, 'utf8');
+        text = readFileSync(`${root}/${id}`, 'utf8');
       } catch {
-        files[id] = emptyRecord(0);
+        locByFile.set(id, 0);
         continue;
       }
-
+      locByFile.set(id, locOf(text));
       let refs: CollectedRefs;
       try {
         refs = collectFileRefs(engineInstance.parseCode(text, id));
       } catch {
-        files[id] = emptyRecord(locOf(text)); // php-parser failed on this file — node only
+        continue; // php-parser failed on this file — node only (no refs, no declared classes)
+      }
+      refsByFile.set(id, refs);
+      for (const fqn of refs.declaredClasses) {
+        if (!classToFile.has(fqn)) classToFile.set(fqn, id);
+      }
+    }
+
+    // Pass 2 — resolve each file's references to edges, now that the whole-repo
+    // class index exists. A file with no refs (unreadable/unparseable) degrades to
+    // an edgeless node (never sinks the extract).
+    const files: Record<string, FileRecord> = {};
+    for (const id of fileIds) {
+      const refs = refsByFile.get(id);
+      if (!refs) {
+        files[id] = emptyRecord(locByFile.get(id) ?? 0);
         continue;
       }
 
@@ -274,9 +331,10 @@ export class PhpExtractor implements GraphExtractor {
         else externalWeights.set(extId, { specifier, weight: 1 });
       };
 
-      // (1) `use` imports — first-party edge or vendor external (the require analogue).
+      // (1) `use` imports — first-party edge (PSR-4 → PSR-0 → class index) or vendor
+      // external (the require analogue).
       for (const u of refs.uses) {
-        const target = resolveFqnToFile(u.fqn, psr4, fileset);
+        const target = resolveAutoload(u.fqn, psr4, psr0, fileset, classToFile);
         if (target) addImport(target);
         else addExternal(u.fqn);
       }
@@ -286,7 +344,7 @@ export class PhpExtractor implements GraphExtractor {
       // `use`, so a non-first-party ref here is dropped, never a second external).
       for (const raw of refs.classRefs) {
         const fqn = resolveRefToFqn(raw, refs.useMap, refs.namespace);
-        const target = resolveFqnToFile(fqn, psr4, fileset);
+        const target = resolveAutoload(fqn, psr4, psr0, fileset, classToFile);
         if (target) addImport(target);
       }
 
@@ -297,7 +355,7 @@ export class PhpExtractor implements GraphExtractor {
       }
 
       files[id] = {
-        loc: locOf(text),
+        loc: locByFile.get(id) ?? 0,
         language: 'php',
         imports: [...importWeights].map(([to, weight]) => ({ to, weight })),
         externals: [...externalWeights].map(([extId, v]) => ({
