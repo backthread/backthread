@@ -115,6 +115,19 @@ export function newClass(node: unknown): string | undefined {
   return nameText(n.what);
 }
 
+/** A call node's argument nodes, in order ([] for a non-call). */
+export function callArgs(call: unknown): AnyNode[] {
+  const n = asNode(call);
+  if (!n || n.kind !== 'call' || !Array.isArray(n.arguments)) return [];
+  return (n.arguments as unknown[]).map((a) => asNode(a)).filter((a): a is AnyNode => !!a);
+}
+
+/** Is this node a closure / arrow function (`function () {…}` / `fn () => …`)? */
+export function isClosureNode(node: unknown): boolean {
+  const n = asNode(node);
+  return !!n && (n.kind === 'closure' || n.kind === 'arrowfunc');
+}
+
 /** The invoked method/function name of a call node: `X::m()` / `$o->m()` → `m`,
  *  a free `f()` → `f`. Undefined for a dynamic call. */
 export function callMethodName(call: unknown): string | undefined {
