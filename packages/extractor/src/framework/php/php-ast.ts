@@ -142,6 +142,18 @@ export function callMethodName(call: unknown): string | undefined {
   return undefined;
 }
 
+/** The method name of a `$this->method(...)` call (`$this->hasMany(…)` → `hasMany`),
+ *  or undefined for any other receiver (a free call, a static call, `$other->m()`). */
+export function thisMethodCall(call: unknown): string | undefined {
+  const n = asNode(call);
+  if (!n || n.kind !== 'call') return undefined;
+  const what = asNode(n.what);
+  if (!what || (what.kind !== 'propertylookup' && what.kind !== 'nullsafepropertylookup')) return undefined;
+  const recv = asNode(what.what);
+  if (!recv || recv.kind !== 'variable' || recv.name !== 'this') return undefined;
+  return identifierName(what.offset);
+}
+
 /** The static-receiver class of a call `X::m()` → `X` (as written), or undefined
  *  (non-static call). Does NOT recurse chains — use baseStaticClass for that. */
 export function staticCallClass(call: unknown): string | undefined {
@@ -375,6 +387,43 @@ export function collectClasses(program: Program): PhpClass[] {
   };
 
   visit(program, '');
+  return out;
+}
+
+/** A class property + the mapping context an ORM adapter needs. */
+export interface PhpProperty {
+  name: string;
+  /** A single-name type hint (`Category` for `?Category $cat`), else undefined. */
+  typeName?: string;
+  /** PHP-8 attributes on the property (`#[ORM\ManyToOne(...)]`). */
+  attributes: PhpAttribute[];
+  /** The property statement's docblock (`@ORM\ManyToOne(...)`), else undefined. */
+  doc?: string;
+}
+
+/**
+ * Every declared property of a class, each carrying its type hint, PHP-8
+ * attributes, and docblock. php-parser attaches a property's `#[…]` attributes to
+ * the inner `property` node but the docblock to the enclosing `propertystatement`,
+ * so both are read here (Doctrine mixes the two mapping styles). `classNode` is a
+ * PhpClass.body value (the class AST node).
+ */
+export function collectProperties(classNode: unknown): PhpProperty[] {
+  const n = asNode(classNode);
+  const members = n && Array.isArray(n.body) ? (n.body as unknown[]) : [];
+  const out: PhpProperty[] = [];
+  for (const raw of members) {
+    const stmt = asNode(raw);
+    if (!stmt || stmt.kind !== 'propertystatement') continue;
+    const doc = docOf(stmt);
+    for (const p of Array.isArray(stmt.properties) ? stmt.properties : []) {
+      const prop = asNode(p);
+      if (!prop) continue;
+      const t = asNode(prop.type);
+      const typeName = t && (t.kind === 'name' || t.kind === 'classreference') && typeof t.name === 'string' ? t.name : undefined;
+      out.push({ name: identifierName(prop.name) ?? '', typeName, attributes: attributesOf(prop), doc });
+    }
+  }
   return out;
 }
 
