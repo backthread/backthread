@@ -8135,11 +8135,12 @@ async function inferDecisions(transcript, config2, opts = {}) {
 }
 
 // src/captureScope.ts
+var CAPTURE_SCOPE_TIMEOUT_MS = 1e4;
 function interpretScopeResponse(ok, status, payload) {
   if (!ok || status !== 200) return { send: true, reason: "unknown" };
   const rec = payload && typeof payload === "object" ? payload : {};
   if (rec.decision === "skip") {
-    const reason = isKnownReason(rec.reason) ? rec.reason : "capture_paused";
+    const reason = isKnownReason(rec.reason) ? rec.reason : "other";
     return { send: false, reason };
   }
   return { send: true, reason: rec.decision === "capture" ? "connected" : "unknown" };
@@ -8152,6 +8153,8 @@ async function checkCaptureScope(repo, config2, deps = {}) {
   const doFetch = deps.fetchImpl ?? fetch;
   const token = config2.device_token;
   if (!token) return { send: true, reason: "unknown" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CAPTURE_SCOPE_TIMEOUT_MS);
   try {
     const res = await doFetch(buildCaptureScopeUrl(env), {
       method: "POST",
@@ -8161,7 +8164,8 @@ async function checkCaptureScope(repo, config2, deps = {}) {
         "Content-Type": "application/json",
         ...versionHeaders()
       },
-      body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name } })
+      body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name } }),
+      signal: controller.signal
     });
     let payload = null;
     try {
@@ -8172,6 +8176,8 @@ async function checkCaptureScope(repo, config2, deps = {}) {
     return interpretScopeResponse(true, res.status, payload);
   } catch {
     return interpretScopeResponse(false, 0, null);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

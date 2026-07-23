@@ -876,3 +876,42 @@ test('REAL wiring: a fail-open preflight (server 5xx) still sends the capture', 
   assert.match(calls[0].url, /\/capture-scope$/);
   assert.match(calls[1].url, /\/infer-decisions$/);
 });
+
+test('scope: a no-git-remote cwd (null repo) skips the preflight entirely (no /capture-scope call)', async () => {
+  // No resolvable repo → the (1b) scope block is skipped; the flow falls through to the
+  // existing "derived but can't claim a repo" path. checkScopeImpl:undefined so the REAL
+  // check would fire if repo were non-null — proving it's the null-repo guard, not the seam.
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }] } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl, checkScopeImpl: undefined, readRemoteImpl: () => null }));
+  assert.equal(out.status, 'nothing-to-capture'); // derived but no repo to claim under
+  assert.equal(calls.some((c) => c.url.includes('/capture-scope')), false, 'no preflight without a repo');
+});
+
+test('REAL wiring: not_connected → skipped-out-of-scope + the connect nudge (no transcript send)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bt-scope-nc-'));
+  try {
+    const { fetch: fetchImpl, calls } = stubFetch({
+      scope: () => ({ status: 200, body: { ok: true, decision: 'skip', reason: 'not_connected' } }),
+    });
+    const logs: string[] = [];
+    const out = await runCapture(
+      HOOK,
+      deps({
+        env: { BACKTHREAD_CONFIG_DIR: dir } as NodeJS.ProcessEnv,
+        fetchImpl,
+        checkScopeImpl: undefined, // exercise the real checkCaptureScope → not_connected
+        log: (m) => logs.push(m),
+      }),
+    );
+    assert.equal(out.status, 'skipped-out-of-scope');
+    // Exactly ONE network call — the preflight. No infer/ingest.
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/capture-scope$/);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /isn't connected to Backthread/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -33,12 +33,20 @@ export interface ScopeVerdict {
   /** Whether the hook should send this session's transcript at all. */
   send: boolean;
   /**
-   * The server's reason verbatim (a ScopeReason), or 'unknown' when we failed OPEN
-   * (couldn't get a clean verdict → send). The caller nudges iff this is exactly
-   * 'not_connected'; every other value is a silent skip (or, with send:true, a send).
+   * The server's reason verbatim (a ScopeReason), or one of two client-only sentinels:
+   *   'unknown' — we failed OPEN (no clean verdict → send).
+   *   'other'   — a clean skip whose reason we don't recognize (a future server value)
+   *               → still a SILENT skip (only 'not_connected' nudges).
+   * The caller nudges iff this is exactly 'not_connected'.
    */
-  reason: ScopeReason | 'unknown';
+  reason: ScopeReason | 'unknown' | 'other';
 }
+
+// The preflight fetch timeout. This is a NEW blocking gate ahead of the transcript
+// read, so a black-hole endpoint must not hang the (detached) capture process — on
+// abort the catch below fails OPEN (send), like any other network error. Matches the
+// read-path idiom (query.ts / localDecisions.ts wrap fetch in an AbortController).
+const CAPTURE_SCOPE_TIMEOUT_MS = 10_000;
 
 /**
  * PURE core: map a preflight HTTP outcome → the send/skip verdict. FAIL-OPEN — the
@@ -57,9 +65,9 @@ export function interpretScopeResponse(ok: boolean, status: number, payload: unk
   const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
   if (rec.decision === 'skip') {
     // Skip on the server's word. Carry the reason through when it's one we recognize;
-    // an unrecognized skip reason (a future server value) defaults to a SILENT skip —
-    // we never invent a connect nudge we can't justify (only 'not_connected' nudges).
-    const reason = isKnownReason(rec.reason) ? rec.reason : 'capture_paused';
+    // an unrecognized skip reason (a future server value) maps to the 'other' sentinel
+    // — a SILENT skip (only 'not_connected' nudges), with a faithful label for logs.
+    const reason = isKnownReason(rec.reason) ? rec.reason : 'other';
     return { send: false, reason };
   }
   // capture / absent / unrecognized decision → send (fail-open).
@@ -101,6 +109,10 @@ export async function checkCaptureScope(
   // upstream, but be defensive: never block a capture on a missing preflight).
   if (!token) return { send: true, reason: 'unknown' };
 
+  // Bound the preflight so a hung endpoint can't stall the detached capture (+ the
+  // gap-recovery sweep behind it). An abort throws into the catch → fail open (send).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CAPTURE_SCOPE_TIMEOUT_MS);
   try {
     const res = await doFetch(buildCaptureScopeUrl(env), {
       method: 'POST',
@@ -110,6 +122,7 @@ export async function checkCaptureScope(
         ...versionHeaders(),
       },
       body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name } }),
+      signal: controller.signal,
     });
     let payload: unknown = null;
     try {
@@ -119,7 +132,10 @@ export async function checkCaptureScope(
     }
     return interpretScopeResponse(true, res.status, payload);
   } catch {
-    // Network/transport error → fail open. A preflight hiccup must never drop a capture.
+    // Network/transport error OR a timeout abort → fail open. A preflight hiccup must
+    // never drop a capture.
     return interpretScopeResponse(false, 0, null);
+  } finally {
+    clearTimeout(timer);
   }
 }

@@ -27,12 +27,12 @@ test('interpret: a clean 200 skip → do NOT send, carry the reason', () => {
   });
 });
 
-test('interpret: a 200 skip with an UNKNOWN reason → skip, but a SILENT (non-nudging) reason', () => {
+test('interpret: a 200 skip with an UNKNOWN reason → skip, but the SILENT (non-nudging) "other" sentinel', () => {
   // A future server skip reason must never be coerced to not_connected (which would
-  // fire a connect nudge we can't justify) — default to a silent skip.
+  // fire a connect nudge we can't justify) — map it to the silent 'other' sentinel.
   assert.deepEqual(interpretScopeResponse(true, 200, { decision: 'skip', reason: 'brand_new_reason' }), {
     send: false,
-    reason: 'capture_paused',
+    reason: 'other',
   });
 });
 
@@ -72,10 +72,15 @@ test('checkCaptureScope: no device token → send (fail open), no fetch', async 
 test('checkCaptureScope: a 200 skip → send:false; request carries token + slug, NO transcript', async () => {
   let seenUrl = '';
   let seenAuth: string | null = null;
+  let seenVersion: string | null = null;
+  let seenSignal: unknown;
   let seenBody: Record<string, unknown> = {};
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
     seenUrl = String(input);
-    seenAuth = new Headers(init?.headers).get('Authorization');
+    const h = new Headers(init?.headers);
+    seenAuth = h.get('Authorization');
+    seenVersion = h.get('x-backthread-version');
+    seenSignal = init?.signal;
     seenBody = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     return new Response(JSON.stringify({ ok: true, decision: 'skip', reason: 'capture_paused' }), { status: 200 });
   }) as typeof fetch;
@@ -84,6 +89,8 @@ test('checkCaptureScope: a 200 skip → send:false; request carries token + slug
   assert.deepEqual(v, { send: false, reason: 'capture_paused' });
   assert.match(seenUrl, /\/capture-scope$/);
   assert.equal(seenAuth, 'Bearer backthread_pat_secret');
+  assert.ok(seenVersion, 'carries the x-backthread-version compat header');
+  assert.ok(seenSignal, 'carries an AbortSignal (the timeout guard)');
   assert.deepEqual(seenBody, { repo: { owner: 'acme', name: 'app' } });
   // The body is the slug ONLY — never a transcript / turns / source.
   const raw = JSON.stringify(seenBody);
