@@ -29,7 +29,13 @@ const TRANSCRIPT_JSONL = [
 
 // A fetch stub that routes by URL substring and records every call.
 function stubFetch(
-  routes: { infer?: (body: unknown) => { status: number; body: unknown }; ingest?: (body: unknown) => { status: number; body: unknown } },
+  routes: {
+    infer?: (body: unknown) => { status: number; body: unknown };
+    ingest?: (body: unknown) => { status: number; body: unknown };
+    // ARP-1054 — the pre-send /capture-scope preflight. Defaults to a 'capture' verdict
+    // so a test exercising the REAL checkCaptureScope (checkScopeImpl: undefined) sends.
+    scope?: (body: unknown) => { status: number; body: unknown };
+  },
 ): { fetch: typeof fetch; calls: Array<{ url: string; body: unknown }> } {
   const calls: Array<{ url: string; body: unknown }> = [];
   const fetchImpl = (async (input: unknown, init?: RequestInit) => {
@@ -37,7 +43,9 @@ function stubFetch(
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     calls.push({ url, body });
     let r: { status: number; body: unknown };
-    if (url.includes('/infer-decisions')) r = (routes.infer ?? (() => ({ status: 200, body: {} })))(body);
+    if (url.includes('/capture-scope'))
+      r = (routes.scope ?? (() => ({ status: 200, body: { decision: 'capture', reason: 'connected' } })))(body);
+    else if (url.includes('/infer-decisions')) r = (routes.infer ?? (() => ({ status: 200, body: {} })))(body);
     else if (url.includes('/ingest-decisions'))
       r = (routes.ingest ?? (() => ({ status: 200, body: {} })))(body);
     else r = { status: 404, body: { error: 'unexpected url' } };
@@ -64,6 +72,10 @@ function deps(over: Partial<CaptureDeps> = {}): CaptureDeps {
               ? 'test@x.com\n'
               : null,
     ensureAuthImpl: () => {},
+    // ARP-1054 — default the pre-send scope check to a no-network PASS so the existing
+    // flow tests aren't gated (and don't gain an extra /capture-scope call in their
+    // `calls` assertions). The dedicated scope tests below override this.
+    checkScopeImpl: async () => ({ send: true, reason: 'connected' }),
     // stub the trust gate + first-capture confirmation to NO-OPS by
     // default so these tests never touch the real ~/.backthread/first-run.json. The
     // dedicated tests below override them to assert the wiring.
@@ -777,4 +789,129 @@ test('ARP-693 — fromTurnIndex at/after the end → nothing-to-capture, no infe
   assert.equal(out.status, 'nothing-to-capture');
   assert.equal(out.turnCount, 2);
   assert.equal(calls.length, 0, 'no new turns → the expensive inference leg never runs');
+});
+
+// --- ARP-1054: pre-send capture-scope skip ----------------------------------
+
+test('scope skip (capture_paused) → skipped-out-of-scope; transcript never read, nothing sent, no nudge', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({});
+  let readTranscript = false;
+  const logs: string[] = [];
+  const out = await runCapture(
+    HOOK,
+    deps({
+      fetchImpl,
+      checkScopeImpl: async () => ({ send: false, reason: 'capture_paused' }),
+      readFileImpl: async () => {
+        readTranscript = true;
+        return TRANSCRIPT_JSONL;
+      },
+      log: (m) => logs.push(m),
+    }),
+  );
+  assert.equal(out.status, 'skipped-out-of-scope');
+  assert.equal(out.count, 0);
+  assert.equal(readTranscript, false, 'a paused repo must not even read the transcript off disk');
+  assert.equal(calls.length, 0, 'nothing sent to infer/ingest');
+  assert.equal(logs.length, 0, 'a paused repo is silent — no connect nudge');
+});
+
+test('scope skip (not_connected) → skipped-out-of-scope + the once-per-session connect nudge', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bt-scope-'));
+  try {
+    const { fetch: fetchImpl, calls } = stubFetch({});
+    const logs: string[] = [];
+    const out = await runCapture(
+      HOOK,
+      deps({
+        env: { BACKTHREAD_CONFIG_DIR: dir } as NodeJS.ProcessEnv,
+        fetchImpl,
+        checkScopeImpl: async () => ({ send: false, reason: 'not_connected' }),
+        log: (m) => logs.push(m),
+      }),
+    );
+    assert.equal(out.status, 'skipped-out-of-scope');
+    assert.equal(calls.length, 0, 'nothing sent');
+    assert.equal(logs.length, 1, 'an unconnected repo gets the connect nudge');
+    assert.match(logs[0], /isn't connected to Backthread/);
+    assert.match(logs[0], /acme\/app/);
+    assert.doesNotMatch(logs[0], /held as pending/, 'pre-send copy: nothing was captured/held');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('scope send → the normal capture flow proceeds unchanged', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'x' }] } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl, checkScopeImpl: async () => ({ send: true, reason: 'connected' }) }));
+  assert.equal(out.status, 'persisted-by-server');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/infer-decisions$/);
+});
+
+test('REAL wiring: runCapture POSTs /capture-scope first and skips on a skip verdict (no transcript send)', async () => {
+  // checkScopeImpl:undefined → exercise the real checkCaptureScope against the stub.
+  const { fetch: fetchImpl, calls } = stubFetch({
+    scope: () => ({ status: 200, body: { ok: true, decision: 'skip', reason: 'capture_paused' } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl, checkScopeImpl: undefined }));
+  assert.equal(out.status, 'skipped-out-of-scope');
+  // Exactly ONE network call — the preflight — and it carries the slug only, no transcript.
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/capture-scope$/);
+  assert.deepEqual(calls[0].body, { repo: { owner: 'acme', name: 'app' } });
+});
+
+test('REAL wiring: a fail-open preflight (server 5xx) still sends the capture', async () => {
+  const { fetch: fetchImpl, calls } = stubFetch({
+    scope: () => ({ status: 502, body: { error: 'scope_lookup_failed' } }),
+    infer: () => ({ status: 200, body: { ok: true, persisted: true, count: 1, decisions: [{ title: 'x' }] } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl, checkScopeImpl: undefined }));
+  assert.equal(out.status, 'persisted-by-server', 'a 5xx preflight fails open → capture proceeds');
+  // preflight + infer.
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].url, /\/capture-scope$/);
+  assert.match(calls[1].url, /\/infer-decisions$/);
+});
+
+test('scope: a no-git-remote cwd (null repo) skips the preflight entirely (no /capture-scope call)', async () => {
+  // No resolvable repo → the (1b) scope block is skipped; the flow falls through to the
+  // existing "derived but can't claim a repo" path. checkScopeImpl:undefined so the REAL
+  // check would fire if repo were non-null — proving it's the null-repo guard, not the seam.
+  const { fetch: fetchImpl, calls } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }] } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl, checkScopeImpl: undefined, readRemoteImpl: () => null }));
+  assert.equal(out.status, 'nothing-to-capture'); // derived but no repo to claim under
+  assert.equal(calls.some((c) => c.url.includes('/capture-scope')), false, 'no preflight without a repo');
+});
+
+test('REAL wiring: not_connected → skipped-out-of-scope + the connect nudge (no transcript send)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bt-scope-nc-'));
+  try {
+    const { fetch: fetchImpl, calls } = stubFetch({
+      scope: () => ({ status: 200, body: { ok: true, decision: 'skip', reason: 'not_connected' } }),
+    });
+    const logs: string[] = [];
+    const out = await runCapture(
+      HOOK,
+      deps({
+        env: { BACKTHREAD_CONFIG_DIR: dir } as NodeJS.ProcessEnv,
+        fetchImpl,
+        checkScopeImpl: undefined, // exercise the real checkCaptureScope → not_connected
+        log: (m) => logs.push(m),
+      }),
+    );
+    assert.equal(out.status, 'skipped-out-of-scope');
+    // Exactly ONE network call — the preflight. No infer/ingest.
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/capture-scope$/);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /isn't connected to Backthread/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

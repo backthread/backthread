@@ -6922,6 +6922,9 @@ function workerBaseUrl(env = process.env) {
 function buildInferDecisionsUrl(env = process.env) {
   return new URL("/infer-decisions", workerBaseUrl(env)).toString();
 }
+function buildCaptureScopeUrl(env = process.env) {
+  return new URL("/capture-scope", workerBaseUrl(env)).toString();
+}
 function buildGroundedAskUrl(env = process.env) {
   return new URL("/grounded-ask", workerBaseUrl(env)).toString();
 }
@@ -8131,6 +8134,53 @@ async function inferDecisions(transcript, config2, opts = {}) {
   return serverInfer(transcript, config2, opts);
 }
 
+// src/captureScope.ts
+var CAPTURE_SCOPE_TIMEOUT_MS = 1e4;
+function interpretScopeResponse(ok, status, payload) {
+  if (!ok || status !== 200) return { send: true, reason: "unknown" };
+  const rec = payload && typeof payload === "object" ? payload : {};
+  if (rec.decision === "skip") {
+    const reason = isKnownReason(rec.reason) ? rec.reason : "other";
+    return { send: false, reason };
+  }
+  return { send: true, reason: rec.decision === "capture" ? "connected" : "unknown" };
+}
+function isKnownReason(v) {
+  return v === "connected" || v === "not_connected" || v === "repo_not_writable" || v === "not_a_member" || v === "capture_paused";
+}
+async function checkCaptureScope(repo, config2, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const token = config2.device_token;
+  if (!token) return { send: true, reason: "unknown" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CAPTURE_SCOPE_TIMEOUT_MS);
+  try {
+    const res = await doFetch(buildCaptureScopeUrl(env), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        // device token — never logged
+        "Content-Type": "application/json",
+        ...versionHeaders()
+      },
+      body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name } }),
+      signal: controller.signal
+    });
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    return interpretScopeResponse(true, res.status, payload);
+  } catch {
+    return interpretScopeResponse(false, 0, null);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // src/connectNudge.ts
 import { join as join5 } from "node:path";
 import { readFile as readFile4, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
@@ -8219,13 +8269,31 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
     }
     if (line === null) return false;
     const log = deps.log ?? ((m) => console.error(m));
-    const state = await readState2(env);
-    if (state.nudged.includes(sessionId)) return false;
-    log(line);
-    const nudged = [...state.nudged, sessionId];
-    if (nudged.length > MAX_REMEMBERED) nudged.splice(0, nudged.length - MAX_REMEMBERED);
-    await writeState2({ nudged }, env);
-    return true;
+    return await nudgeOncePerSession(line, sessionId, env, log);
+  } catch {
+    return false;
+  }
+}
+async function nudgeOncePerSession(line, sessionId, env, log) {
+  const state = await readState2(env);
+  if (state.nudged.includes(sessionId)) return false;
+  log(line);
+  const nudged = [...state.nudged, sessionId];
+  if (nudged.length > MAX_REMEMBERED) nudged.splice(0, nudged.length - MAX_REMEMBERED);
+  await writeState2({ nudged }, env);
+  return true;
+}
+function unconnectedSkipMessage(repo, env = process.env) {
+  const link = buildRepoDeepLink(repo.owner, repo.name, env);
+  return `backthread: ${repo.owner}/${repo.name} isn't connected to Backthread yet, so this session wasn't captured (nothing left your machine). Connect it to start building your "How it works" diagram: ${link}`;
+}
+async function maybeUnconnectedNudge(repo, sessionId, deps = {}) {
+  try {
+    if (!repo) return false;
+    if (!sessionId || sessionId.trim().length === 0) return false;
+    const env = deps.env ?? process.env;
+    const log = deps.log ?? ((m) => console.error(m));
+    return await nudgeOncePerSession(unconnectedSkipMessage(repo, env), sessionId, env, log);
   } catch {
     return false;
   }
@@ -9625,6 +9693,21 @@ async function runCapture(input, deps = {}) {
         detail: "no device token yet \u2014 started `backthread login` in the background; this session was not captured."
       };
     }
+    const repo = input.cwd ? resolveRepo(input.cwd, deps.readRemoteImpl) : null;
+    if (repo) {
+      const checkScope = deps.checkScopeImpl ?? ((r, c) => checkCaptureScope(r, c, { env, fetchImpl: deps.fetchImpl }));
+      const scope = await checkScope(repo, config2);
+      if (!scope.send) {
+        if (scope.reason === "not_connected") {
+          await maybeUnconnectedNudge(repo, input.session_id ?? null, { env, log });
+        }
+        return {
+          status: "skipped-out-of-scope",
+          detail: `capture skipped (${scope.reason}) \u2014 repo not in capture scope; nothing read or sent.`,
+          count: 0
+        };
+      }
+    }
     let rawTranscript;
     try {
       rawTranscript = await doReadFile(transcriptPath);
@@ -9652,7 +9735,6 @@ async function runCapture(input, deps = {}) {
       turns: newTurns,
       stats: redacted.stats
     };
-    const repo = input.cwd ? resolveRepo(input.cwd, deps.readRemoteImpl) : null;
     const gitContext = input.cwd ? resolveGitContext(input.cwd, deps.readGitImpl) : { branch: null, headSha: null, gitUser: null };
     const captured = {
       branch: gitContext.branch,

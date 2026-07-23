@@ -274,7 +274,11 @@ test('end-to-end: manual capture drives the real runCapture with all seams mocke
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     calls.push({ url, body });
-    // Server derives + persists (connected repo) → single infer call, no re-POST.
+    // ARP-1054 — the manual path preflights too: the /capture-scope check returns a
+    // 'capture' verdict (connected repo) so the send proceeds. Then the server derives
+    // + persists (connected repo) → a single infer call, no re-POST.
+    if (url.includes('/capture-scope'))
+      return { ok: true, status: 200, json: async () => ({ decision: 'capture', reason: 'connected' }) } as Response;
     const r = { ok: true, persisted: true, decisions: [{ title: 'Use a queue' }] };
     return { ok: true, status: 200, json: async () => r } as Response;
   }) as typeof fetch;
@@ -298,8 +302,10 @@ test('end-to-end: manual capture drives the real runCapture with all seams mocke
   assert.equal(result.exitCode, 0);
   assert.match(result.text, /captured 1 decision\(s\)/);
   // The redacted transcript reached the router; raw code/tool I/O never would have.
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /\/infer-decisions$/);
+  // ARP-1054 — two calls now: the pre-send /capture-scope preflight, then infer.
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].url, /\/capture-scope$/);
+  assert.match(calls[1].url, /\/infer-decisions$/);
   // The device token never leaks into the user-facing summary.
   assert.doesNotMatch(result.text, /backthread_pat_/);
 });
