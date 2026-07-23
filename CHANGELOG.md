@@ -5,6 +5,14 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.16.0
+
+**Per-repo capture, enforced on your machine: an off or unconnected repo's transcript now never leaves it.** Until now, `backthread` derived a session's decisions and sent them for every project on your machine; the server decided whether to keep them (dropping the ones for repos you'd turned off or hadn't connected). Now the check happens *before* anything is sent: at the end of a session `backthread` asks the server a one-line question — "is capture on for this repo, for me?" — carrying only the repo's `owner/name` (never the transcript, never your code). If the repo is turned off, or isn't connected to Backthread, the transcript is never read or sent. You control per-repo capture on the Repos page; connected repos are on by default.
+
+- **Nothing sent for off / unconnected repos.** A paused repo is silent. An unconnected repo occasionally prints a one-line "connect this repo?" nudge (still just the `owner/name`, never a transcript) — throttled to once per session.
+- **Fail-open by design.** If the check can't reach the server (offline, an error), `backthread` proceeds and captures as before — a hiccup never silently drops a real capture. The server still applies the same per-repo decision on its side.
+- **No change for a connected, capturing repo** beyond one tiny background request before the send.
+
 ## 0.15.0
 
 **Free plan: a heads-up when you hit your decision limit.** The free plan lets you connect an agent and capture + read your first 50 decisions for free. Past that, the server quietly stops storing new ones — your existing decisions stay exactly where they are (nothing is lost, nothing errors, capture never fails). Until now that was fully silent. Now, once per session, `backthread` prints a single line letting you know new decisions aren't landing and where to upgrade to keep capturing. It's throttled to one line per session (never per capture), best-effort, and can never interrupt a capture.

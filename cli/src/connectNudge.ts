@@ -268,18 +268,68 @@ export async function maybeNudge(
     if (line === null) return false;
 
     const log = deps.log ?? ((m: string) => console.error(m));
-    const state = await readState(env);
-    if (state.nudged.includes(sessionId)) return false; // already nudged this session
-
-    log(line);
-
-    // Record this session id (bounded ring; oldest fall off the front).
-    const nudged = [...state.nudged, sessionId];
-    if (nudged.length > MAX_REMEMBERED) nudged.splice(0, nudged.length - MAX_REMEMBERED);
-    await writeState({ nudged }, env);
-    return true;
+    return await nudgeOncePerSession(line, sessionId, env, log);
   } catch {
     // Ultimate backstop — the nudge is a courtesy, never a failure mode.
+    return false;
+  }
+}
+
+// Shared throttle: log `line` at most once per session id, recording the id in the
+// bounded ring so a later same-session capture is suppressed. Returns whether it
+// emitted. Best-effort — a read/write hiccup degrades to suppressing (never spamming,
+// never throwing), so it can't break the always-exit-0 capture contract.
+async function nudgeOncePerSession(
+  line: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  const state = await readState(env);
+  if (state.nudged.includes(sessionId)) return false; // already nudged this session
+  log(line);
+  const nudged = [...state.nudged, sessionId];
+  if (nudged.length > MAX_REMEMBERED) nudged.splice(0, nudged.length - MAX_REMEMBERED);
+  await writeState({ nudged }, env);
+  return true;
+}
+
+// ARP-1054 — the PRE-SEND connect nudge. When the pre-send capture-scope check says
+// the repo isn't connected, the hook skips the whole send: nothing is read, sent,
+// captured, or held. So this copy MUST differ from the post-send nudgeMessage above
+// (which says "captured — but … held as pending") — nothing was captured here. Same
+// once-per-session throttle + best-effort posture as maybeNudge; shares the same
+// throttle ring so a session gets at most one connect nudge total.
+export function unconnectedSkipMessage(
+  repo: { owner: string; name: string },
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const link = buildRepoDeepLink(repo.owner, repo.name, env);
+  return (
+    `backthread: ${repo.owner}/${repo.name} isn't connected to Backthread yet, so this ` +
+    `session wasn't captured (nothing left your machine). Connect it to start building ` +
+    `your "How it works" diagram: ${link}`
+  );
+}
+
+/**
+ * Maybe surface the PRE-SEND "connect this repo?" nudge for a session the scope check
+ * skipped as not-connected. Throttled once per session id (shared ring with
+ * maybeNudge); suppressed without a repo or a session id. NEVER throws.
+ */
+export async function maybeUnconnectedNudge(
+  repo: { owner: string; name: string } | null,
+  sessionId: string | null,
+  deps: { env?: NodeJS.ProcessEnv; log?: (msg: string) => void } = {},
+): Promise<boolean> {
+  try {
+    if (!repo) return false;
+    // No session id → can't throttle → suppress rather than risk nudging every capture.
+    if (!sessionId || sessionId.trim().length === 0) return false;
+    const env = deps.env ?? process.env;
+    const log = deps.log ?? ((m: string) => console.error(m));
+    return await nudgeOncePerSession(unconnectedSkipMessage(repo, env), sessionId, env, log);
+  } catch {
     return false;
   }
 }

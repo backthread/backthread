@@ -47,9 +47,10 @@ import { ensureAuth } from './login.js';
 import { parseJsonl, redactTranscript, sessionPaths, sessionTimestamp } from './redact.js';
 import { resolveRepo, resolveGitContext, type RemoteReader, type GitRunner } from './repo.js';
 import { inferDecisions, type DerivedDecision, type RedactedTranscriptInput } from './infer.js';
+import { checkCaptureScope, type ScopeVerdict } from './captureScope.js';
 import { buildIngestDecisionsUrl } from './urls.js';
 import { versionHeaders } from './version.js';
-import { maybeNudge, parseRepoStatus, parseNextStep } from './connectNudge.js';
+import { maybeNudge, maybeUnconnectedNudge, parseRepoStatus, parseNextStep } from './connectNudge.js';
 import { maybeShowTrustGate } from './firstRun.js';
 import { maybeFirstCaptureConfirm } from './firstCapture.js';
 
@@ -77,6 +78,7 @@ export interface CaptureOutcome {
     | 'persisted-by-server' // router persisted; we did nothing more
     | 'persisted' // we POSTed derived decisions to ingest-decisions
     | 'nothing-to-capture' // redaction left no prose / inference found no decisions
+    | 'skipped-out-of-scope' // ARP-1054: pre-send scope check said the repo is off/unconnected — nothing read or sent
     | 'no-auth' // no device token; kicked off login, skipped this capture
     | 'no-transcript' // no transcript_path / unreadable transcript
     | 'infer-failed' // the inference router returned ok:false
@@ -129,6 +131,13 @@ export interface CaptureDeps {
   fromTurnIndex?: number;
   /** Test seam: the auto-login trigger. Defaults to fire-and-forget ensureAuth. */
   ensureAuthImpl?: (env: NodeJS.ProcessEnv) => void;
+  /**
+   * ARP-1054 — test seam: the pre-send capture-scope check. Defaults to the real
+   * checkCaptureScope (a POST to the Worker's /capture-scope with the repo slug + the
+   * device token). Injected in tests so runCapture's scope-gating is exercised without
+   * a live network. Returns the send/skip verdict (fail-open → send).
+   */
+  checkScopeImpl?: (repo: { owner: string; name: string }, config: BackthreadConfig) => Promise<ScopeVerdict>;
   /**
    * Test seam: the trust gate. Defaults to maybeShowTrustGate — prints the
    * never-store-source trust copy ONCE on the silent hook path before any transcript
@@ -257,6 +266,39 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       };
     }
 
+    // (1b) ARP-1054 — PRE-SEND capture-scope check. Resolve the repo from cwd (cheap;
+    // no transcript read yet) and ask the server whether capture is ON for it, for us.
+    // On an explicit `skip` (repo turned OFF, or not connected to Backthread) we send
+    // NOTHING — we don't even read the transcript, so the source never leaves the
+    // machine (the client-side half of per-repo capture scoping; the server enforces
+    // the same decision post-send, ARP-1053). FAIL-OPEN: any doubt — endpoint down,
+    // an unknown verdict — resolves to send, so a preflight hiccup can never silently
+    // drop a real capture. Only runs when a repo is resolvable; a no-git-remote cwd
+    // has no slug to check and falls through to the existing "can't claim → skip" path.
+    const repo = input.cwd ? resolveRepo(input.cwd, deps.readRemoteImpl) : null;
+    if (repo) {
+      const checkScope =
+        deps.checkScopeImpl ??
+        ((r: { owner: string; name: string }, c: BackthreadConfig) =>
+          checkCaptureScope(r, c, { env, fetchImpl: deps.fetchImpl }));
+      const scope = await checkScope(repo, config);
+      if (!scope.send) {
+        // For an UNCONNECTED repo, surface the occasional local connect nudge (repo-slug
+        // only, throttled once/session via the hook's session_id) — the signal that used
+        // to ride the post-send response. Every other skip reason (paused / not-a-member
+        // / not-writable) is silent: a deliberate or known state, no nudge. Best-effort +
+        // non-throwing (maybeUnconnectedNudge swallows all failures).
+        if (scope.reason === 'not_connected') {
+          await maybeUnconnectedNudge(repo, input.session_id ?? null, { env, log });
+        }
+        return {
+          status: 'skipped-out-of-scope',
+          detail: `capture skipped (${scope.reason}) — repo not in capture scope; nothing read or sent.`,
+          count: 0,
+        };
+      }
+    }
+
     // (2) Read the transcript off disk.
     let rawTranscript: string;
     try {
@@ -310,9 +352,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       stats: redacted.stats,
     };
 
-    // Resolve the repo from cwd (best-effort; null → no claimable repo, see below).
-    const repo = input.cwd ? resolveRepo(input.cwd, deps.readRemoteImpl) : null;
-
+    // `repo` was resolved above (1b) for the pre-send scope check; reuse it here.
     // ARP-696 — resolve the session's local git context (current branch + HEAD sha)
     // so the server can HOLD the decision as pending_merge until that work merges.
     // `at` is the session timestamp (decidedAt); the server defaults to now() when

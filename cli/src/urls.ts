@@ -55,6 +55,15 @@ export function buildInferDecisionsUrl(env: NodeJS.ProcessEnv = process.env): st
   return new URL('/infer-decisions', workerBaseUrl(env)).toString();
 }
 
+// Build the /capture-scope URL the capture hook POSTs `{ repo:{owner,name} }` to
+// BEFORE sending any transcript (ARP-1054). On the WORKER origin (same device-token
+// auth as /infer-decisions): the reply ('capture' | 'skip') lets the hook keep an
+// off / unconnected repo's transcript on the machine entirely. No transcript, no
+// source — only the repo slug + the device token leave the machine.
+export function buildCaptureScopeUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/capture-scope', workerBaseUrl(env)).toString();
+}
+
 // Build the /grounded-ask URL the MCP `query` tool POSTs `{ question, repo }` to
 // (ARP-753). On the WORKER origin (not Functions): the worker reuses the bundled
 // LLM stack to retrieve + synthesize a grounded, cited answer server-side, so the
