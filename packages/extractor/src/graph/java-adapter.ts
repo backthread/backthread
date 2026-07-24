@@ -33,11 +33,25 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { GraphExtractor, NormalizedGraph } from './types.js';
-import { graphFromState, type FileRecord, type FileGraphState } from './file-graph.js';
+import { graphFromState, type FileRecord, type FileGraphState, type FileEdgeRef } from './file-graph.js';
 import { listSourceFiles } from './language.js';
 import { isJavaStdlib } from './java-stdlib.js';
 import { readJavaDeps } from './java-manifest.js';
-import { scanPackage, scanImports, scanTopLevelDecls, javaExternalId } from './java-scan.js';
+import {
+  scanPackage,
+  scanImports,
+  scanTopLevelDecls,
+  scanCallSites,
+  javaExternalId,
+  type JavaImport,
+} from './java-scan.js';
+
+// A DETERMINISTIC per-file bound on inline call resolution, so a pathological generated
+// god-file (thousands of call sites) can't dominate the extract. Bounds by COUNT in the
+// (stable) source order — a time budget would break snapshot determinism. A capped file is
+// LOGGED (no silent caps) and degrades to import-only. Mirrors the Swift/Elixir/PHP
+// adapters' MAX_CALL_SITES_PER_FILE.
+const MAX_CALL_SITES_PER_FILE = 2500;
 
 /** Lines of code for one source file (a size/centrality signal). */
 function locOf(text: string): number {
@@ -89,10 +103,93 @@ function resolveByPrefix(fqn: string, declToFile: ReadonlyMap<string, string>): 
 }
 
 /**
- * Resolve ONE file's imports into internal import edges + external refs. Never throws.
- * `declToFile` is the FQN→file registry, `pkgToFiles` the package→files index (wildcard),
- * `internalPackages` the declared-package set (first-party-drop), `declaredGroups` the
- * dependency groups (external bucketing).
+ * Resolve a call-site head (a SIMPLE UpperCamelCase type name as written in the code body)
+ * to its declaring in-repo file, mirroring how javac resolves an unqualified type name —
+ * through the SAME FQN registry the import backbone uses:
+ *   (1) SAME-PACKAGE  — `<filePkg>.<head>`. A same-package type needs no `import`, so this
+ *       is the edge the import backbone can't see — the PRIMARY value of Java call edges
+ *       (Java is file-granular, so this is a net-new file→file edge).
+ *   (2) SINGLE-TYPE IMPORT — a non-static, non-wildcard `import a.b.<head>` (resolved by
+ *       longest-prefix, so a nested-type import resolves to its top-level enclosing file).
+ *   (3) WILDCARD IMPORT — `import a.b.*` where `a.b.<head>` is a registered type.
+ * ACCURACY GATE (no guessed edge): return a target ONLY when the union of these candidates
+ * is EXACTLY ONE distinct in-repo file that is not `fromId`. Zero candidates (external /
+ * JDK / unresolved) OR ≥2 distinct candidates (genuinely ambiguous without full type
+ * resolution — e.g. a same-package type shadowed by a wildcard import of the same simple
+ * name) OR the sole candidate being the file itself (a self-reference) → drop.
+ */
+function resolveCallHead(
+  head: string,
+  fromId: string,
+  filePkg: string,
+  imports: readonly JavaImport[],
+  declToFile: ReadonlyMap<string, string>,
+): string | undefined {
+  const candidates = new Set<string>();
+  const samePkg = declToFile.get(filePkg ? `${filePkg}.${head}` : head);
+  if (samePkg !== undefined) candidates.add(samePkg);
+  for (const imp of imports) {
+    if (imp.static) continue; // a static import brings a MEMBER, not a resolvable type head
+    if (imp.wildcard) {
+      const hit = declToFile.get(`${imp.fqn}.${head}`);
+      if (hit !== undefined) candidates.add(hit);
+      continue;
+    }
+    // A single-type import whose simple name (last segment) IS this head.
+    if (imp.fqn.slice(imp.fqn.lastIndexOf('.') + 1) === head) {
+      const hit = resolveByPrefix(imp.fqn, declToFile);
+      if (hit !== undefined) candidates.add(hit);
+    }
+  }
+  if (candidates.size !== 1) return undefined; // none, or ambiguous → drop
+  const only = candidates.values().next().value as string;
+  return only === fromId ? undefined : only; // no self-edges
+}
+
+/**
+ * Resolve one file's call-site heads into internal `call` edge refs (target file id → call
+ * count). Each head is resolved through the FQN registry by `resolveCallHead`; an
+ * unresolvable / external / ambiguous / self head is dropped — the same registry the import
+ * backbone keys on, so its accuracy is inherited (no guessed edge). A file whose call-site
+ * count exceeds the cap degrades to import-only (LOGGED, never a silent cap). Head→target
+ * resolution is memoized per file (a head recurs across call sites). Sorted for a stable
+ * record.
+ */
+export function extractFileCalls(
+  fromId: string,
+  callSites: readonly string[],
+  filePkg: string,
+  imports: readonly JavaImport[],
+  declToFile: ReadonlyMap<string, string>,
+): FileEdgeRef[] {
+  if (callSites.length > MAX_CALL_SITES_PER_FILE) {
+    console.log(
+      `  [java] ${fromId}: ${callSites.length} call sites exceed the ${MAX_CALL_SITES_PER_FILE} cap — ` +
+        `call edges skipped for this file (import-only)`,
+    );
+    return [];
+  }
+  const cache = new Map<string, string | null>(); // head → resolved file (null = unresolved)
+  const weights = new Map<string, number>();
+  for (const head of callSites) {
+    let target = cache.get(head);
+    if (target === undefined) {
+      target = resolveCallHead(head, fromId, filePkg, imports, declToFile) ?? null;
+      cache.set(head, target);
+    }
+    if (target === null) continue;
+    weights.set(target, (weights.get(target) ?? 0) + 1);
+  }
+  return [...weights]
+    .map(([to, weight]) => ({ to, weight }))
+    .sort((a, b) => (a.to < b.to ? -1 : a.to > b.to ? 1 : 0));
+}
+
+/**
+ * Resolve ONE file's imports into internal import edges + external refs + inline `call`
+ * edges. Never throws. `declToFile` is the FQN→file registry, `pkgToFiles` the
+ * package→files index (wildcard), `internalPackages` the declared-package set
+ * (first-party-drop), `declaredGroups` the dependency groups (external bucketing).
  */
 export function extractFileRecord(
   fromId: string,
@@ -115,7 +212,8 @@ export function extractFileRecord(
     else externalWeights.set(ext.id, { specifier: ext.specifier, weight: 1 });
   };
 
-  for (const imp of scanImports(text)) {
+  const imports = scanImports(text);
+  for (const imp of imports) {
     if (!imp.fqn.includes('.')) continue; // a real Java import is always ≥2 segments
 
     if (imp.static) {
@@ -160,7 +258,10 @@ export function extractFileRecord(
     language: 'java',
     imports: [...importWeights].map(([to, weight]) => ({ to, weight })),
     externals: [...externalWeights].map(([id, v]) => ({ id, specifier: v.specifier, weight: v.weight })),
-    calls: [], // v1: import-backbone only (no call edges — the locked scope)
+    // v2: constructor (`new Foo(…)`) + static (`Foo.member(…)`) call-site heads resolved
+    // through the FQN registry — file→file edges the import backbone misses (esp.
+    // same-package calls, which need no `import`).
+    calls: extractFileCalls(fromId, scanCallSites(text), scanPackage(text), imports, declToFile),
     reexports: [],
   };
 }

@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach } from '../testkit.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { JavaExtractor } from './java-adapter.js';
+import { JavaExtractor, extractFileCalls } from './java-adapter.js';
 import type { NormalizedGraph } from './types.js';
 
 const dirs: string[] = [];
@@ -132,5 +132,123 @@ describe('JavaExtractor', () => {
     const g = await new JavaExtractor().extract(dir);
     expect(g.files).toEqual([]);
     expect(g.edges).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Call edges (v2) — constructor + static-call heads resolved through the FQN registry.
+
+function callEdges(g: NormalizedGraph): Set<string> {
+  return new Set(
+    g.edges.filter((e) => e.kind === 'call' && !e.external).map((e) => `${e.from} -> ${e.to}`),
+  );
+}
+
+const CORE_USER = 'src/main/java/com/acme/core/User.java';
+const CORE_FACTORY = 'src/main/java/com/acme/core/Factory.java';
+const CORE_UTIL = 'src/main/java/com/acme/core/Util.java';
+const CORE_WIDGET = 'src/main/java/com/acme/core/Widget.java';
+const UI_WIDGET = 'src/main/java/com/acme/ui/Widget.java';
+const CORE_SCREEN = 'src/main/java/com/acme/core/Screen.java';
+const APP = 'src/main/java/com/acme/app/App.java';
+
+// A repo exercising: a same-package constructor (net-new edge vs imports), imported
+// static calls, an external static call, a self static call, instance dispatch, and a
+// simple name genuinely ambiguous between a same-package type and a wildcard import.
+const CALL_REPO: Record<string, string> = {
+  'pom.xml': POM,
+  [CORE_USER]: 'package com.acme.core;\n\npublic class User {\n  void greet() {}\n}\n',
+  [CORE_UTIL]: 'package com.acme.core;\n\npublic final class Util {\n  static int count() { return 1; }\n}\n',
+  [CORE_FACTORY]: [
+    'package com.acme.core;',
+    '',
+    'public class Factory {',
+    '  static User make() { return new User(); }', // same-package constructor → Factory -> User
+    '  static User makeTwo() { return Factory.make(); }', // self static call → NO self-edge
+    '}',
+  ].join('\n'),
+  [CORE_WIDGET]: 'package com.acme.core;\n\npublic class Widget {}\n',
+  [UI_WIDGET]: 'package com.acme.ui;\n\npublic class Widget {}\n',
+  [CORE_SCREEN]: [
+    'package com.acme.core;',
+    '',
+    'import com.acme.ui.*;', // wildcard brings com.acme.ui.Widget
+    '',
+    'public class Screen {',
+    '  void build() { Object w = new Widget(); }', // AMBIGUOUS: core.Widget vs ui.Widget → dropped
+    '}',
+  ].join('\n'),
+  [APP]: [
+    'package com.acme.app;',
+    '',
+    'import com.acme.core.Factory;',
+    'import com.acme.core.Util;',
+    '',
+    'public class App {',
+    '  void run() {',
+    '    var u = Factory.make();', // imported static call → App -> Factory
+    '    int n = Util.count();', // imported static call → App -> Util
+    '    String s = String.valueOf(n);', // external (java.lang.String) → dropped
+    '    this.helper();', // instance/this dispatch → dropped
+    '  }',
+    '  void helper() {}',
+    '}',
+  ].join('\n'),
+};
+
+describe('JavaExtractor call edges (v2)', () => {
+  it('resolves a same-package constructor into a net-new call edge (no import exists)', async () => {
+    const dir = await repo(CALL_REPO);
+    const g = await new JavaExtractor().extract(dir);
+    const calls = callEdges(g);
+    expect(calls.has(`${CORE_FACTORY} -> ${CORE_USER}`)).toBe(true);
+    // The import backbone can't see this edge: Factory has NO import of User.
+    const imports = new Set(
+      g.edges.filter((e) => e.kind === 'import' && !e.external).map((e) => `${e.from} -> ${e.to}`),
+    );
+    expect(imports.has(`${CORE_FACTORY} -> ${CORE_USER}`)).toBe(false);
+  });
+
+  it('resolves imported static calls (Factory.make / Util.count) into call edges', async () => {
+    const dir = await repo(CALL_REPO);
+    const g = await new JavaExtractor().extract(dir);
+    const calls = callEdges(g);
+    expect(calls.has(`${APP} -> ${CORE_FACTORY}`)).toBe(true);
+    expect(calls.has(`${APP} -> ${CORE_UTIL}`)).toBe(true);
+  });
+
+  it('drops external, self, instance-dispatch, and ambiguous heads (0 self-edges)', async () => {
+    const dir = await repo(CALL_REPO);
+    const g = await new JavaExtractor().extract(dir);
+    const calls = callEdges(g);
+    // external `String.valueOf` → no in-repo target
+    expect([...calls].some((e) => e.includes('String'))).toBe(false);
+    // self `Factory.make()` inside Factory → no self-edge
+    expect(calls.has(`${CORE_FACTORY} -> ${CORE_FACTORY}`)).toBe(false);
+    // ambiguous `new Widget()` (same-package core.Widget vs wildcard ui.Widget) → dropped
+    expect(calls.has(`${CORE_SCREEN} -> ${CORE_WIDGET}`)).toBe(false);
+    expect(calls.has(`${CORE_SCREEN} -> ${UI_WIDGET}`)).toBe(false);
+    // no call edge is a self-edge anywhere in the graph
+    for (const e of calls) {
+      const [from, to] = e.split(' -> ');
+      expect(from).not.toBe(to);
+    }
+  });
+
+  it('is deterministic across runs (call edges included)', async () => {
+    const dir = await repo(CALL_REPO);
+    const a = await new JavaExtractor().extract(dir);
+    const b = await new JavaExtractor().extract(dir);
+    expect(callEdges(a)).toEqual(callEdges(b));
+  });
+
+  it('degrades a file over the call-site cap to import-only (no call edges)', () => {
+    const declToFile = new Map<string, string>([['com.acme.core.User', CORE_USER]]);
+    const heads = Array.from({ length: 2501 }, () => 'User');
+    const edges = extractFileCalls(CORE_FACTORY, heads, 'com.acme.core', [], declToFile);
+    expect(edges).toEqual([]);
+    // Under the cap, the same head resolves to a weighted edge.
+    const under = extractFileCalls(CORE_FACTORY, ['User', 'User'], 'com.acme.core', [], declToFile);
+    expect(under).toEqual([{ to: CORE_USER, weight: 2 }]);
   });
 });
