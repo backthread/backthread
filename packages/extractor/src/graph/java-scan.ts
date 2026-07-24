@@ -199,6 +199,45 @@ export function scanTopLevelDecls(text: string): string[] {
   return names;
 }
 
+// ---------------------------------------------------------------------------
+// Call sites (v2 — resolved against the FQN registry by the adapter as `call`
+// edges). Two Java call forms carry a resolvable UpperCamelCase TYPE head:
+//   * CONSTRUCTOR  `new Foo(…)` / `new Foo<…>(…)` — constructing a value = a call to
+//     Foo's constructor. `new Foo[…]` (array creation) has no `(`/`<` after the name,
+//     so the `[(<]` guard excludes it; `new java.util.ArrayList<>()` has a lowercase
+//     package head, so the `[A-Z]` head excludes it (dropped — accuracy over recall).
+//   * STATIC CALL  `Foo.member(…)` — a static method / factory call on type Foo.
+// Both resolve the HEAD type to its declaring file → a `call` edge. INSTANCE dispatch
+// (`obj.method()`, `this.x()`, `super.y()` — lowercase / keyword receiver) has no
+// UpperCamelCase head, so it never resolves (a wrong call edge teaches a false mental
+// model — accuracy over recall). A BARE `Foo(…)` is deliberately NOT matched: in Java
+// that is a method invocation (or, with a leading `@`, an annotation `@Foo(…)`) — only
+// `new Foo(…)` constructs — so annotations and same-name method calls can never forge a
+// constructor edge. A Java-21 record/type PATTERN (`case Foo(var x)`, `case Foo f ->`)
+// also lacks `new`, so it can't forge one either — no explicit pattern-skip is needed.
+// The static form's `(?<![\w.$@])` lookbehind excludes a member access (`x.Foo.bar(` is
+// not a head), a mid-identifier fragment, and an annotation head (`@Foo.bar(`).
+const CONSTRUCTOR_CALL_RE = /\bnew\s+([A-Z][A-Za-z0-9_]*)\s*[(<]/g;
+const STATIC_CALL_RE = /(?<![\w.$@])([A-Z][A-Za-z0-9_]*)\.[A-Za-z_$][A-Za-z0-9_$]*\s*\(/g;
+
+/**
+ * Every resolvable call-site HEAD token in `text`'s code body, in source order (one entry
+ * per occurrence, so the adapter can weight a `call` edge by count). Comment/string
+ * stripped; `package`/`import` lines are skipped (they carry no call `(` — a cheap,
+ * defensive guard). The adapter resolves each head through the FQN registry (same-package
+ * / imported-name / wildcard) and drops everything that doesn't name EXACTLY ONE in-repo
+ * top-level type — so this over-collects on purpose and the accuracy gate lives there.
+ */
+export function scanCallSites(text: string): string[] {
+  const out: string[] = [];
+  for (const line of sourceLines(text)) {
+    if (PACKAGE_RE.test(line) || IMPORT_RE.test(line)) continue;
+    for (const m of line.matchAll(CONSTRUCTOR_CALL_RE)) out.push(m[1]);
+    for (const m of line.matchAll(STATIC_CALL_RE)) out.push(m[1]);
+  }
+  return out;
+}
+
 /** The top-level (leftmost) segment of a dotted name. */
 export function topSegment(fqn: string): string {
   return fqn.split('.')[0];

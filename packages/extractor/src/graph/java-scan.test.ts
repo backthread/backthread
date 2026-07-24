@@ -7,6 +7,7 @@ import {
   scanPackage,
   scanImports,
   scanTopLevelDecls,
+  scanCallSites,
   javaExternalId,
 } from './java-scan.js';
 
@@ -76,6 +77,78 @@ describe('scanTopLevelDecls', () => {
   it('does not capture a constructor-parameter or field as a top-level decl', () => {
     const src = 'package x;\nclass Point {\n  private int x;\n  Point(int x) { this.x = x; }\n}\n';
     expect(scanTopLevelDecls(src)).toEqual(['Point']);
+  });
+});
+
+describe('scanCallSites', () => {
+  it('captures constructor (`new Foo(`) and generic-constructor (`new Foo<…>(`) heads', () => {
+    const src = [
+      'package x;',
+      'class C {',
+      '  void m() {',
+      '    var a = new Widget();',
+      '    var b = new Box<String>();',
+      '    var c = new Repo (arg);',
+      '  }',
+      '}',
+    ].join('\n');
+    expect(scanCallSites(src)).toEqual(['Widget', 'Box', 'Repo']);
+  });
+
+  it('captures a static-call (`Foo.member(`) head', () => {
+    const src = 'package x;\nclass C {\n  int m() { return Factory.create().size() + Util.count(); }\n}\n';
+    // `Factory.create(` and `Util.count(` are heads; the chained `.size(` is not a head
+    // (its receiver is `)` — the lookbehind excludes it).
+    expect(scanCallSites(src)).toEqual(['Factory', 'Util']);
+  });
+
+  it('drops array creation, lowercase-package `new`, instance/this/super dispatch, and bare calls', () => {
+    const src = [
+      'package x;',
+      'class C {',
+      '  void m() {',
+      '    int[] arr = new int[3];', // primitive array — lowercase, no head
+      '    var xs = new String[2];', // array creation — `[` not `(`/`<`, excluded
+      '    var l = new java.util.ArrayList<>();', // lowercase package head → excluded
+      '    obj.doThing();', // instance dispatch — lowercase receiver
+      '    this.helper();', // this — keyword receiver
+      '    super.setUp();', // super — keyword receiver
+      '    helper();', // bare method call — no `new`, no `.`
+      '  }',
+      '}',
+    ].join('\n');
+    expect(scanCallSites(src)).toEqual([]);
+  });
+
+  it('does not treat an annotation `@Foo(` or `@Foo.bar(` as a call site', () => {
+    const src = [
+      'package x;',
+      '@Service',
+      '@RequestMapping("/api")',
+      'class C {',
+      '  @Cacheable(Config.NAMES)', // annotation arg, not a call — `Config.NAMES` has no `(`
+      '  void m() {}',
+      '}',
+    ].join('\n');
+    expect(scanCallSites(src)).toEqual([]);
+  });
+
+  it('does not read a call inside a comment or string, or on import/package lines', () => {
+    const src = [
+      'package x;',
+      'import com.foo.Bar;',
+      'class C {',
+      '  // new Commented();',
+      '  String s = "new InString()";',
+      '  void m() { var r = new Real(); }',
+      '}',
+    ].join('\n');
+    expect(scanCallSites(src)).toEqual(['Real']);
+  });
+
+  it('emits one entry per call site (so the adapter can weight edges by count)', () => {
+    const src = 'package x;\nclass C {\n  void m() { new Foo(); Foo.bar(); new Foo(); }\n}\n';
+    expect(scanCallSites(src)).toEqual(['Foo', 'Foo', 'Foo']);
   });
 });
 

@@ -503,8 +503,11 @@ export function isConfigInvalidatorPath(path: string): boolean {
  * v6: the Swift adapter gained inline CALL edges (initializer `Foo(…)` + static
  * `Foo.member(…)` heads resolved through the type registry), so per-file output
  * changes for `.swift` blobs — cached rows must re-parse.
+ * v7: the Java adapter gained inline CALL edges (constructor `new Foo(…)` + static
+ * `Foo.member(…)` heads resolved through the FQN registry), so per-file output
+ * changes for `.java` blobs — cached rows must re-parse.
  */
-export const EXTRACTOR_VERSION = 6;
+export const EXTRACTOR_VERSION = 7;
 
 // ---------------------------------------------------------------------------
 // State shape.
