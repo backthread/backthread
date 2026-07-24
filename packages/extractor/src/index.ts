@@ -61,6 +61,7 @@ export {
   DART_SOURCE_EXTENSIONS,
   KOTLIN_SOURCE_EXTENSIONS,
   SWIFT_SOURCE_EXTENSIONS,
+  JAVA_SOURCE_EXTENSIONS,
   EXCLUDE_DIRS,
   PYTHON_EXCLUDE_DIRS,
   RUBY_EXCLUDE_DIRS,
@@ -68,6 +69,7 @@ export {
   DART_EXCLUDE_DIRS,
   KOTLIN_EXCLUDE_DIRS,
   SWIFT_EXCLUDE_DIRS,
+  JAVA_EXCLUDE_DIRS,
   isSourceFilePath,
   isConfigInvalidatorPath,
   EXTRACTOR_VERSION,
@@ -102,6 +104,7 @@ export {
   hasDartManifestDeep,
   hasKotlinManifest,
   hasSwiftManifest,
+  hasJavaManifest,
 } from './graph/language.js';
 export { NOISE_CATEGORIES, NOISE_RULES, classifyNoise, filterNoise, summarizeNoise } from './graph/noise-filter.js';
 export type { NoiseCategory, NoiseRule, DroppedNoise } from './graph/noise-filter.js';

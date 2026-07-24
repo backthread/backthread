@@ -109,5 +109,9 @@ async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
     const { SwiftExtractor } = await import('./swift-adapter.js');
     return new SwiftExtractor();
   }
+  if (language === 'java') {
+    const { JavaExtractor } = await import('./java-adapter.js');
+    return new JavaExtractor();
+  }
   return new TsMorphExtractor();
 }
