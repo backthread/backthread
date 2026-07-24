@@ -326,6 +326,45 @@ export function hasGoManifest(repoDir: string): boolean {
   return GO_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
 }
 
+// Depth cap + skip set for the nested go.mod/go.work probe — mirrors the other Deep probes.
+// A polyglot monorepo commonly keeps its Go service under `backend/`/`server/`; 8 is
+// generous. Skips vendor/build + dot dirs so a `vendor/**/go.mod` can't fake it.
+const GO_PROBE_MAX_DEPTH = 8;
+const GO_PROBE_SKIP = new Set<string>([...EXCLUDE_DIRS, 'vendor', 'testdata']);
+const GO_MANIFEST_SET = new Set<string>(GO_MANIFESTS);
+
+/**
+ * Does the repo declare a Go module/workspace ANYWHERE — the root OR a nested service? A
+ * polyglot monorepo may keep its Go service under a top-level `backend/`/`server/` dir
+ * (`backend/go.mod`), which the root-only `hasGoManifest` misses. A BOUNDED walk (skips
+ * vendor/build + dot dirs, depth-capped, EARLY-EXITS on the first go.mod/go.work) finds it.
+ * Mirrors `hasMixManifestDeep` / `hasSwiftManifestDeep`.
+ *
+ * The root-only `hasGoManifest` stays the graph-language selector (a nested-Go repo already
+ * extracts via the dominant-source-count fallback); this broader probe gates the Go
+ * framework-fleet registration, so its adapters load for a repo whose Go lives below the
+ * root instead of silently no-op-ing. NEVER throws.
+ */
+export function hasGoManifestDeep(repoDir: string): boolean {
+  if (hasGoManifest(repoDir)) return true; // cheap root check short-circuits
+  const walk = (dir: string, depth: number): boolean => {
+    if (depth > GO_PROBE_MAX_DEPTH) return false;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    if (entries.some((e) => e.isFile() && GO_MANIFEST_SET.has(e.name))) return true;
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith('.') || GO_PROBE_SKIP.has(e.name)) continue;
+      if (walk(join(dir, e.name), depth + 1)) return true;
+    }
+    return false;
+  };
+  return walk(resolve(repoDir), 0);
+}
+
 /**
  * Repo-relative POSIX paths of every source file for `lang` under `root`.
  * Walks the tree directly (the Pyright adapter needs an explicit file list; it
