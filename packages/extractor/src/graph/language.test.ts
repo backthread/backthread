@@ -16,6 +16,7 @@ import {
   hasSwiftManifest,
   hasSwiftManifestDeep,
   hasJavaManifest,
+  hasGoManifest,
 } from './language.js';
 import type { NormalizedGraph } from './types.js';
 
@@ -218,6 +219,43 @@ describe('detectRepoLanguage', () => {
     expect(hasJavaManifest(dir)).toBe(false);
     expect(detectRepoLanguage(dir)).toBe('ts');
   });
+
+  it('selects go for a go.mod repo with no other manifest', async () => {
+    const dir = await repo({
+      'go.mod': 'module github.com/acme/app\n\ngo 1.21\n',
+      'main.go': 'package main\nfunc main() {}\n',
+      'internal/db/db.go': 'package db\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('go');
+  });
+
+  it('selects go for a go.work workspace root (no root go.mod)', async () => {
+    const dir = await repo({
+      'go.work': 'go 1.21\n\nuse ./svc\n',
+      'svc/go.mod': 'module github.com/acme/svc\n',
+      'svc/main.go': 'package main\nfunc main() {}\n',
+    });
+    expect(hasGoManifest(dir)).toBe(true);
+    expect(detectRepoLanguage(dir)).toBe('go');
+  });
+
+  it('selects go for a Go service that also ships a package.json (embedded UI) — .go dominates', async () => {
+    const dir = await repo({
+      'go.mod': 'module github.com/acme/app\n',
+      'package.json': '{"name":"ui"}',
+      'cmd/server/main.go': 'package main\nfunc main() {}\n',
+      'internal/db/db.go': 'package db\n',
+      'internal/api/api.go': 'package api\n',
+      'web/app.js': 'console.log(1)\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('go');
+  });
+
+  it('does not detect go for a TS repo with no go.mod (hasGoManifest isolation)', async () => {
+    const dir = await repo({ 'package.json': '{"name":"x"}', 'src/index.ts': 'export const x=1;\n' });
+    expect(hasGoManifest(dir)).toBe(false);
+    expect(detectRepoLanguage(dir)).toBe('ts');
+  });
 });
 
 describe('listSourceFiles', () => {
@@ -340,6 +378,8 @@ describe('detectRepoLanguages (multi-language)', () => {
     Object.fromEntries(
       Array.from({ length: n }, (_, i) => [`src/main/java/com/acme/M${i}.java`, `package com.acme;\npublic class M${i} {}\n`]),
     );
+  const gg = (n: number): Record<string, string> =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`internal/m${i}/m.go`, `package m${i}\n`]));
 
   it('returns a SINGLE language for a single-language repo (no behavior change)', async () => {
     expect(await detectRepoLanguages(await repo({ 'package.json': '{}', ...ts(6) }))).toEqual(['ts']);
@@ -379,6 +419,11 @@ describe('detectRepoLanguages (multi-language)', () => {
     expect(detectRepoLanguages(dir)).toEqual(['ts', 'java']);
   });
 
+  it('returns BOTH languages (go dominant) for a Go backend + smaller TS frontend', async () => {
+    const dir = await repo({ 'go.mod': 'module github.com/acme/app\n', 'package.json': '{}', ...gg(40), ...ts(20) });
+    expect(detectRepoLanguages(dir)).toEqual(['go', 'ts']);
+  });
+
   it('orders by dominance (python-heavy → python first)', async () => {
     const dir = await repo({ 'package.json': '{}', 'backend/pyproject.toml': '[project]\nname="be"\n', ...ts(15), ...py(40) });
     expect(detectRepoLanguages(dir)).toEqual(['python', 'ts']);
@@ -403,6 +448,7 @@ describe('graphLanguage', () => {
     expect(graphLanguage(g(['php']))).toBe('php');
     expect(graphLanguage(g(['swift']))).toBe('swift');
     expect(graphLanguage(g(['java']))).toBe('java');
+    expect(graphLanguage(g(['go']))).toBe('go');
     expect(graphLanguage(g([]))).toBe('ts');
   });
 });

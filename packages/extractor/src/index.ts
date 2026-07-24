@@ -62,6 +62,7 @@ export {
   KOTLIN_SOURCE_EXTENSIONS,
   SWIFT_SOURCE_EXTENSIONS,
   JAVA_SOURCE_EXTENSIONS,
+  GO_SOURCE_EXTENSIONS,
   EXCLUDE_DIRS,
   PYTHON_EXCLUDE_DIRS,
   RUBY_EXCLUDE_DIRS,
@@ -70,6 +71,7 @@ export {
   KOTLIN_EXCLUDE_DIRS,
   SWIFT_EXCLUDE_DIRS,
   JAVA_EXCLUDE_DIRS,
+  GO_EXCLUDE_DIRS,
   isSourceFilePath,
   isConfigInvalidatorPath,
   EXTRACTOR_VERSION,
@@ -105,6 +107,7 @@ export {
   hasKotlinManifest,
   hasSwiftManifest,
   hasJavaManifest,
+  hasGoManifest,
 } from './graph/language.js';
 export { NOISE_CATEGORIES, NOISE_RULES, classifyNoise, filterNoise, summarizeNoise } from './graph/noise-filter.js';
 export type { NoiseCategory, NoiseRule, DroppedNoise } from './graph/noise-filter.js';
