@@ -189,7 +189,9 @@ export function extractFileCalls(
  * Resolve ONE file's imports into internal import edges + external refs + inline `call`
  * edges. Never throws. `declToFile` is the FQN→file registry, `pkgToFiles` the
  * package→files index (wildcard), `internalPackages` the declared-package set
- * (first-party-drop), `declaredGroups` the dependency groups (external bucketing).
+ * (first-party-drop), `declaredGroups` the dependency groups (external bucketing). `pkg`
+ * is the file's declared package — the caller passes the value pass 1 already computed so
+ * the file isn't re-scanned; omitted (tests), it falls back to a scan.
  */
 export function extractFileRecord(
   fromId: string,
@@ -198,7 +200,9 @@ export function extractFileRecord(
   pkgToFiles: ReadonlyMap<string, readonly string[]>,
   internalPackages: ReadonlySet<string>,
   declaredGroups: ReadonlySet<string>,
+  pkg?: string,
 ): FileRecord {
+  const filePkg = pkg ?? scanPackage(text);
   const importWeights = new Map<string, number>();
   const externalWeights = new Map<string, { specifier: string; weight: number }>();
   const addInternal = (target: string): void => {
@@ -261,7 +265,7 @@ export function extractFileRecord(
     // v2: constructor (`new Foo(…)`) + static (`Foo.member(…)`) call-site heads resolved
     // through the FQN registry — file→file edges the import backbone misses (esp.
     // same-package calls, which need no `import`).
-    calls: extractFileCalls(fromId, scanCallSites(text), scanPackage(text), imports, declToFile),
+    calls: extractFileCalls(fromId, scanCallSites(text), filePkg, imports, declToFile),
     reexports: [],
   };
 }
@@ -296,9 +300,11 @@ export class JavaExtractor implements GraphExtractor {
     const declToFile = new Map<string, string>();
     const pkgToFiles = new Map<string, string[]>();
     const internalPackages = new Set<string>();
+    const pkgByFile = new Map<string, string>(); // reused in pass 2 (no re-scan)
     for (const id of fileIds) {
       const text = texts.get(id) ?? '';
       const pkg = scanPackage(text);
+      pkgByFile.set(id, pkg);
       internalPackages.add(pkg);
       (pkgToFiles.get(pkg) ?? pkgToFiles.set(pkg, []).get(pkg)!).push(id);
       for (const decl of scanTopLevelDecls(text)) {
@@ -307,7 +313,7 @@ export class JavaExtractor implements GraphExtractor {
       }
     }
 
-    // Pass 2: per-file import resolution.
+    // Pass 2: per-file import + call resolution (pass-1 package handed in, not re-scanned).
     for (const id of fileIds) {
       files[id] = extractFileRecord(
         id,
@@ -316,6 +322,7 @@ export class JavaExtractor implements GraphExtractor {
         pkgToFiles,
         internalPackages,
         declaredGroups,
+        pkgByFile.get(id) ?? '',
       );
     }
 

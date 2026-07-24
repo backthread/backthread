@@ -150,6 +150,7 @@ const CORE_UTIL = 'src/main/java/com/acme/core/Util.java';
 const CORE_WIDGET = 'src/main/java/com/acme/core/Widget.java';
 const UI_WIDGET = 'src/main/java/com/acme/ui/Widget.java';
 const CORE_SCREEN = 'src/main/java/com/acme/core/Screen.java';
+const MODEL_ORDER = 'src/main/java/com/acme/model/Order.java';
 const APP = 'src/main/java/com/acme/app/App.java';
 
 // A repo exercising: a same-package constructor (net-new edge vs imports), imported
@@ -169,6 +170,7 @@ const CALL_REPO: Record<string, string> = {
   ].join('\n'),
   [CORE_WIDGET]: 'package com.acme.core;\n\npublic class Widget {}\n',
   [UI_WIDGET]: 'package com.acme.ui;\n\npublic class Widget {}\n',
+  [MODEL_ORDER]: 'package com.acme.model;\n\npublic class Order {}\n',
   [CORE_SCREEN]: [
     'package com.acme.core;',
     '',
@@ -183,11 +185,13 @@ const CALL_REPO: Record<string, string> = {
     '',
     'import com.acme.core.Factory;',
     'import com.acme.core.Util;',
+    'import com.acme.model.*;', // wildcard: brings com.acme.model.Order (uniquely named)
     '',
     'public class App {',
     '  void run() {',
     '    var u = Factory.make();', // imported static call → App -> Factory
     '    int n = Util.count();', // imported static call → App -> Util
+    '    var o = new Order();', // wildcard-resolved constructor → App -> Order (unique → edge)
     '    String s = String.valueOf(n);', // external (java.lang.String) → dropped
     '    this.helper();', // instance/this dispatch → dropped
     '  }',
@@ -215,6 +219,14 @@ describe('JavaExtractor call edges (v2)', () => {
     const calls = callEdges(g);
     expect(calls.has(`${APP} -> ${CORE_FACTORY}`)).toBe(true);
     expect(calls.has(`${APP} -> ${CORE_UTIL}`)).toBe(true);
+  });
+
+  it('resolves a wildcard-imported, uniquely-named constructor head into a call edge', async () => {
+    const dir = await repo(CALL_REPO);
+    const g = await new JavaExtractor().extract(dir);
+    // `new Order()` in App: same-package `com.acme.app.Order` misses, and the ONLY
+    // candidate is `com.acme.model.Order` via `import com.acme.model.*` → 1 distinct → edge.
+    expect(callEdges(g).has(`${APP} -> ${MODEL_ORDER}`)).toBe(true);
   });
 
   it('drops external, self, instance-dispatch, and ambiguous heads (0 self-edges)', async () => {
