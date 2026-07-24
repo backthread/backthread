@@ -30,6 +30,7 @@ import { externalIdFor } from '../graph/types.js';
 import type { OverrideMap } from './overrides.js';
 import { compileMatchers, slugify } from './overrides.js';
 import type { WorkspaceLayout, WorkspacePackage } from './workspaces.js';
+import { commonDir, dominantTopSegment, leafSegment, stripCommonPrefix } from './grouping-path.js';
 
 // God-node detection ( / , fixes ). The old fixed-degree
 // threshold fired on ~half the modules of a small dense repo (4/8 on backthread),
@@ -78,6 +79,16 @@ export interface ClusteredModule {
    */
   packageName?: string | null;
   packageRole?: WorkspacePackage['role'];
+  /**
+   * The module's NAMESPACE-derived subsystem box (the dominant top-level
+   * segment of its files' `groupingPath`s, after the repo/package-wide common prefix
+   * is stripped). Set only when the language supplies grouping paths (Java/Kotlin);
+   * `computeSubsystems` prefers it over the physical dominant top-level dir, which on
+   * a JVM repo is the build source root (`main`) for every single file.
+   *
+   * Absent for every other language ⇒ the directory heuristic is used unchanged.
+   */
+  groupingDir?: string;
 }
 
 export interface ModuleEdge {
@@ -116,6 +127,57 @@ function deriveSegment(fileIds: string[]): string {
   return best;
 }
 
+// The NAMESPACE-derived half of the same heuristic, used when the files
+// carry `groupingPath`s (Java/Kotlin). `namespaceOf` maps a fileId to its
+// prefix-stripped namespace dir; a file absent from it has no namespace signal.
+//
+// The module ID comes from the community's OWN deepest common namespace, LEAF first
+// (`adapter/database` → `database`, the feature name), because a JVM package tree is
+// deep and its top level is usually an architectural layer (`adapter`, `domain`),
+// which would produce `adapter-1 … adapter-66` — as unreadable as the `main-N` this
+// fixes. A community straddling two features falls back to their shared parent, and
+// one straddling unrelated roots to the dominant top-level segment.
+//
+// Returns null when NO file in the community has a namespace, so the caller keeps
+// the physical-path derivation byte-identically.
+function deriveNamespaceSegment(
+  fileIds: readonly string[],
+  namespaceOf: ReadonlyMap<string, string>,
+): string | null {
+  const paths = namespacedPaths(fileIds, namespaceOf);
+  if (paths === null) return null;
+  return leafSegment(commonDir(paths)) ?? dominantTopSegment(paths);
+}
+
+// The module's namespace-derived SUBSYSTEM box: the dominant TOP-LEVEL
+// segment of its files' namespaces (`adapter/database` → `adapter`). Deliberately
+// coarser than the module id above: a subsystem is the neighbourhood a module sits
+// in, and it must stay stable as the module's file set shifts.
+function deriveNamespaceDir(
+  fileIds: readonly string[],
+  namespaceOf: ReadonlyMap<string, string>,
+): string | null {
+  const paths = namespacedPaths(fileIds, namespaceOf);
+  return paths !== null ? dominantTopSegment(paths) : null;
+}
+
+// The community's namespace paths — but ONLY when they are a MAJORITY of its files.
+// Otherwise null, and the caller keeps the physical-path derivation.
+//
+// WHY the majority bar (REVIEWER, PR #145): `mergeGraphs` concatenates a polyglot
+// repo's languages into ONE graph, so a community can hold 5 TypeScript files and a
+// single generated `.java`. Deriving from "any namespaced file" then named that
+// module after the lone Java file's package — so the "a file without a groupingPath
+// keeps the prior behavior" guarantee held per FILE but not per COMMUNITY. Requiring
+// a majority restores it: a mostly-TS module keeps its physical-path name.
+function namespacedPaths(
+  fileIds: readonly string[],
+  namespaceOf: ReadonlyMap<string, string>,
+): string[] | null {
+  const paths = fileIds.map((f) => namespaceOf.get(f)).filter((p): p is string => p !== undefined);
+  return paths.length * 2 > fileIds.length ? paths : null;
+}
+
 // Reserve a unique module id from a base: `-2`, `-3`, … suffixes on collision.
 // The ONE dedup gate every id-producing path goes through (derived, slug-
 // prefixed, stabilization reroutes), so ids are unique by construction.
@@ -128,9 +190,16 @@ function reserveId(base: string, used: Set<string>): string {
 }
 
 // Derive a provisional module id from a community's files (pre-Stage-C form,
-// used for the whole-graph path + root-scope communities).
-function deriveModuleId(fileIds: string[], used: Set<string>): string {
-  return reserveId(slugify(deriveSegment(fileIds)) || 'module', used);
+// used for the whole-graph path + root-scope communities). the
+// namespace derivation wins when the language supplies one, else the physical
+// path — so non-JVM ids are unchanged.
+function deriveModuleId(
+  fileIds: string[],
+  used: Set<string>,
+  namespaceOf: ReadonlyMap<string, string>,
+): string {
+  const seg = deriveNamespaceSegment(fileIds, namespaceOf) ?? deriveSegment(fileIds);
+  return reserveId(slugify(seg) || 'module', used);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +331,26 @@ export function clusterGraph(
   const layout = opts?.layout;
   const multiPackage = layout !== undefined && layout.packages.length > 1;
 
+  // The NAMESPACE grouping map (fileId → prefix-stripped package dir),
+  // populated only for languages whose adapter supplies `groupingPath` (Java/Kotlin).
+  // The shared prefix is computed PER SCOPE — the whole graph, or each workspace
+  // package — so a Gradle multi-module repo strips each module's own reverse-DNS
+  // prefix instead of one global one (two modules under different org prefixes would
+  // otherwise share no prefix at all, and nothing would strip).
+  const namespaceOf = new Map<string, string>();
+  {
+    const byScope = new Map<string, Map<string, string>>();
+    for (const f of files) {
+      if (f.groupingPath === undefined || f.groupingPath === '') continue;
+      const scope = multiPackage && layout !== undefined ? layout.packageOf(f.id).root : '';
+      const scoped = byScope.get(scope) ?? byScope.set(scope, new Map()).get(scope)!;
+      scoped.set(f.id, f.groupingPath);
+    }
+    for (const scoped of byScope.values()) {
+      for (const [id, rest] of stripCommonPrefix(scoped)) namespaceOf.set(id, rest);
+    }
+  }
+
   if (!multiPackage) {
     // ── Whole-graph path (pre-Stage-C, byte-identical) ─────────────────────
     // Build the undirected weighted graph for Louvain (internal↔internal edges).
@@ -379,7 +468,11 @@ export function clusterGraph(
   for (const [moduleId, fileIds] of forcedGroups) {
     usedIds.add(moduleId);
     for (const f of fileIds) fileModuleMap[f] = moduleId;
-    modules.push(makeInternalModule(moduleId, fileIds, locById));
+    const mod = makeInternalModule(moduleId, fileIds, locById);
+    // The ID stays user-authored; only its subsystem box is namespace-derived.
+    const gdir = deriveNamespaceDir(fileIds, namespaceOf);
+    if (gdir !== null) mod.groupingDir = gdir;
+    modules.push(mod);
   }
 
   // Community modules. Ids: root-scope communities keep the bare derived id
@@ -391,18 +484,23 @@ export function clusterGraph(
     const { pkg, fileIds } = grp;
     let id: string;
     if (pkg === null || pkg.root === '') {
-      id = deriveModuleId(fileIds, usedIds);
+      id = deriveModuleId(fileIds, usedIds, namespaceOf);
     } else if (grp.sole) {
       id = reserveId(pkg.slug, usedIds);
     } else {
       const rel = fileIds.map((f) =>
         f.startsWith(`${pkg.root}/`) ? f.slice(pkg.root.length + 1) : f,
       );
-      const seg = slugify(deriveSegment(rel)) || 'module';
+      // The namespace is already package-scoped (its prefix was stripped
+      // per package above), so it needs no package-relative rewrite of its own.
+      const derived = deriveNamespaceSegment(fileIds, namespaceOf) ?? deriveSegment(rel);
+      const seg = slugify(derived) || 'module';
       id = reserveId(`${pkg.slug}-${seg}`, usedIds);
     }
     for (const f of fileIds) fileModuleMap[f] = id;
     const mod = makeInternalModule(id, fileIds, locById);
+    const gdir = deriveNamespaceDir(fileIds, namespaceOf);
+    if (gdir !== null) mod.groupingDir = gdir;
     if (pkg !== null && pkg.root !== '') {
       mod.packageId = pkg.slug;
       mod.packageName = pkg.name; // humanized for the subsystem box label

@@ -36,6 +36,7 @@ import type { GraphExtractor, NormalizedGraph } from './types.js';
 import { graphFromState, type FileRecord, type FileGraphState, type FileEdgeRef } from './file-graph.js';
 import { listSourceFiles } from './language.js';
 import { isJavaStdlib } from './java-stdlib.js';
+import { packageGroupingPath } from './jvm-package.js';
 import { readJavaDeps } from './java-manifest.js';
 import {
   scanPackage,
@@ -257,9 +258,11 @@ export function extractFileRecord(
     addExternal(packageOf(imp.fqn));
   }
 
+  const groupingPath = packageGroupingPath(filePkg);
   return {
     loc: locOf(text),
     language: 'java',
+    ...(groupingPath !== undefined ? { groupingPath } : {}),
     imports: [...importWeights].map(([to, weight]) => ({ to, weight })),
     externals: [...externalWeights].map(([id, v]) => ({ id, specifier: v.specifier, weight: v.weight })),
     // v2: constructor (`new Foo(…)`) + static (`Foo.member(…)`) call-site heads resolved
@@ -322,7 +325,7 @@ export class JavaExtractor implements GraphExtractor {
         pkgToFiles,
         internalPackages,
         declaredGroups,
-        pkgByFile.get(id) ?? '',
+        pkgByFile.get(id),
       );
     }
 

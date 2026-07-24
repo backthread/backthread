@@ -8,6 +8,8 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { KotlinExtractor } from './kotlin-adapter.js';
+import { scanPackage } from './kotlin-scan.js';
+import { packageGroupingPath } from './jvm-package.js';
 import type { NormalizedGraph } from './types.js';
 
 const dirs: string[] = [];
@@ -113,5 +115,35 @@ describe('KotlinExtractor', () => {
     const g = await new KotlinExtractor().extract(dir);
     expect(g.files).toEqual([]);
     expect(g.edges).toEqual([]);
+  });
+});
+
+describe('groupingPath (the declared package as dirs)', () => {
+  it('emits the package for every file, and nothing for the unnamed package', async () => {
+    const dir = await repo({
+      'build.gradle.kts': 'dependencies { implementation("io.ktor:ktor-server-core:2.0.0") }\n',
+      'src/main/kotlin/com/acme/orders/OrderApi.kt': 'package com.acme.orders\nclass OrderApi\n',
+      'src/main/kotlin/com/acme/billing/Invoice.kt': 'package com.acme.billing\nclass Invoice\n',
+      'src/main/kotlin/Bootstrap.kt': 'class Bootstrap\n',
+    });
+    const g = await new KotlinExtractor().extract(dir);
+    const by = new Map(g.files.map((f) => [f.id, f.groupingPath]));
+    expect(by.get('src/main/kotlin/com/acme/orders/OrderApi.kt')).toBe('com/acme/orders');
+    expect(by.get('src/main/kotlin/com/acme/billing/Invoice.kt')).toBe('com/acme/billing');
+    expect(by.get('src/main/kotlin/Bootstrap.kt')).toBeUndefined();
+  });
+
+  it('the pass-1 → pass-2 package threading matches a fresh scan', async () => {
+    // The threading is the adapter's only behavioural change here: pass 2 now receives
+    // the package pass 1 already computed instead of re-scanning. Same value, or the
+    // grouping path would silently differ from the FQN registry the edges use.
+    const dir = await repo({
+      'build.gradle.kts': 'dependencies { implementation("io.ktor:ktor-server-core:2.0.0") }\n',
+      'src/main/kotlin/com/acme/a/A.kt': '// package fake.one\npackage com.acme.a\n\nclass A\n',
+    });
+    const g = await new KotlinExtractor().extract(dir);
+    const f = g.files.find((x) => x.id === 'src/main/kotlin/com/acme/a/A.kt')!;
+    expect(f.groupingPath).toBe(packageGroupingPath(scanPackage('package com.acme.a\nclass A\n')));
+    expect(f.groupingPath).toBe('com/acme/a');
   });
 });

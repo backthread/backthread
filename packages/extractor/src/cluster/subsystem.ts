@@ -87,6 +87,14 @@ export const PKG_SUBSYSTEM_PREFIX = 'pkg:';
 // re-group its own modules). domain-grouping.ts imports this constant so there is one
 // definition of the `domain:` namespace.
 export const DOMAIN_SUBSYSTEM_PREFIX = 'domain:';
+// A NAMESPACE-derived box (a Java/Kotlin `package` segment) — kept in its OWN
+// reserved namespace rather than reusing `dir:`. On a polyglot repo the two id spaces
+// would otherwise alias: a Java package segment `web` and a physical `web/` directory
+// both slugify to `web`, silently merging two unrelated module sets into one box
+// (REVIEWER, PR #145). Reserved (non-framework) like `dir:`/`pkg:`/`domain:`, so
+// isFrameworkSubsystemId treats it as re-groupable by the LLM domain-pass and
+// bareSubsystemSlug strips it for the naming heuristic.
+export const NS_SUBSYSTEM_PREFIX = 'ns:';
 
 // The reserved NON-framework subsystem namespaces. A colon-bearing
 // subsystem id under one of these is directory/package-derived or LLM domain-pass-
@@ -97,6 +105,7 @@ export const RESERVED_SUBSYSTEM_PREFIXES: readonly string[] = [
   DIR_SUBSYSTEM_PREFIX,
   PKG_SUBSYSTEM_PREFIX,
   DOMAIN_SUBSYSTEM_PREFIX,
+  NS_SUBSYSTEM_PREFIX,
 ];
 
 // The bare slug behind a (possibly namespaced) subsystem id — strips a reserved
@@ -209,8 +218,9 @@ export function humanizeDir(segment: string): string {
 // Build a Subsystem from a raw directory segment (namespaced slug id + humanized
 // name). the id is `dir:<slug>` so it can never equal a module id (a bare
 // slug); the display name is unchanged.
-function subsystemFromDir(segment: string): Subsystem {
-  const id = DIR_SUBSYSTEM_PREFIX + (slugify(segment) || 'module');
+function subsystemFromDir(segment: string, namespaceDerived: boolean): Subsystem {
+  const prefix = namespaceDerived ? NS_SUBSYSTEM_PREFIX : DIR_SUBSYSTEM_PREFIX;
+  const id = prefix + (slugify(segment) || 'module');
   return { id, name: humanizeDir(segment) };
 }
 
@@ -280,10 +290,29 @@ export function computeSubsystems(modules: ReadonlyArray<ClusteredModule>): Map<
   // Distinct directory-box slugs, only to COUNT them for the flat decision below
   // (a bijection with the namespaced ids — so the bare slug is fine here).
   const dirSubsystemIds = new Set<string>();
+  // Which modules' boxes came from a declared NAMESPACE rather than a directory —
+  // they live in a separate id namespace so the two can never alias (see
+  // NS_SUBSYSTEM_PREFIX), and the flat-repo count below must not merge them either.
+  const namespaceDerived = new Set<string>();
   for (const m of internal) {
-    const dir = dominantTopLevelDir(m.fileIds);
+    // A NAMESPACE-derived box (Java/Kotlin `package`) wins over the
+    // physical dominant top-level dir, which on a JVM repo is the build source root
+    // (`src/main/java/…` → `main`) for every file in the repo — one mega-box that
+    // then tripped the flat-repo refinement below into per-module "Main 93 2"
+    // subsystems. Absent for every other language ⇒ unchanged behavior.
+    //
+    // NOTE a module belonging to a workspace PACKAGE never reaches here — it was
+    // routed to packageSubsystem above. That is deliberate: the locked precedence is
+    // framework > workspace > directory, so a Gradle module's declared boundary wins
+    // over its packages, and the namespace fix applies to module IDS there but not to
+    // the box (which stays the package's).
+    const ns = m.groupingDir ?? null;
+    const dir = ns ?? dominantTopLevelDir(m.fileIds);
     dirOf.set(m.id, dir);
-    if (dir !== null) dirSubsystemIds.add(slugify(dir) || 'module');
+    if (ns !== null) namespaceDerived.add(m.id);
+    if (dir !== null) {
+      dirSubsystemIds.add((ns !== null ? 'ns:' : 'dir:') + (slugify(dir) || 'module'));
+    }
   }
 
   // FLAT-REPO REFINEMENT trigger: the directory heuristic collapses the whole
@@ -294,7 +323,7 @@ export function computeSubsystems(modules: ReadonlyArray<ClusteredModule>): Map<
   for (const m of internal) {
     const dir = dirOf.get(m.id) ?? null;
     if (!flat && dir !== null) {
-      out.set(m.id, subsystemFromDir(dir));
+      out.set(m.id, subsystemFromDir(dir, namespaceDerived.has(m.id)));
     } else {
       // Refinement: the module's own id drives its subsystem. The id is already a
       // slug (cluster/louvain.ts), and stable across snapshots — exactly the

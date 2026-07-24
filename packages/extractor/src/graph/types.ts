@@ -16,6 +16,27 @@ export interface GraphFile {
   id: string;
   loc: number; // lines of code — a size/centrality signal for god-node detection
   language: string; // 'ts' | 'tsx' | 'js' | 'jsx' | …
+  /**
+   * The file's DECLARED namespace as a directory path (`com/acme/orders/billing`),
+   * when the language has one that is more meaningful for GROUPING than its
+   * physical path. Set ONLY by the JVM adapters (Java + Kotlin `package`); absent
+   * for every other language.
+   *
+   * WHY: Java/Kotlin bury the meaningful structure under two layers of ceremony —
+   * the build source root (`src/main/java/…`, the Maven Standard Directory Layout,
+   * which Gradle inherits) and the reverse-DNS package prefix (`com/company/product/…`
+   * shared by every file). Clustering derives a module's id and its subsystem box
+   * from the dominant leading path segment, so on a JVM repo EVERY file collapsed
+   * onto the single segment `main` — 100+ modules called `main-N` under subsystems
+   * named "Main 93 2".
+   *
+   * The fix is deliberately scoped to the adapters that KNOW the namespace rather
+   * than teaching shared clustering to strip build source roots: a path-shape rule
+   * would touch every language and would be brittle against Android / legacy Maven /
+   * multi-source-set layouts. A file with no `groupingPath` keeps the exact
+   * pre-existing physical-path behavior, so non-JVM output is byte-identical.
+   */
+  groupingPath?: string;
 }
 
 // Structural edge kind. This is the DETERMINISTIC kind (does an import/call
