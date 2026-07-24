@@ -33,7 +33,7 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
  * everywhere the caller can't yet supply a language (the incremental diff
  * classifier is TS-only today).
  */
-export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php' | 'kotlin' | 'swift';
+export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php' | 'kotlin' | 'swift' | 'java';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
@@ -98,6 +98,16 @@ export const KOTLIN_SOURCE_EXTENSIONS = ['kt'] as const;
  * so the scanner skips it explicitly.
  */
 export const SWIFT_SOURCE_EXTENSIONS = ['swift'] as const;
+
+/**
+ * Java source extension the hand-rolled Java scanner parses: just `.java`. The special
+ * `module-info.java` (a JPMS module descriptor — `module { requires … }`, no type decls)
+ * and `package-info.java` (package-level annotations/Javadoc, no type decls) match `.java`
+ * but carry no import backbone worth a diagram box, so they're rejected by an explicit
+ * guard in isSourceFilePath (the Blade/Package.swift precedent). All plain-text Java the
+ * syntactic scanner reads; no native grammar, no JVM, no repo-code execution.
+ */
+export const JAVA_SOURCE_EXTENSIONS = ['java'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -262,6 +272,30 @@ export const SWIFT_EXCLUDE_DIRS = [
 ] as const;
 
 /**
+ * Directories the Java scanner's walk excludes: Maven's build output (`target`), Gradle's
+ * build output + caches (`build`, `.gradle`), the IntelliJ project dir (`.idea`), the
+ * Gradle convention-plugin dirs (`buildSrc`, `build-logic` — build TOOLING, not
+ * application code; an accepted degrade), and any JS-bundler deps. Mirrors the other
+ * languages' EXCLUDE_DIRS role — none hold first-party application source (Java source
+ * lives under `src/`; `target`/`build` hold compiled `.class` + generated output, never
+ * hand-written `.java`). `.gradle`/`.idea` are also caught by the dot-segment skip; listed
+ * explicitly so the policy is self-contained. `node_modules` is kept because a Java repo
+ * can ship a JS toolchain (a bundled frontend, docs). Eclipse's `bin/` is NOT excluded —
+ * it holds `.class` (never enumerated) and the generic name would risk dropping a legit
+ * `bin` package.
+ */
+export const JAVA_EXCLUDE_DIRS = [
+  'target',
+  'build',
+  '.gradle',
+  '.idea',
+  'buildSrc',
+  'build-logic',
+  'node_modules',
+  '.git',
+] as const;
+
+/**
  * Xcode CONTAINER directory suffixes — bundle-like dirs whose name ends with one of
  * these. They hold generated project metadata / assets / playground scratch, never
  * first-party Swift source, so any `.swift` under them is excluded. Suffix-matched
@@ -277,6 +311,7 @@ const DART_SOURCE_EXT_RE = new RegExp(`\\.(${DART_SOURCE_EXTENSIONS.join('|')})$
 const PHP_SOURCE_EXT_RE = new RegExp(`\\.(${PHP_SOURCE_EXTENSIONS.join('|')})$`);
 const KOTLIN_SOURCE_EXT_RE = new RegExp(`\\.(${KOTLIN_SOURCE_EXTENSIONS.join('|')})$`);
 const SWIFT_SOURCE_EXT_RE = new RegExp(`\\.(${SWIFT_SOURCE_EXTENSIONS.join('|')})$`);
+const JAVA_SOURCE_EXT_RE = new RegExp(`\\.(${JAVA_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
 const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
@@ -285,12 +320,17 @@ const DART_EXCLUDE_SET = new Set<string>(DART_EXCLUDE_DIRS);
 const PHP_EXCLUDE_SET = new Set<string>(PHP_EXCLUDE_DIRS);
 const KOTLIN_EXCLUDE_SET = new Set<string>(KOTLIN_EXCLUDE_DIRS);
 const SWIFT_EXCLUDE_SET = new Set<string>(SWIFT_EXCLUDE_DIRS);
+const JAVA_EXCLUDE_SET = new Set<string>(JAVA_EXCLUDE_DIRS);
 
 // A Blade view (`*.blade.php`) ends in `.php` but is a template with no import
 // backbone — an edgeless leaf. Rejected outright so it never becomes a graph node.
 const BLADE_RE = /\.blade\.php$/;
 // Vite/Mix build output under public/ — an asset dir, not first-party PHP.
 const PHP_PUBLIC_BUILD_RE = /(^|\/)public\/build\//;
+// `module-info.java` (a JPMS module descriptor) / `package-info.java` (package-level
+// annotations + Javadoc) match `.java` but declare no type and carry no import backbone
+// worth a diagram box — rejected so neither becomes an edgeless leaf node.
+const JAVA_NON_TYPE_RE = /(^|\/)(module-info|package-info)\.java$/;
 
 // Extension-less Ruby source basenames. A `Rakefile` is Ruby; `config.ru` already
 // matches the `.ru` extension. `Gemfile` is intentionally NOT here — it's a
@@ -335,7 +375,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
                 ? KOTLIN_SOURCE_EXT_RE
                 : lang === 'swift'
                   ? SWIFT_SOURCE_EXT_RE
-                  : SOURCE_EXT_RE;
+                  : lang === 'java'
+                    ? JAVA_SOURCE_EXT_RE
+                    : SOURCE_EXT_RE;
   const excludes =
     lang === 'python'
       ? PYTHON_EXCLUDE_SET
@@ -351,7 +393,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
                 ? KOTLIN_EXCLUDE_SET
                 : lang === 'swift'
                   ? SWIFT_EXCLUDE_SET
-                  : EXCLUDE_SET;
+                  : lang === 'java'
+                    ? JAVA_EXCLUDE_SET
+                    : EXCLUDE_SET;
   // Ruby has extension-less source files (a `Rakefile`); every other language —
   // and every other Ruby file — must match its language's source extension.
   const base = path.slice(path.lastIndexOf('/') + 1);
@@ -359,6 +403,8 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
   // PHP: Blade views end in `.php` but are edgeless templates, and public/build
   // holds bundled front-end assets — neither is a first-party PHP graph node.
   if (lang === 'php' && (BLADE_RE.test(path) || PHP_PUBLIC_BUILD_RE.test(path))) return false;
+  // Java: module-info.java / package-info.java match `.java` but are not architectural types.
+  if (lang === 'java' && JAVA_NON_TYPE_RE.test(path)) return false;
   for (const seg of path.split('/')) {
     if (seg.startsWith('.')) return false;
     if (excludes.has(seg)) return false;
