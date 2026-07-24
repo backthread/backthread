@@ -56,6 +56,24 @@ export interface ModuleSignal {
   id: string;
   summary: string;
   whys: string[];
+  /**
+   * The module's DISPLAY LABEL ("Slack Attachment", "Bot Command Registry").
+   * Optional and additive.
+   *
+   * WHY: `whys` comes from linked decisions + changelog, so a repo nobody has
+   * captured decisions in yet (a freshly-connected one) hands the model nothing but
+   * an id and a one-line summary. The label is already on every snapshot node, costs
+   * nothing to include, and is often the single most domain-bearing string a module
+   * has — especially on a JVM repo, where the id is a package slug shared by dozens
+   * of modules.
+   *
+   * Deliberately NOT part of `moduleSignature`. That hash is the warm-start cache
+   * key, so folding the label in would re-assign EVERY module the first time a
+   * labelling pass reworded anything — a full re-pass, and a churned partition, for
+   * a cosmetic edit. The accepted cost is the converse: a module whose label changed
+   * but whose summary did not keeps its cached group until something else moves it.
+   */
+  label?: string;
 }
 
 /**
