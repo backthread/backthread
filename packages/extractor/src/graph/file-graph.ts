@@ -33,7 +33,7 @@ import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
  * everywhere the caller can't yet supply a language (the incremental diff
  * classifier is TS-only today).
  */
-export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php' | 'kotlin' | 'swift' | 'java';
+export type SourceLang = 'ts' | 'python' | 'ruby' | 'elixir' | 'dart' | 'php' | 'kotlin' | 'swift' | 'java' | 'go';
 
 /** TS/JS source extensions the ts-morph adapter parses (mirror of its SOURCE_GLOBS). */
 export const SOURCE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const;
@@ -108,6 +108,15 @@ export const SWIFT_SOURCE_EXTENSIONS = ['swift'] as const;
  * syntactic scanner reads; no native grammar, no JVM, no repo-code execution.
  */
 export const JAVA_SOURCE_EXTENSIONS = ['java'] as const;
+
+/**
+ * Go source extension the hand-rolled Go scanner parses: just `.go`. Test files
+ * (`*_test.go`) match `.go` but are test scaffolding (and can even declare a separate
+ * `_test` package), so they're rejected by an explicit guard in isSourceFilePath — the
+ * dir-granular package graph should describe production packages, not their tests. `go.mod`
+ * / `go.sum` are MANIFESTS (not `.go`), so they never match.
+ */
+export const GO_SOURCE_EXTENSIONS = ['go'] as const;
 
 /** Directories the ts-morph adapter's glob excludes (mirror of the adapter's EXCLUDE_DIRS). */
 export const EXCLUDE_DIRS = [
@@ -296,6 +305,15 @@ export const JAVA_EXCLUDE_DIRS = [
 ] as const;
 
 /**
+ * Directories the Go scanner's walk excludes: the vendored dependency tree (`vendor` — the
+ * Go analogue of `node_modules`; walking it would misread vendored packages as first-party),
+ * and `testdata` (Go's convention for test fixtures — the `go` tool ignores it, and it can
+ * hold intentionally-broken `.go` samples). `node_modules` is kept because a Go repo can
+ * ship a JS toolchain (an embedded web UI). Mirrors the other languages' EXCLUDE_DIRS role.
+ */
+export const GO_EXCLUDE_DIRS = ['vendor', 'testdata', 'node_modules', '.git'] as const;
+
+/**
  * Xcode CONTAINER directory suffixes — bundle-like dirs whose name ends with one of
  * these. They hold generated project metadata / assets / playground scratch, never
  * first-party Swift source, so any `.swift` under them is excluded. Suffix-matched
@@ -312,6 +330,7 @@ const PHP_SOURCE_EXT_RE = new RegExp(`\\.(${PHP_SOURCE_EXTENSIONS.join('|')})$`)
 const KOTLIN_SOURCE_EXT_RE = new RegExp(`\\.(${KOTLIN_SOURCE_EXTENSIONS.join('|')})$`);
 const SWIFT_SOURCE_EXT_RE = new RegExp(`\\.(${SWIFT_SOURCE_EXTENSIONS.join('|')})$`);
 const JAVA_SOURCE_EXT_RE = new RegExp(`\\.(${JAVA_SOURCE_EXTENSIONS.join('|')})$`);
+const GO_SOURCE_EXT_RE = new RegExp(`\\.(${GO_SOURCE_EXTENSIONS.join('|')})$`);
 const EXCLUDE_SET = new Set<string>(EXCLUDE_DIRS);
 const PYTHON_EXCLUDE_SET = new Set<string>(PYTHON_EXCLUDE_DIRS);
 const RUBY_EXCLUDE_SET = new Set<string>(RUBY_EXCLUDE_DIRS);
@@ -321,6 +340,9 @@ const PHP_EXCLUDE_SET = new Set<string>(PHP_EXCLUDE_DIRS);
 const KOTLIN_EXCLUDE_SET = new Set<string>(KOTLIN_EXCLUDE_DIRS);
 const SWIFT_EXCLUDE_SET = new Set<string>(SWIFT_EXCLUDE_DIRS);
 const JAVA_EXCLUDE_SET = new Set<string>(JAVA_EXCLUDE_DIRS);
+const GO_EXCLUDE_SET = new Set<string>(GO_EXCLUDE_DIRS);
+// Go test files (`*_test.go`) match `.go` but are test scaffolding — dropped like PHP Blade.
+const GO_TEST_RE = /_test\.go$/;
 
 // A Blade view (`*.blade.php`) ends in `.php` but is a template with no import
 // backbone — an edgeless leaf. Rejected outright so it never becomes a graph node.
@@ -377,7 +399,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
                   ? SWIFT_SOURCE_EXT_RE
                   : lang === 'java'
                     ? JAVA_SOURCE_EXT_RE
-                    : SOURCE_EXT_RE;
+                    : lang === 'go'
+                      ? GO_SOURCE_EXT_RE
+                      : SOURCE_EXT_RE;
   const excludes =
     lang === 'python'
       ? PYTHON_EXCLUDE_SET
@@ -395,7 +419,9 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
                   ? SWIFT_EXCLUDE_SET
                   : lang === 'java'
                     ? JAVA_EXCLUDE_SET
-                    : EXCLUDE_SET;
+                    : lang === 'go'
+                      ? GO_EXCLUDE_SET
+                      : EXCLUDE_SET;
   // Ruby has extension-less source files (a `Rakefile`); every other language —
   // and every other Ruby file — must match its language's source extension.
   const base = path.slice(path.lastIndexOf('/') + 1);
@@ -405,6 +431,8 @@ export function isSourceFilePath(path: string, lang: SourceLang = 'ts'): boolean
   if (lang === 'php' && (BLADE_RE.test(path) || PHP_PUBLIC_BUILD_RE.test(path))) return false;
   // Java: module-info.java / package-info.java match `.java` but are not architectural types.
   if (lang === 'java' && JAVA_NON_TYPE_RE.test(path)) return false;
+  // Go: *_test.go matches `.go` but is test scaffolding, not a production package file.
+  if (lang === 'go' && GO_TEST_RE.test(path)) return false;
   for (const seg of path.split('/')) {
     if (seg.startsWith('.')) return false;
     if (excludes.has(seg)) return false;
