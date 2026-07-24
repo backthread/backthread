@@ -1,6 +1,6 @@
 {
   "name": "@backthread/extractor",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Deterministic, install-free structural extraction for TypeScript, Python, Ruby, Elixir, PHP, Kotlin, Dart/Flutter, and Swift codebases — AST → communities → god-nodes → framework & infra adapters, zero LLM/DB/network.",
   "type": "module",
   "license": "MIT",
