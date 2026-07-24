@@ -28,6 +28,7 @@ import {
   hasDartManifestDeep,
   hasSwiftManifestDeep,
   hasJavaManifest,
+  hasGoManifestDeep,
 } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
@@ -83,6 +84,7 @@ let phpRegistered = false;
 let dartRegistered = false;
 let swiftRegistered = false;
 let javaRegistered = false;
+let goRegistered = false;
 
 /**
  * Register the framework adapters whose toolchain must NOT load for every repo.
@@ -157,5 +159,14 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     javaRegistered = true;
     const { registerJavaFrameworkAdapters } = await import('./register-java.js');
     registerJavaFrameworkAdapters();
+  }
+  // Go fleet — gated on a Go manifest (go.mod / go.work), nested-aware (hasGoManifestDeep)
+  // so a Go service under `backend/`/`server/` in a polyglot monorepo still loads the fleet.
+  // The scanner is hand-rolled + dep-free, so this gate is purely about not module-loading
+  // the Go adapters for a non-Go repo.
+  if (!goRegistered && hasGoManifestDeep(repoDir)) {
+    goRegistered = true;
+    const { registerGoFrameworkAdapters } = await import('./register-go.js');
+    registerGoFrameworkAdapters();
   }
 }
