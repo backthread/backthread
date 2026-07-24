@@ -53,6 +53,11 @@ const KOTLIN_MANIFESTS = [
 // `*.xcworkspace` DIRECTORY (suffix-named, so probed with a readdir like `*.gemspec`)
 // rather than a fixed filename — handled in hasSwiftManifest below.
 const SWIFT_MANIFESTS = ['Package.swift', 'Package.resolved', 'Podfile', 'Podfile.lock'];
+// Go modules: `go.mod` (the module + its deps) is the decisive Go-repo manifest; `go.work`
+// marks a multi-module workspace root (which may carry no root go.mod). Both are unique to
+// Go — no other language uses them — so there is no cross-language collision (unlike the
+// Java/Kotlin Gradle overlap).
+const GO_MANIFESTS = ['go.mod', 'go.work'];
 
 /**
  * Does the repo root declare a Ruby project? A `Gemfile` / `Gemfile.lock`, or any
@@ -308,6 +313,20 @@ export function hasDartManifestDeep(repoDir: string): boolean {
 }
 
 /**
+ * Does the repo root declare a Go module/workspace? A `go.mod` (the module + its
+ * dependencies) or a `go.work` (a multi-module workspace root, which may carry no root
+ * go.mod). Both are unique to Go, so unlike the Java/Kotlin Gradle overlap there is no
+ * cross-language collision — a cheap existsSync check is decisive. Shared by the
+ * extractor's language detection AND the Go framework-fleet registration gate, so the "is
+ * this Go?" answer has ONE source. (A nested single-module repo whose go.mod sits below the
+ * root is still detected via the dominant-source-count fallback + the adapter's own nested
+ * go.mod finder; this root check only drives the fast path + the fleet gate.)
+ */
+export function hasGoManifest(repoDir: string): boolean {
+  return GO_MANIFESTS.some((m) => existsSync(resolve(repoDir, m)));
+}
+
+/**
  * Repo-relative POSIX paths of every source file for `lang` under `root`.
  * Walks the tree directly (the Pyright adapter needs an explicit file list; it
  * doesn't glob like ts-morph). Skips excluded + dot-prefixed directories and
@@ -377,6 +396,7 @@ function countSources(
   kotlin: number;
   swift: number;
   java: number;
+  go: number;
 } {
   let ts = 0;
   let python = 0;
@@ -387,6 +407,7 @@ function countSources(
   let kotlin = 0;
   let swift = 0;
   let java = 0;
+  let go = 0;
   const absRoot = resolve(root);
   const tsExcl = new Set<string>(EXCLUDE_DIRS);
   const pyExcl = new Set<string>(PYTHON_EXCLUDE_DIRS);
@@ -397,7 +418,8 @@ function countSources(
   const ktExcl = new Set<string>(KOTLIN_EXCLUDE_DIRS);
   const swExcl = new Set<string>(SWIFT_EXCLUDE_DIRS);
   const jaExcl = new Set<string>(JAVA_EXCLUDE_DIRS);
-  const total = (): number => ts + python + ruby + elixir + dart + php + kotlin + swift + java;
+  const goExcl = new Set<string>(GO_EXCLUDE_DIRS);
+  const total = (): number => ts + python + ruby + elixir + dart + php + kotlin + swift + java + go;
   const walk = (dir: string): void => {
     if (total() >= cap) return;
     let entries: import('node:fs').Dirent[];
@@ -426,6 +448,7 @@ function countSources(
           ktExcl.has(ent.name) ||
           swExcl.has(ent.name) ||
           jaExcl.has(ent.name) ||
+          goExcl.has(ent.name) ||
           ent.name.endsWith('.xcodeproj') ||
           ent.name.endsWith('.xcworkspace') ||
           ent.name.endsWith('.xcassets') ||
@@ -445,11 +468,12 @@ function countSources(
         else if (isSourceFilePath(id, 'kotlin')) kotlin++;
         else if (isSourceFilePath(id, 'swift')) swift++;
         else if (isSourceFilePath(id, 'java')) java++;
+        else if (isSourceFilePath(id, 'go')) go++;
       }
     }
   };
   walk(absRoot);
-  return { ts, python, ruby, elixir, dart, php, kotlin, swift, java };
+  return { ts, python, ruby, elixir, dart, php, kotlin, swift, java, go };
 }
 
 /**
@@ -473,18 +497,22 @@ export function detectRepoLanguage(repoDir: string): SourceLang {
   const hasKotlin = hasKotlinManifest(repoDir);
   const hasSwift = hasSwiftManifest(repoDir);
   const hasJava = hasJavaManifest(repoDir);
-  if (hasPy && !hasTs && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava) return 'python';
-  if (hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava) return 'ts';
-  if (hasRuby && !hasTs && !hasPy && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava) return 'ruby';
-  if (hasElixir && !hasTs && !hasPy && !hasRuby && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava) return 'elixir';
-  if (hasDart && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasPhp && !hasKotlin && !hasSwift && !hasJava) return 'dart';
-  if (hasPhp && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasKotlin && !hasSwift && !hasJava) return 'php';
-  if (hasKotlin && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasSwift && !hasJava) return 'kotlin';
-  if (hasSwift && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasJava) return 'swift';
+  const hasGo = hasGoManifest(repoDir);
+  if (hasPy && !hasTs && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava && !hasGo) return 'python';
+  if (hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava && !hasGo) return 'ts';
+  if (hasRuby && !hasTs && !hasPy && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava && !hasGo) return 'ruby';
+  if (hasElixir && !hasTs && !hasPy && !hasRuby && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava && !hasGo) return 'elixir';
+  if (hasDart && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasPhp && !hasKotlin && !hasSwift && !hasJava && !hasGo) return 'dart';
+  if (hasPhp && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasKotlin && !hasSwift && !hasJava && !hasGo) return 'php';
+  if (hasKotlin && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasSwift && !hasJava && !hasGo) return 'kotlin';
+  if (hasSwift && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasJava && !hasGo) return 'swift';
   // Java keys off `.java` presence, which co-fires with the Kotlin Gradle manifest — so a
   // mixed Java+Kotlin (or Java+TS) repo takes neither fast-path and the dominant source
   // count below decides. Only a Java repo with no competing manifest reaches this line.
-  if (hasJava && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift) return 'java';
+  if (hasJava && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasGo) return 'java';
+  // Go's go.mod/go.work are unique to Go (no collision), so a single-manifest Go repo takes
+  // this fast path; a Go+TS repo (an embedded web UI) co-fires and the dominant count decides.
+  if (hasGo && !hasTs && !hasPy && !hasRuby && !hasElixir && !hasDart && !hasPhp && !hasKotlin && !hasSwift && !hasJava) return 'go';
   return pickDominant(countSources(repoDir));
 }
 
@@ -503,6 +531,7 @@ function pickDominant(counts: {
   kotlin: number;
   swift: number;
   java: number;
+  go: number;
 }): SourceLang {
   const ranked: Array<[SourceLang, number]> = [
     ['ts', counts.ts],
@@ -514,6 +543,7 @@ function pickDominant(counts: {
     ['kotlin', counts.kotlin],
     ['swift', counts.swift],
     ['java', counts.java],
+    ['go', counts.go],
   ];
   let best: SourceLang = 'ts';
   let bestCount = -1;
@@ -543,7 +573,7 @@ const MULTI_MIN_FRACTION = 0.15;
  * is deterministic.
  */
 export function detectRepoLanguages(repoDir: string): SourceLang[] {
-  const { ts, python, ruby, elixir, dart, php, kotlin, swift, java } = countSources(repoDir);
+  const { ts, python, ruby, elixir, dart, php, kotlin, swift, java, go } = countSources(repoDir);
   const all: Array<{ lang: SourceLang; count: number }> = [
     { lang: 'ts', count: ts },
     { lang: 'python', count: python },
@@ -554,10 +584,11 @@ export function detectRepoLanguages(repoDir: string): SourceLang[] {
     { lang: 'kotlin', count: kotlin },
     { lang: 'swift', count: swift },
     { lang: 'java', count: java },
+    { lang: 'go', count: go },
   ];
   const counts = all.filter((l) => l.count > 0);
   if (counts.length <= 1) return [detectRepoLanguage(repoDir)];
-  const max = Math.max(ts, python, ruby, elixir, dart, php, kotlin, swift, java);
+  const max = Math.max(ts, python, ruby, elixir, dart, php, kotlin, swift, java, go);
   const present = counts.filter((l) => l.count >= MULTI_MIN_FILES && l.count / max >= MULTI_MIN_FRACTION);
   if (present.length <= 1) return [detectRepoLanguage(repoDir)];
   return present
@@ -578,5 +609,6 @@ export function graphLanguage(graph: NormalizedGraph): SourceLang {
   if (graph.files.some((f) => f.language === 'kt')) return 'kotlin';
   if (graph.files.some((f) => f.language === 'swift')) return 'swift';
   if (graph.files.some((f) => f.language === 'java')) return 'java';
+  if (graph.files.some((f) => f.language === 'go')) return 'go';
   return 'ts';
 }

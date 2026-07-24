@@ -113,5 +113,9 @@ async function selectAdapter(language: SourceLang): Promise<GraphExtractor> {
     const { JavaExtractor } = await import('./java-adapter.js');
     return new JavaExtractor();
   }
+  if (language === 'go') {
+    const { GoExtractor } = await import('./go-adapter.js');
+    return new GoExtractor();
+  }
   return new TsMorphExtractor();
 }
