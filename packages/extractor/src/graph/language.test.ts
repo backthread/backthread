@@ -15,6 +15,7 @@ import {
   hasComposerManifest,
   hasSwiftManifest,
   hasSwiftManifestDeep,
+  hasJavaManifest,
 } from './language.js';
 import type { NormalizedGraph } from './types.js';
 
@@ -172,6 +173,51 @@ describe('detectRepoLanguage', () => {
     expect(detectRepoLanguage(dir)).toBe('ts');
     expect(detectRepoLanguages(dir)).toEqual(['ts']);
   });
+
+  it('selects java for a Maven pom.xml repo with no other manifest', async () => {
+    const dir = await repo({
+      'pom.xml': '<project><groupId>com.acme</groupId></project>',
+      'src/main/java/com/acme/App.java': 'package com.acme;\npublic class App {}\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('java');
+  });
+
+  it('selects java for a Gradle Java repo (build.gradle also trips Kotlin — .java dominates)', async () => {
+    const dir = await repo({
+      'build.gradle': 'dependencies { }',
+      'settings.gradle': "rootProject.name = 'app'",
+      'src/main/java/com/acme/A.java': 'package com.acme;\npublic class A {}\n',
+      'src/main/java/com/acme/B.java': 'package com.acme;\npublic class B {}\n',
+      'src/main/java/com/acme/C.java': 'package com.acme;\npublic class C {}\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('java');
+  });
+
+  it('keeps a pure-Kotlin Gradle repo as kotlin (no .java → Java never hijacks)', async () => {
+    const dir = await repo({
+      'build.gradle.kts': 'dependencies { }',
+      'src/main/kotlin/com/acme/A.kt': 'package com.acme\nclass A\n',
+      'src/main/kotlin/com/acme/B.kt': 'package com.acme\nclass B\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('kotlin');
+  });
+
+  it('yields the dominant half for a mixed Java+Kotlin Gradle repo (documented degrade)', async () => {
+    const dir = await repo({
+      'build.gradle': 'dependencies { }',
+      'src/main/java/com/acme/A.java': 'package com.acme;\npublic class A {}\n',
+      'src/main/java/com/acme/B.java': 'package com.acme;\npublic class B {}\n',
+      'src/main/java/com/acme/C.java': 'package com.acme;\npublic class C {}\n',
+      'src/main/kotlin/com/acme/K.kt': 'package com.acme\nclass K\n',
+    });
+    expect(detectRepoLanguage(dir)).toBe('java');
+  });
+
+  it('does not detect java for a TS repo that ships no .java (hasJavaManifest isolation)', async () => {
+    const dir = await repo({ 'package.json': '{"name":"x"}', 'src/index.ts': 'export const x=1;\n' });
+    expect(hasJavaManifest(dir)).toBe(false);
+    expect(detectRepoLanguage(dir)).toBe('ts');
+  });
 });
 
 describe('listSourceFiles', () => {
@@ -290,6 +336,10 @@ describe('detectRepoLanguages (multi-language)', () => {
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`lib/my_app/m${i}.ex`, `defmodule M${i} do\nend\n`]));
   const php = (n: number): Record<string, string> =>
     Object.fromEntries(Array.from({ length: n }, (_, i) => [`app/M${i}.php`, `<?php\nnamespace App;\nclass M${i} {}\n`]));
+  const ja = (n: number): Record<string, string> =>
+    Object.fromEntries(
+      Array.from({ length: n }, (_, i) => [`src/main/java/com/acme/M${i}.java`, `package com.acme;\npublic class M${i} {}\n`]),
+    );
 
   it('returns a SINGLE language for a single-language repo (no behavior change)', async () => {
     expect(await detectRepoLanguages(await repo({ 'package.json': '{}', ...ts(6) }))).toEqual(['ts']);
@@ -324,6 +374,11 @@ describe('detectRepoLanguages (multi-language)', () => {
     expect(detectRepoLanguages(dir)).toEqual(['ts', 'python']);
   });
 
+  it('returns BOTH languages (ts dominant) for a Java (Maven) backend + large TS frontend', async () => {
+    const dir = await repo({ 'pom.xml': '<project><groupId>com.acme</groupId></project>', 'package.json': '{}', ...ja(20), ...ts(40) });
+    expect(detectRepoLanguages(dir)).toEqual(['ts', 'java']);
+  });
+
   it('orders by dominance (python-heavy → python first)', async () => {
     const dir = await repo({ 'package.json': '{}', 'backend/pyproject.toml': '[project]\nname="be"\n', ...ts(15), ...py(40) });
     expect(detectRepoLanguages(dir)).toEqual(['python', 'ts']);
@@ -337,7 +392,7 @@ describe('graphLanguage', () => {
     edges: [],
     externals: [],
   });
-  it('is python for py/pyi, ruby for rb, elixir for ex/exs/heex, php for php, swift for swift, else ts', () => {
+  it('is python for py/pyi, ruby for rb, elixir for ex/exs/heex, php for php, swift for swift, java for java, else ts', () => {
     expect(graphLanguage(g(['ts', 'tsx']))).toBe('ts');
     expect(graphLanguage(g(['py']))).toBe('python');
     expect(graphLanguage(g(['pyi']))).toBe('python');
@@ -347,6 +402,7 @@ describe('graphLanguage', () => {
     expect(graphLanguage(g(['heex']))).toBe('elixir');
     expect(graphLanguage(g(['php']))).toBe('php');
     expect(graphLanguage(g(['swift']))).toBe('swift');
+    expect(graphLanguage(g(['java']))).toBe('java');
     expect(graphLanguage(g([]))).toBe('ts');
   });
 });
