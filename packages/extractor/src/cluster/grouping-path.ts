@@ -70,6 +70,12 @@ export function commonPrefixSegments(paths: readonly string[]): string[] {
  * A file with NO namespace at all is absent from the result and falls back to its
  * physical path.
  *
+ * NOTE the visible consequence of the app-entry rule: that file gets its OWN
+ * subsystem box, named after the namespace root — "Petclinic" for
+ * `org.springframework.samples.petclinic`, or a bare org name like "Acme" for a
+ * `com.acme` prefix. That is a real (if small) box beside the feature boxes, and it
+ * is still strictly better than the stray "Main" box it replaces.
+ *
  * THE GUARD: if every surviving remainder is the SAME, the namespace distinguishes
  * nothing (a repo whose files all live in one package), so an empty map is returned
  * and the caller keeps its pre-existing physical-path behavior wholesale. This is
@@ -78,20 +84,41 @@ export function commonPrefixSegments(paths: readonly string[]): string[] {
 export function stripCommonPrefix(
   pathById: ReadonlyMap<string, string>,
 ): Map<string, string> {
-  // Sorted for determinism — the prefix is order-independent, but keeping the
+  // Sorted for determinism — each prefix is order-independent, but keeping the
   // iteration stable makes the whole derivation reproducible by inspection.
   const ids = [...pathById.keys()].sort();
-  const prefix = commonPrefixSegments(ids.map((id) => pathById.get(id) ?? ''));
-  const out = new Map<string, string>();
+
+  // PER-ROOT, not repo-wide (REVIEWER, PR #145). Requiring the prefix to be
+  // UNIVERSAL made one outlier file disable the strip for the entire repo: add a
+  // generated `org.other.gen` protobuf, a shaded vendor package, or an
+  // `org.example` sample to a `com.acme.*` repo and the common prefix is empty, so
+  // nothing strips and every box collapses onto `Com`/`Org` — the same
+  // one-meaningless-mega-box symptom this module exists to remove, and a
+  // cross-snapshot stability break besides (adding or deleting that single file
+  // would retroactively rename every subsystem box as the time slider scrubs).
+  // Bucketing by first segment makes each namespace root strip its own prefix, so
+  // an outlier can only ever affect its own bucket.
+  const byRoot = new Map<string, string[]>();
   for (const id of ids) {
     const segs = segmentsOf(pathById.get(id) ?? '');
     if (segs.length === 0) continue; // no namespace declared → physical fallback
-    const rest = segs.slice(prefix.length);
-    out.set(id, rest.length > 0 ? rest.join('/') : (prefix[prefix.length - 1] ?? ''));
+    (byRoot.get(segs[0]) ?? byRoot.set(segs[0], []).get(segs[0])!).push(id);
   }
-  const distinct = new Set(out.values());
-  if (distinct.size <= 1) return new Map();
-  return out;
+
+  const out = new Map<string, string>();
+  for (const rootIds of byRoot.values()) {
+    const prefix = commonPrefixSegments(rootIds.map((id) => pathById.get(id) ?? ''));
+    for (const id of rootIds) {
+      const segs = segmentsOf(pathById.get(id) ?? '');
+      const rest = segs.slice(prefix.length);
+      out.set(id, rest.length > 0 ? rest.join('/') : (prefix[prefix.length - 1] ?? ''));
+    }
+  }
+
+  // THE GUARD, applied across every bucket: if the namespace ends up distinguishing
+  // nothing, grouping by it would collapse the repo into a single box, so fall back
+  // to physical paths wholesale.
+  return new Set(out.values()).size <= 1 ? new Map() : out;
 }
 
 /**

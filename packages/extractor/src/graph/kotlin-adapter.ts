@@ -37,9 +37,7 @@ import { listSourceFiles } from './language.js';
 import { isKotlinStdlib } from './kotlin-stdlib.js';
 import { readGradleDepsDeep } from './kotlin-manifest.js';
 import { scanPackage, scanImports, scanTopLevelDecls, kotlinExternalId } from './kotlin-scan.js';
-// One definition of "declared package → grouping dir path" for both JVM adapters
-// (Java + Kotlin package syntax is identical here: dot-separated segments).
-import { packageGroupingPath } from './java-adapter.js';
+import { packageGroupingPath } from './jvm-package.js';
 
 /** Lines of code for one source file (a size/centrality signal). */
 function locOf(text: string): number {
@@ -209,7 +207,7 @@ export class KotlinExtractor implements GraphExtractor {
         pkgToFiles,
         internalPackages,
         declaredGroups,
-        pkgByFile.get(id) ?? '',
+        pkgByFile.get(id),
       );
     }
 

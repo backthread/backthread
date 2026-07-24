@@ -1,4 +1,4 @@
-// ARP-1423 — end-to-end proof of the JVM grouping fix at the clustering seam:
+// End-to-end proof of the JVM grouping fix at the clustering seam:
 // a Java-shaped repo (`src/main/java/<reverse-dns>/<feature>/…`) must produce
 // FEATURE module ids + feature subsystem boxes, and a repo with no grouping paths
 // (every other language) must be byte-identical to before.
@@ -8,6 +8,7 @@ import { clusterGraph } from './louvain.js';
 import { computeSubsystems } from './subsystem.js';
 import type { NormalizedGraph } from '../graph/types.js';
 import type { WorkspaceLayout, WorkspacePackage } from './workspaces.js';
+import { evaluateGroupingGate } from './grouping-gate.js';
 
 /**
  * A graph whose files carry both a physical path and (optionally) a namespace.
@@ -90,7 +91,7 @@ function layoutOf(
   };
 }
 
-describe('JVM namespace grouping (ARP-1423)', () => {
+describe('JVM namespace grouping', () => {
   it('names modules after the FEATURE package, never the build source root', () => {
     const { modules } = clusterGraph(graphOf(JVM_FILES, JVM_EDGES));
     const ids = modules.filter((m) => m.kind === 'internal').map((m) => m.id).sort();
@@ -104,9 +105,9 @@ describe('JVM namespace grouping (ARP-1423)', () => {
     const partition = computeSubsystems(modules);
     const boxes = [...new Set([...partition.values()].map((s) => s.name))].sort();
     expect(boxes).toEqual(['Adapter', 'Domain']);
-    expect(partition.get('slack')!.id).toBe('dir:adapter');
-    expect(partition.get('database')!.id).toBe('dir:adapter');
-    expect(partition.get('alert')!.id).toBe('dir:domain');
+    expect(partition.get('slack')!.id).toBe('ns:adapter');
+    expect(partition.get('database')!.id).toBe('ns:adapter');
+    expect(partition.get('alert')!.id).toBe('ns:domain');
   });
 
   it('is deterministic across a re-run and across input order', () => {
@@ -216,5 +217,87 @@ describe('JVM namespace grouping (ARP-1423)', () => {
     const ids = modules.filter((m) => m.kind === 'internal').map((m) => m.id).sort();
     expect(ids).toContain('orders');
     expect(ids).toContain('billing');
+  });
+  it('lets a stray outlier package root strip only its OWN bucket', () => {
+    // REVIEWER (PR #145): a repo-wide common prefix meant ONE generated/vendored
+    // file under a different reverse-DNS root emptied the prefix, so nothing
+    // stripped and every box collapsed onto `Com`/`Org` — the same mega-box this
+    // fixes, and a stability break (adding that one file renames every box).
+    const files: Array<[string, string?]> = [
+      ['src/main/java/com/acme/orders/OrderApi.java', 'com/acme/orders'],
+      ['src/main/java/com/acme/orders/OrderDto.java', 'com/acme/orders'],
+      ['src/main/java/com/acme/billing/Invoice.java', 'com/acme/billing'],
+      ['src/main/java/com/acme/billing/Tax.java', 'com/acme/billing'],
+      ['src/gen/java/org/other/gen/Proto.java', 'org/other/gen'],
+      ['src/gen/java/org/other/gen/Stub.java', 'org/other/gen'],
+    ];
+    const { modules } = clusterGraph(
+      graphOf(files, [
+        ['src/main/java/com/acme/orders/OrderApi.java', 'src/main/java/com/acme/orders/OrderDto.java'],
+        ['src/main/java/com/acme/billing/Invoice.java', 'src/main/java/com/acme/billing/Tax.java'],
+        ['src/gen/java/org/other/gen/Proto.java', 'src/gen/java/org/other/gen/Stub.java'],
+      ]),
+    );
+    const ids = modules.filter((m) => m.kind === 'internal').map((m) => m.id).sort();
+    expect(ids).toEqual(['billing', 'gen', 'orders']);
+    const boxes = [...new Set([...computeSubsystems(modules).values()].map((s) => s.id))].sort();
+    expect(boxes).toEqual(['ns:billing', 'ns:gen', 'ns:orders']);
+    expect(boxes).not.toContain('dir:com');
+    expect(boxes).not.toContain('dir:org');
+  });
+
+  it('keeps the physical derivation when namespaced files are a MINORITY', () => {
+    // REVIEWER (PR #145): mergeGraphs concatenates a polyglot repo's languages into
+    // one graph, so a community can be 5 TS files plus one generated .java. Deriving
+    // from "any namespaced file" named the whole module after the lone Java file.
+    const files: Array<[string, string?]> = [
+      ['src/web/a.ts'],
+      ['src/web/b.ts'],
+      ['src/web/c.ts'],
+      ['src/web/gen/Client.java', 'com/acme/tooling/gen'],
+      ['src/api/x.ts'],
+      ['src/api/y.ts'],
+      ['src/api/z.java', 'com/acme/tooling/api'],
+    ];
+    const { modules } = clusterGraph(
+      graphOf(files, [
+        ['src/web/a.ts', 'src/web/b.ts'],
+        ['src/web/b.ts', 'src/web/c.ts'],
+        ['src/web/c.ts', 'src/web/gen/Client.java'],
+        ['src/api/x.ts', 'src/api/y.ts'],
+        ['src/api/y.ts', 'src/api/z.java'],
+      ]),
+    );
+    const ids = modules.filter((m) => m.kind === 'internal').map((m) => m.id).sort();
+    // Both communities are TS-majority ⇒ physical names, not `gen`/`api` packages.
+    expect(ids).toEqual(['api', 'web']);
+    expect(ids).not.toContain('gen');
+  });
+
+  it('does not let a JVM repo trip the gate on its build source root', () => {
+    // Post-fix the boxes are real packages, so the gate must measure THOSE. Measuring
+    // paths would report one 100% god-bucket named `main` for every JVM repo.
+    const P = 'src/main/java/com/acme/app';
+    const files: Array<[string, string?]> = ['orders', 'billing', 'catalog', 'shipping'].flatMap(
+      (pkg) =>
+        ['A', 'B', 'C'].map(
+          (n) => [`${P}/${pkg}/${n}.java`, `com/acme/app/${pkg}`] as [string, string],
+        ),
+    );
+    const edges: Array<[string, string]> = ['orders', 'billing', 'catalog', 'shipping'].map((p) => [
+      `${P}/${p}/A.java`,
+      `${P}/${p}/B.java`,
+    ]);
+    const { modules } = clusterGraph(graphOf(files, edges));
+    const partition = computeSubsystems(modules);
+    const internal = modules.filter((m) => m.kind === 'internal');
+    const gate = evaluateGroupingGate(
+      internal.map((m) => ({ id: m.id, fileIds: m.fileIds, subsystemId: partition.get(m.id)?.id })),
+    );
+    expect(gate.godBucketRatio).toBeLessThan(1);
+    // …and the same modules WITHOUT ids fall back to paths: one `main` mega-box.
+    const byPath = evaluateGroupingGate(internal.map((m) => ({ id: m.id, fileIds: m.fileIds })));
+    expect(byPath.godBucketRatio).toBe(1);
+    expect(byPath.trips).toBe(true);
   });
 });

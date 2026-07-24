@@ -36,6 +36,7 @@ import type { GraphExtractor, NormalizedGraph } from './types.js';
 import { graphFromState, type FileRecord, type FileGraphState, type FileEdgeRef } from './file-graph.js';
 import { listSourceFiles } from './language.js';
 import { isJavaStdlib } from './java-stdlib.js';
+import { packageGroupingPath } from './jvm-package.js';
 import { readJavaDeps } from './java-manifest.js';
 import {
   scanPackage,
@@ -62,18 +63,6 @@ function locOf(text: string): number {
 /** Qualify a top-level type by its file's package (`com.foo` + `Bar` → `com.foo.Bar`). */
 function qualify(pkg: string, decl: string): string {
   return pkg ? `${pkg}.${decl}` : decl;
-}
-
-/**
- * A declared package as a directory path (`com.foo.bar` → `com/foo/bar`), or undefined
- * for the unnamed package. This is the file's `groupingPath` (see GraphFile) — the
- * namespace clustering groups by INSTEAD of the physical path, which on a JVM repo is
- * buried under the build source root (`src/main/java/…`) and collapses every module onto
- * the segment `main`. Dots are the only separator Java allows in a package name, so the
- * mapping is total and lossless.
- */
-export function packageGroupingPath(pkg: string): string | undefined {
-  return pkg ? pkg.split('.').join('/') : undefined;
 }
 
 /** The package part of a non-wildcard import FQN (`com.foo.Bar` → `com.foo`), or ''. */
@@ -336,7 +325,7 @@ export class JavaExtractor implements GraphExtractor {
         pkgToFiles,
         internalPackages,
         declaredGroups,
-        pkgByFile.get(id) ?? '',
+        pkgByFile.get(id),
       );
     }
 

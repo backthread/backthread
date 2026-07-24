@@ -1,4 +1,4 @@
-// ARP-1423 — the pure namespace-grouping model behind the JVM fix.
+// The pure namespace-grouping model behind the JVM grouping fix.
 import { describe, it, expect } from '../testkit.js';
 import {
   commonDir,
@@ -110,6 +110,15 @@ describe('dominantTopSegment', () => {
   it('breaks ties alphabetically, order-independently', () => {
     expect(dominantTopSegment(['zulu/a', 'alpha/b'])).toBe('alpha');
     expect(dominantTopSegment(['alpha/b', 'zulu/a'])).toBe('alpha');
+  });
+
+  it('is permutation-stable at a tie ABOVE a loser (the real fold property)', () => {
+    // {zulu:2, alpha:2, mid:1} — a tie at count 2 with a distinct lower count below
+    // it, which a tie-at-1 case cannot exercise.
+    const paths = ['zulu/a', 'zulu/b', 'alpha/c', 'alpha/d', 'mid/e'];
+    expect(dominantTopSegment(paths)).toBe('alpha');
+    expect(dominantTopSegment([...paths].reverse())).toBe('alpha');
+    expect(dominantTopSegment(['mid/e', 'alpha/c', 'zulu/a', 'alpha/d', 'zulu/b'])).toBe('alpha');
   });
 
   it('is null with nothing to group by', () => {

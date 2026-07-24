@@ -80,7 +80,7 @@ export interface ClusteredModule {
   packageName?: string | null;
   packageRole?: WorkspacePackage['role'];
   /**
-   * ARP-1423 — the module's NAMESPACE-derived subsystem box (the dominant top-level
+   * The module's NAMESPACE-derived subsystem box (the dominant top-level
    * segment of its files' `groupingPath`s, after the repo/package-wide common prefix
    * is stripped). Set only when the language supplies grouping paths (Java/Kotlin);
    * `computeSubsystems` prefers it over the physical dominant top-level dir, which on
@@ -127,7 +127,7 @@ function deriveSegment(fileIds: string[]): string {
   return best;
 }
 
-// ARP-1423 — the NAMESPACE-derived half of the same heuristic, used when the files
+// The NAMESPACE-derived half of the same heuristic, used when the files
 // carry `groupingPath`s (Java/Kotlin). `namespaceOf` maps a fileId to its
 // prefix-stripped namespace dir; a file absent from it has no namespace signal.
 //
@@ -144,12 +144,12 @@ function deriveNamespaceSegment(
   fileIds: readonly string[],
   namespaceOf: ReadonlyMap<string, string>,
 ): string | null {
-  const paths = fileIds.map((f) => namespaceOf.get(f)).filter((p): p is string => p !== undefined);
-  if (paths.length === 0) return null;
+  const paths = namespacedPaths(fileIds, namespaceOf);
+  if (paths === null) return null;
   return leafSegment(commonDir(paths)) ?? dominantTopSegment(paths);
 }
 
-// ARP-1423 — the module's namespace-derived SUBSYSTEM box: the dominant TOP-LEVEL
+// The module's namespace-derived SUBSYSTEM box: the dominant TOP-LEVEL
 // segment of its files' namespaces (`adapter/database` → `adapter`). Deliberately
 // coarser than the module id above: a subsystem is the neighbourhood a module sits
 // in, and it must stay stable as the module's file set shifts.
@@ -157,8 +157,25 @@ function deriveNamespaceDir(
   fileIds: readonly string[],
   namespaceOf: ReadonlyMap<string, string>,
 ): string | null {
+  const paths = namespacedPaths(fileIds, namespaceOf);
+  return paths !== null ? dominantTopSegment(paths) : null;
+}
+
+// The community's namespace paths — but ONLY when they are a MAJORITY of its files.
+// Otherwise null, and the caller keeps the physical-path derivation.
+//
+// WHY the majority bar (REVIEWER, PR #145): `mergeGraphs` concatenates a polyglot
+// repo's languages into ONE graph, so a community can hold 5 TypeScript files and a
+// single generated `.java`. Deriving from "any namespaced file" then named that
+// module after the lone Java file's package — so the "a file without a groupingPath
+// keeps the prior behavior" guarantee held per FILE but not per COMMUNITY. Requiring
+// a majority restores it: a mostly-TS module keeps its physical-path name.
+function namespacedPaths(
+  fileIds: readonly string[],
+  namespaceOf: ReadonlyMap<string, string>,
+): string[] | null {
   const paths = fileIds.map((f) => namespaceOf.get(f)).filter((p): p is string => p !== undefined);
-  return paths.length > 0 ? dominantTopSegment(paths) : null;
+  return paths.length * 2 > fileIds.length ? paths : null;
 }
 
 // Reserve a unique module id from a base: `-2`, `-3`, … suffixes on collision.
@@ -173,7 +190,7 @@ function reserveId(base: string, used: Set<string>): string {
 }
 
 // Derive a provisional module id from a community's files (pre-Stage-C form,
-// used for the whole-graph path + root-scope communities). ARP-1423: the
+// used for the whole-graph path + root-scope communities). the
 // namespace derivation wins when the language supplies one, else the physical
 // path — so non-JVM ids are unchanged.
 function deriveModuleId(
@@ -314,7 +331,7 @@ export function clusterGraph(
   const layout = opts?.layout;
   const multiPackage = layout !== undefined && layout.packages.length > 1;
 
-  // ARP-1423 — the NAMESPACE grouping map (fileId → prefix-stripped package dir),
+  // The NAMESPACE grouping map (fileId → prefix-stripped package dir),
   // populated only for languages whose adapter supplies `groupingPath` (Java/Kotlin).
   // The shared prefix is computed PER SCOPE — the whole graph, or each workspace
   // package — so a Gradle multi-module repo strips each module's own reverse-DNS
@@ -474,7 +491,7 @@ export function clusterGraph(
       const rel = fileIds.map((f) =>
         f.startsWith(`${pkg.root}/`) ? f.slice(pkg.root.length + 1) : f,
       );
-      // ARP-1423: the namespace is already package-scoped (its prefix was stripped
+      // The namespace is already package-scoped (its prefix was stripped
       // per package above), so it needs no package-relative rewrite of its own.
       const derived = deriveNamespaceSegment(fileIds, namespaceOf) ?? deriveSegment(rel);
       const seg = slugify(derived) || 'module';

@@ -418,3 +418,50 @@ describe('diffFileGraphStates — the reconciliation comparator ( Stage B)', () 
     expect(diffFileGraphStates(a, b)).toEqual(['src/a.ts', 'src/gone.ts', 'src/new.ts']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// `groupingPath` — the JVM namespace field. These cover the cache/serialization
+// seam the FILE_GRAPH_VERSION + EXTRACTOR_VERSION bumps exist for (REVIEWER, PR #145):
+// if any of them regress, an already-ingested JVM repo silently keeps `main-N` ids.
+
+describe('groupingPath (JVM namespace) round-trip', () => {
+  const rec = (groupingPath?: string) => ({
+    loc: 10,
+    language: 'java',
+    imports: [],
+    externals: [],
+    calls: [],
+    reexports: [],
+    ...(groupingPath !== undefined ? { groupingPath } : {}),
+  });
+
+  it('survives serialize → deserialize → graphFromState', () => {
+    const state = {
+      headSha: 'a'.repeat(40),
+      files: { 'A.java': rec('com/acme/orders'), 'b.ts': rec(undefined) },
+    };
+    const round = deserializeFileGraph(JSON.parse(JSON.stringify(serializeFileGraph(state))));
+    expect(round).not.toBeNull();
+    expect(round!.files['A.java'].groupingPath).toBe('com/acme/orders');
+    expect(round!.files['b.ts'].groupingPath).toBeUndefined();
+
+    const graph = graphFromState('/tmp/x', round!);
+    expect(graph.files.find((f) => f.id === 'A.java')!.groupingPath).toBe('com/acme/orders');
+    // A file without one must not gain the key at all — that is what keeps every
+    // non-JVM assembled GraphFile byte-identical.
+    expect('groupingPath' in graph.files.find((f) => f.id === 'b.ts')!).toBe(false);
+  });
+
+  it('treats a non-string groupingPath as a corrupt record (cache miss)', () => {
+    expect(isValidFileRecord({ ...rec(), groupingPath: 42 })).toBe(false);
+    expect(isValidFileRecord({ ...rec('com/acme') })).toBe(true);
+    expect(isValidFileRecord({ ...rec() })).toBe(true);
+  });
+
+  it('counts a moved package declaration as drift', () => {
+    const a = { headSha: 'a'.repeat(40), files: { 'A.java': rec('com/acme/orders') } };
+    const b = { headSha: 'a'.repeat(40), files: { 'A.java': rec('com/acme/billing') } };
+    expect(diffFileGraphStates(a, b)).toEqual(['A.java']);
+    expect(diffFileGraphStates(a, a)).toEqual([]);
+  });
+});

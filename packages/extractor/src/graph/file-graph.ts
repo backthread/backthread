@@ -582,7 +582,7 @@ export function graphFromState(root: string, state: FileGraphState): NormalizedG
     const rec = state.files[id];
     const file: GraphFile = { id, loc: rec.loc, language: rec.language };
     // Only JVM records carry one; omitting the key entirely keeps every other
-    // language's assembled GraphFile byte-identical to pre-ARP-1423.
+    // language's assembled GraphFile byte-identical to this change.
     if (rec.groupingPath !== undefined) file.groupingPath = rec.groupingPath;
     return file;
   });
@@ -785,7 +785,18 @@ export function computeCallPatchUnit(args: {
 // this payload is the zero-parse fast path, the blob cache the O(misses)
 // cold-boot path.
 
-export const FILE_GRAPH_VERSION = 1;
+/**
+ * v2: records gained `groupingPath`. Bumping this is LOAD-BEARING, not
+ * bookkeeping — this payload is the ZERO-PARSE warm seed a boot prefers, and the
+ * blob cache (keyed by EXTRACTOR_VERSION) is only its fallback for an unreachable
+ * head commit. Without the bump, a warm boot would adopt the old payload verbatim,
+ * re-parse nothing, and hand clustering grouping-path-less files — so an
+ * already-ingested JVM repo would silently keep its `main-N` modules forever, which
+ * is precisely the failure the EXTRACTOR_VERSION bump was meant to prevent. A
+ * mismatch here already forces a full re-extract, so the two versions must move
+ * together whenever the FileRecord shape changes.
+ */
+export const FILE_GRAPH_VERSION = 2;
 
 export interface SerializedFileGraph {
   version: number;

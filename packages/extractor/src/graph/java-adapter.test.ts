@@ -264,3 +264,19 @@ describe('JavaExtractor call edges (v2)', () => {
     expect(under).toEqual([{ to: CORE_USER, weight: 2 }]);
   });
 });
+
+describe('groupingPath (the declared package as dirs)', () => {
+  it('emits the package for every file, and nothing for the unnamed package', async () => {
+    const dir = await repo({
+      'src/main/java/com/acme/orders/OrderApi.java': 'package com.acme.orders;\nclass OrderApi {}\n',
+      'src/main/java/com/acme/billing/Invoice.java': 'package com.acme.billing;\nclass Invoice {}\n',
+      'src/main/java/Bootstrap.java': 'class Bootstrap {}\n',
+    });
+    const g = await new JavaExtractor().extract(dir);
+    const by = new Map(g.files.map((f) => [f.id, f.groupingPath]));
+    expect(by.get('src/main/java/com/acme/orders/OrderApi.java')).toBe('com/acme/orders');
+    expect(by.get('src/main/java/com/acme/billing/Invoice.java')).toBe('com/acme/billing');
+    // The unnamed package declares no namespace → no grouping path (physical fallback).
+    expect(by.get('src/main/java/Bootstrap.java')).toBeUndefined();
+  });
+});

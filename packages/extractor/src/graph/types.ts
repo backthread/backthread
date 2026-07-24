@@ -15,7 +15,7 @@
 export interface GraphFile {
   id: string;
   loc: number; // lines of code — a size/centrality signal for god-node detection
-  language: string; // 'ts' | 'tsx' | 'jsx' | …
+  language: string; // 'ts' | 'tsx' | 'js' | 'jsx' | …
   /**
    * The file's DECLARED namespace as a directory path (`com/acme/orders/billing`),
    * when the language has one that is more meaningful for GROUPING than its
