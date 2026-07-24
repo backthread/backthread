@@ -27,6 +27,7 @@ import {
   hasComposerManifest,
   hasDartManifestDeep,
   hasSwiftManifestDeep,
+  hasJavaManifest,
 } from '../graph/language.js';
 import { reactNativeAdapter } from './react-native/react-native.js';
 import { nextAdapter } from './next/next.js';
@@ -81,6 +82,7 @@ let kotlinRegistered = false;
 let phpRegistered = false;
 let dartRegistered = false;
 let swiftRegistered = false;
+let javaRegistered = false;
 
 /**
  * Register the framework adapters whose toolchain must NOT load for every repo.
@@ -144,5 +146,16 @@ export async function registerLanguageScopedFrameworkAdapters(repoDir: string): 
     swiftRegistered = true;
     const { registerSwiftFrameworkAdapters } = await import('./register-swift.js');
     registerSwiftFrameworkAdapters();
+  }
+  // Java fleet — gated on a Java manifest (a pom.xml or any `.java` source; hasJavaManifest
+  // already walks for `.java`, so a nested Maven/Gradle module is covered). The adapters'
+  // scanner is hand-rolled + dep-free, so this gate is purely about not module-loading the
+  // Java adapters for a non-Java repo. On a Java+Gradle repo the Kotlin fleet also registers
+  // (build.gradle trips hasKotlinManifest); the Java adapters are named `java-spring`/
+  // `java-jpa` so they never replace the Kotlin `spring`/`kotlin-orm` ones.
+  if (!javaRegistered && hasJavaManifest(repoDir)) {
+    javaRegistered = true;
+    const { registerJavaFrameworkAdapters } = await import('./register-java.js');
+    registerJavaFrameworkAdapters();
   }
 }
