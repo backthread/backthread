@@ -21,6 +21,7 @@ import {
   SWIFT_EXCLUDE_DIRS,
   SWIFT_EXCLUDE_SUFFIXES,
   JAVA_EXCLUDE_DIRS,
+  GO_EXCLUDE_DIRS,
   EXCLUDE_DIRS,
   type SourceLang,
 } from './file-graph.js';
@@ -333,7 +334,9 @@ export function listSourceFiles(root: string, lang: SourceLang): string[] {
                   ? SWIFT_EXCLUDE_DIRS
                   : lang === 'java'
                     ? JAVA_EXCLUDE_DIRS
-                    : EXCLUDE_DIRS,
+                    : lang === 'go'
+                      ? GO_EXCLUDE_DIRS
+                      : EXCLUDE_DIRS,
   );
   const out: string[] = [];
 
