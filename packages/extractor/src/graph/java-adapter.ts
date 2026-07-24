@@ -64,6 +64,18 @@ function qualify(pkg: string, decl: string): string {
   return pkg ? `${pkg}.${decl}` : decl;
 }
 
+/**
+ * A declared package as a directory path (`com.foo.bar` → `com/foo/bar`), or undefined
+ * for the unnamed package. This is the file's `groupingPath` (see GraphFile) — the
+ * namespace clustering groups by INSTEAD of the physical path, which on a JVM repo is
+ * buried under the build source root (`src/main/java/…`) and collapses every module onto
+ * the segment `main`. Dots are the only separator Java allows in a package name, so the
+ * mapping is total and lossless.
+ */
+export function packageGroupingPath(pkg: string): string | undefined {
+  return pkg ? pkg.split('.').join('/') : undefined;
+}
+
 /** The package part of a non-wildcard import FQN (`com.foo.Bar` → `com.foo`), or ''. */
 function packageOf(fqn: string): string {
   const i = fqn.lastIndexOf('.');
@@ -257,9 +269,11 @@ export function extractFileRecord(
     addExternal(packageOf(imp.fqn));
   }
 
+  const groupingPath = packageGroupingPath(filePkg);
   return {
     loc: locOf(text),
     language: 'java',
+    ...(groupingPath !== undefined ? { groupingPath } : {}),
     imports: [...importWeights].map(([to, weight]) => ({ to, weight })),
     externals: [...externalWeights].map(([id, v]) => ({ id, specifier: v.specifier, weight: v.weight })),
     // v2: constructor (`new Foo(…)`) + static (`Foo.member(…)`) call-site heads resolved

@@ -281,7 +281,12 @@ export function computeSubsystems(modules: ReadonlyArray<ClusteredModule>): Map<
   // (a bijection with the namespaced ids — so the bare slug is fine here).
   const dirSubsystemIds = new Set<string>();
   for (const m of internal) {
-    const dir = dominantTopLevelDir(m.fileIds);
+    // ARP-1423: a NAMESPACE-derived box (Java/Kotlin `package`) wins over the
+    // physical dominant top-level dir, which on a JVM repo is the build source root
+    // (`src/main/java/…` → `main`) for every file in the repo — one mega-box that
+    // then tripped the flat-repo refinement below into per-module "Main 93 2"
+    // subsystems. Absent for every other language ⇒ unchanged behavior.
+    const dir = m.groupingDir ?? dominantTopLevelDir(m.fileIds);
     dirOf.set(m.id, dir);
     if (dir !== null) dirSubsystemIds.add(slugify(dir) || 'module');
   }

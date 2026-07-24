@@ -20,7 +20,7 @@
 // test in incremental-equivalence.test.ts. If you change edge semantics here or
 // in the adapter, change BOTH sides and re-run that test.
 
-import type { NormalizedGraph, ExternalNode, GraphEdge } from './types.js';
+import type { NormalizedGraph, ExternalNode, GraphEdge, GraphFile } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Source-path policy — MUST mirror each language adapter's glob semantics.
@@ -506,8 +506,13 @@ export function isConfigInvalidatorPath(path: string): boolean {
  * v7: the Java adapter gained inline CALL edges (constructor `new Foo(…)` + static
  * `Foo.member(…)` heads resolved through the FQN registry), so per-file output
  * changes for `.java` blobs — cached rows must re-parse.
+ * v8: the JVM adapters (Java + Kotlin) now emit `groupingPath` (the file's declared
+ * package as dirs) on the FileRecord, so per-file output changes for `.java`/`.kt`
+ * blobs — cached rows must re-parse. Bumping is load-bearing rather than cosmetic:
+ * without it a warm blob cache would keep serving grouping-path-less records and the
+ * JVM grouping fix would silently not apply to an already-ingested repo.
  */
-export const EXTRACTOR_VERSION = 7;
+export const EXTRACTOR_VERSION = 8;
 
 // ---------------------------------------------------------------------------
 // State shape.
@@ -541,6 +546,14 @@ export interface FileRecord {
    * of `imports` targets.
    */
   reexports: string[];
+  /**
+   * The file's declared namespace as a directory path — see GraphFile.groupingPath.
+   * Set ONLY by the JVM adapters (Java/Kotlin `package`). It lives on the RECORD (not
+   * just the assembled GraphFile) because the record is what the per-blob parse cache
+   * stores: a cache-seeded boot must carry the grouping path too, or a warm JVM ingest
+   * would silently fall back to the broken physical-path grouping.
+   */
+  groupingPath?: string;
   /** Git blob sha at the state's head (serialization only; Stage-B cache key). */
   blobSha?: string;
 }
@@ -565,11 +578,14 @@ export interface FileGraphState {
  */
 export function graphFromState(root: string, state: FileGraphState): NormalizedGraph {
   const paths = Object.keys(state.files).sort();
-  const files = paths.map((id) => ({
-    id,
-    loc: state.files[id].loc,
-    language: state.files[id].language,
-  }));
+  const files = paths.map((id) => {
+    const rec = state.files[id];
+    const file: GraphFile = { id, loc: rec.loc, language: rec.language };
+    // Only JVM records carry one; omitting the key entirely keeps every other
+    // language's assembled GraphFile byte-identical to pre-ARP-1423.
+    if (rec.groupingPath !== undefined) file.groupingPath = rec.groupingPath;
+    return file;
+  });
 
   const externals = new Map<string, ExternalNode>();
   const edges: GraphEdge[] = [];
@@ -827,6 +843,8 @@ export function isValidFileRecord(v: unknown): v is FileRecord {
   if (!isEdgeRefArray(r.imports) || !isEdgeRefArray(r.calls)) return false;
   if (!isExternalRefArray(r.externals)) return false;
   if (!Array.isArray(r.reexports) || !r.reexports.every((t) => typeof t === 'string')) return false;
+  // Optional, but a non-string groupingPath is a corrupt row → treat as a miss.
+  if (r.groupingPath !== undefined && typeof r.groupingPath !== 'string') return false;
   return true;
 }
 
@@ -849,6 +867,7 @@ export function deserializeFileGraph(v: unknown): FileGraphState | null {
   for (const [path, raw] of Object.entries(g.files as Record<string, unknown>)) {
     if (!isValidFileRecord(raw)) return null;
     const r = raw as FileRecord & { blobSha?: unknown };
+    const rg = (raw as { groupingPath?: unknown }).groupingPath;
     files[path] = {
       loc: r.loc,
       language: r.language,
@@ -856,6 +875,7 @@ export function deserializeFileGraph(v: unknown): FileGraphState | null {
       externals: r.externals,
       calls: r.calls,
       reexports: r.reexports,
+      ...(typeof rg === 'string' ? { groupingPath: rg } : {}),
       ...(typeof r.blobSha === 'string' ? { blobSha: r.blobSha } : {}),
     };
   }
@@ -904,6 +924,9 @@ export function diffFileGraphStates(a: FileGraphState, b: FileGraphState): strin
       `externals:${externalRefsKey(rec.externals)}`,
       `calls:${edgeRefsKey(rec.calls)}`,
       `reexports:${[...rec.reexports].sort().join(',')}`,
+      // A moved `package` declaration changes the module/subsystem a file groups
+      // into, so it is real extractor output and must count as drift.
+      `grouping:${rec.groupingPath ?? ''}`,
     ].join('\x1f');
 
   const drifted: string[] = [];

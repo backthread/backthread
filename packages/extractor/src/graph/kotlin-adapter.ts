@@ -37,6 +37,9 @@ import { listSourceFiles } from './language.js';
 import { isKotlinStdlib } from './kotlin-stdlib.js';
 import { readGradleDepsDeep } from './kotlin-manifest.js';
 import { scanPackage, scanImports, scanTopLevelDecls, kotlinExternalId } from './kotlin-scan.js';
+// One definition of "declared package → grouping dir path" for both JVM adapters
+// (Java + Kotlin package syntax is identical here: dot-separated segments).
+import { packageGroupingPath } from './java-adapter.js';
 
 /** Lines of code for one source file (a size/centrality signal). */
 function locOf(text: string): number {
@@ -99,7 +102,9 @@ export function extractFileRecord(
   pkgToFiles: ReadonlyMap<string, readonly string[]>,
   internalPackages: ReadonlySet<string>,
   declaredGroups: ReadonlySet<string>,
+  pkg?: string,
 ): FileRecord {
+  const filePkg = pkg ?? scanPackage(text);
   const importWeights = new Map<string, number>();
   const externalWeights = new Map<string, { specifier: string; weight: number }>();
   const addInternal = (target: string): void => {
@@ -139,9 +144,11 @@ export function extractFileRecord(
     addExternal(packageOf(imp.fqn));
   }
 
+  const groupingPath = packageGroupingPath(filePkg);
   return {
     loc: locOf(text),
     language: 'kt',
+    ...(groupingPath !== undefined ? { groupingPath } : {}),
     imports: [...importWeights].map(([to, weight]) => ({ to, weight })),
     externals: [...externalWeights].map(([id, v]) => ({ id, specifier: v.specifier, weight: v.weight })),
     calls: [], // v1: import-backbone only (no call edges — the locked scope)
@@ -180,9 +187,11 @@ export class KotlinExtractor implements GraphExtractor {
     const declToFile = new Map<string, string>();
     const pkgToFiles = new Map<string, string[]>();
     const internalPackages = new Set<string>();
+    const pkgByFile = new Map<string, string>(); // reused in pass 2 (no re-scan)
     for (const id of fileIds) {
       const text = texts.get(id) ?? '';
       const pkg = scanPackage(text);
+      pkgByFile.set(id, pkg);
       internalPackages.add(pkg);
       (pkgToFiles.get(pkg) ?? pkgToFiles.set(pkg, []).get(pkg)!).push(id);
       for (const decl of scanTopLevelDecls(text)) {
@@ -200,6 +209,7 @@ export class KotlinExtractor implements GraphExtractor {
         pkgToFiles,
         internalPackages,
         declaredGroups,
+        pkgByFile.get(id) ?? '',
       );
     }
 
