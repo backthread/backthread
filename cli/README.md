@@ -83,6 +83,26 @@ SessionEnd **capture hook**, the `/backthread:capture` & `/backthread:start`
 commands, and the **backthread MCP server** (capture + `query`). `/backthread:start`
 just signs you in.
 
+### Learn your own codebase (`/backthread:learn`)
+
+`/backthread:learn` runs a short lesson about **this** repo, built from what was
+actually recorded here — the decisions, the reasoning, the options that were
+rejected. You answer a few questions in your own words; each one gets a plain
+**"Got it" / "Not yet"** and then the recorded reasoning, which is the part worth
+having. Nothing is scored, nothing is ranked, and no history of wrong answers is
+kept. **"I disagree"** and **"Bad question"** are always available and cost you
+nothing — the record can be the thing that's wrong. On a quiet week you get a
+short teaching card, or simply "you're caught up": that's a finished lesson, not
+a failed one.
+
+The plugin also registers one small **pre-edit** hook. At most **once per
+session**, when you're about to edit a part of the codebase you haven't been
+through, it prints a single line pointing at `/backthread:how`. It sends one
+repo-relative path and nothing else — the file is never opened, let alone read —
+and it **never blocks the edit**: anything other than a clean answer (offline,
+slow, signed out, not a connected repo) is simply silent. Same as the rest of the
+CLI, you can read exactly what it does in `cli/src/editNudge.ts`.
+
 ### Codex / Cursor / Gemini CLI
 
 Use another coding agent? One command wires up its **MCP server** (the `query`
