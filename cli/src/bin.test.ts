@@ -271,6 +271,157 @@ test('`backthread how` with a non-ok outcome exits 1 (failure visible)', async (
   assert.match(out, /no-auth/);
 });
 
+// --- `learn` dispatch (start vs answer) ---------------------------------------
+
+/** A minimal ok answer payload, enough for the renderer. */
+const ANSWER_OK = {
+  status: 'ok' as const,
+  detail: '',
+  result: {
+    questionId: 'q1',
+    outcome: 'got-it' as const,
+    verdict: 'got-it' as const,
+    graded: true,
+    note: null,
+    reveal: { decided: null, why: null, rationale: 'because retries', since: [] },
+    effect: { kind: 'none' },
+    lesson: { id: 'l1', completed: false },
+  },
+};
+
+test('`backthread learn` with no --answer starts a lesson and passes --cwd / --repo through', async () => {
+  const seen: unknown[] = [];
+  const { out, result } = await captureConsole(() =>
+    main(['learn', '--cwd', '/repo', '--repo', 'acme/widgets'], {
+      startLessonImpl: async (input) => {
+        seen.push(input);
+        return {
+          status: 'ok',
+          detail: '',
+          lesson: { id: 'l1', kind: 'caught-up', repo: 'acme/widgets', createdAt: '', cached: false, items: [] },
+        };
+      },
+    }),
+  );
+  assert.equal(result, 0, 'a caught-up lesson is a SUCCESS, not a failure');
+  assert.deepEqual(seen[0], { cwd: '/repo', repo: 'acme/widgets' });
+  assert.match(out, /caught up/i);
+});
+
+test('`backthread learn` exits 1 on a genuine failure so the host sees it', async () => {
+  const { out, result } = await captureConsole(() =>
+    main(['learn'], { startLessonImpl: async () => ({ status: 'no-auth', detail: 'not authenticated' }) }),
+  );
+  assert.equal(result, 1);
+  assert.match(out, /backthread login/);
+});
+
+test('`backthread learn --answer <id> --text` submits the text and never reads stdin', async () => {
+  const seen: unknown[] = [];
+  const { result } = await captureConsole(() =>
+    main(['learn', '--answer', 'q1', '--text', 'because retries must not double-charge'], {
+      answerLessonImpl: async (input) => {
+        seen.push(input);
+        return ANSWER_OK;
+      },
+    }),
+  );
+  assert.equal(result, 0);
+  assert.deepEqual(seen[0], {
+    questionId: 'q1',
+    answer: 'because retries must not double-charge',
+    outcome: null,
+  });
+});
+
+test('`backthread learn --answer <id> --disagree` sends the declared outcome with no text', async () => {
+  const seen: Array<{ outcome?: unknown; answer?: unknown }> = [];
+  await captureConsole(() =>
+    main(['learn', '--answer', 'q1', '--disagree'], {
+      answerLessonImpl: async (input) => {
+        seen.push(input);
+        return ANSWER_OK;
+      },
+    }),
+  );
+  assert.equal(seen[0].outcome, 'disagree');
+  assert.equal(seen[0].answer, '', 'a declared outcome must not block waiting on stdin');
+});
+
+test('`backthread learn --answer <id> --bad-question` sends the other declared outcome', async () => {
+  const seen: Array<{ outcome?: unknown }> = [];
+  await captureConsole(() =>
+    main(['learn', '--answer', 'q1', '--bad-question'], {
+      answerLessonImpl: async (input) => {
+        seen.push(input);
+        return ANSWER_OK;
+      },
+    }),
+  );
+  assert.equal(seen[0].outcome, 'bad-question');
+});
+
+test('a dangling `--answer` fails fast instead of starting a lesson', async () => {
+  let started = false;
+  let answered = false;
+  const { err, result } = await captureConsole(() =>
+    main(['learn', '--answer'], {
+      startLessonImpl: async () => {
+        started = true;
+        return { status: 'ok', detail: '' };
+      },
+      answerLessonImpl: async () => {
+        answered = true;
+        return ANSWER_OK;
+      },
+    }),
+  );
+  assert.equal(result, 1);
+  assert.equal(started, false, 'it must not silently fall through to starting a lesson');
+  assert.equal(answered, false);
+  assert.match(err, /needs a question id/);
+});
+
+// --- `edit-context` dispatch (the pre-edit hook) ------------------------------
+//
+// Both payloads below stop inside runEditNudge BEFORE any config read, git read or
+// request — that is what makes them safe to run here, and it is also the contract
+// worth pinning: whatever happens, this command prints valid JSON and exits 0, so
+// it can never stall or deny an edit.
+
+async function withHookInput(payload: string, fn: () => Promise<unknown>): Promise<{ out: string; result: unknown }> {
+  const prev = process.env.BACKTHREAD_HOOK_INPUT;
+  process.env.BACKTHREAD_HOOK_INPUT = payload;
+  try {
+    const { out, result } = await captureConsole(fn);
+    return { out, result };
+  } finally {
+    if (prev === undefined) delete process.env.BACKTHREAD_HOOK_INPUT;
+    else process.env.BACKTHREAD_HOOK_INPUT = prev;
+  }
+}
+
+test('`backthread edit-context` prints valid JSON and exits 0 on a payload it cannot use', async () => {
+  // No session id → nothing to throttle against → silence, before any I/O.
+  const { out, result } = await withHookInput(
+    JSON.stringify({ cwd: '/repo', tool_input: { file_path: '/repo/a.ts' } }),
+    () => main(['edit-context', '--agent', 'claude-code']),
+  );
+  assert.equal(result, 0);
+  assert.deepEqual(JSON.parse(out), {}, 'an empty object = say nothing, the edit proceeds');
+});
+
+test('`backthread edit-context` exits 0 on a malformed payload — it can never block an edit', async () => {
+  const { out, result } = await withHookInput('not json at all {{{', () => main(['edit-context']));
+  assert.equal(result, 0);
+  const parsed = JSON.parse(out);
+  assert.deepEqual(parsed, {});
+  // Never a permission verdict, never a stop — the only key it may ever emit is
+  // systemMessage, and here there is none.
+  assert.equal('permissionDecision' in parsed, false);
+  assert.equal('continue' in parsed, false);
+});
+
 // --- the default runOnboarding is wired (smoke: it is a function) ------------
 
 test('runOnboarding is exported and callable (default dispatch target)', () => {

@@ -328,7 +328,19 @@ test('a malformed payload degrades instead of throwing', () => {
   const a = normalizeAnswer({ outcome: 'invented', verdict: 'perfect' }, 'q9');
   assert.equal(a.questionId, 'q9');
   assert.equal(a.verdict, null, 'an unrecognized verdict is no verdict at all');
-  assert.equal(a.outcome, 'not-yet');
+  assert.equal(a.outcome, null, 'and it is NEVER coerced into the negative verdict');
+});
+
+test('an unrecognized payload never renders as "Not yet." — the one label we must not invent', () => {
+  const text = formatLessonAnswer({
+    status: 'ok',
+    detail: '',
+    result: normalizeAnswer({ outcome: 'something-new', reveal: REVEAL }, 'q9'),
+  });
+  assert.doesNotMatch(text, /Not yet\./);
+  assert.doesNotMatch(text, /Got it\./);
+  assert.match(text, /^Recorded\./, 'it says the neutral, true thing instead');
+  assert.match(text, /A uuid per attempt was rejected/, 'and still shows the rationale');
 });
 
 test('the submit invocation is absolute, because the host shell has no plugin root', () => {

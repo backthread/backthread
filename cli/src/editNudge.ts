@@ -27,9 +27,17 @@
 // per session" — is not enough on its own, because until the line fires, EVERY
 // edit in the session pays for a round-trip; on a repo the person already knows
 // well that is a permanent tax that buys nothing. So a session gets at most
-// MAX_PREFLIGHTS_PER_SESSION lookups AND at most one line. The first covers the
-// realistic case (the person touches a couple of areas early in a session) without
-// letting a long editing session pay for it forty times over.
+// MAX_PREFLIGHTS_PER_SESSION round-trips AND at most one line. The first covers
+// the realistic case (the person touches a couple of areas early in a session)
+// without letting a long editing session pay for it forty times over.
+//
+// The budget is claimed IMMEDIATELY BEFORE THE REQUEST, not on entry, so it counts
+// round-trips rather than attempts — an edit outside a git repo, or one made while
+// signed out, reaches no server and must not silently consume the session's chance
+// to say something once the person moves into the connected repo. When the budget
+// runs out the session is marked DONE (the same key the line claims), so from then
+// on every edit short-circuits before even the local git reads: the session's local
+// cost is bounded too, not just its network cost.
 //
 // WHY `systemMessage` AND NOT stdout OR stderr. For a PreToolUse hook exiting 0,
 // Claude Code shows neither stdout nor stderr to the person — stdout is parsed for
@@ -231,10 +239,9 @@ export async function runEditNudge(rawStdin: string, deps: EditNudgeDeps = {}): 
     const filePath = extractEditPath(rec.tool_input);
     if (!filePath) return {};
 
-    // Already said our piece this session, or already spent the lookup budget →
-    // return before touching the network, so the rest of the session pays nothing.
+    // This session is DONE — it either said its piece or spent its budget. Return
+    // before any git read or network call, so the rest of the session pays nothing.
     if (await wasSessionClaimed(EDIT_NUDGE_FILE, sessionId, env)) return {};
-    if (!(await claimPreflightSlot(sessionId, env))) return {};
 
     const cwd = typeof rec.cwd === 'string' && rec.cwd ? rec.cwd : (deps.cwd ?? process.cwd());
     const repo = resolveRepo(cwd, deps.readRemoteImpl);
@@ -249,6 +256,14 @@ export async function runEditNudge(rawStdin: string, deps: EditNudgeDeps = {}): 
       .catch(() => ({}) as BackthreadConfig);
     if (!config.device_token) return {}; // not signed in → silent, never a prompt
 
+    // Everything a request needs is in hand — NOW spend one of the session's
+    // round-trips. Out of budget → mark the session done so later edits stop even
+    // doing the local work above.
+    if (!(await claimPreflightSlot(sessionId, env))) {
+      await claimSessionOnce(EDIT_NUDGE_FILE, sessionId, env);
+      return {};
+    }
+
     const verdict = await checkCoverage(repo, relPath, config.device_token, deps);
     if (!verdict.speak) return {};
 
@@ -262,10 +277,10 @@ export async function runEditNudge(rawStdin: string, deps: EditNudgeDeps = {}): 
 }
 
 /**
- * Spend one of this session's lookups. Implemented as numbered claim keys in the
- * same ring (`<session>#1`, `#2`, …) so the whole budget reuses one primitive with
- * one file and one set of failure modes, rather than a second counter format that
- * would need its own corrupt-file handling.
+ * Spend one of this session's round-trips. Implemented as numbered claim keys in
+ * the same ring (`<session>#1`, `#2`, …) so the whole budget reuses one primitive
+ * with one file and one set of failure modes, rather than a second counter format
+ * that would need its own corrupt-file handling.
  */
 async function claimPreflightSlot(sessionId: string, env: NodeJS.ProcessEnv): Promise<boolean> {
   for (let n = 1; n <= MAX_PREFLIGHTS_PER_SESSION; n++) {

@@ -27,7 +27,14 @@ import { join } from 'node:path';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { configDir, CONFIG_MODE, DIR_MODE } from './config.js';
 
-/** How many session ids to remember before the oldest fall off the ring. */
+/**
+ * How many KEYS to remember before the oldest fall off the ring — keys, not
+ * sessions. A caller that claims one key per session (the connect nudge) therefore
+ * remembers fifty sessions; one that claims several per session (the pre-edit line,
+ * which numbers its round-trip budget) remembers proportionally fewer. Eviction is
+ * safe either way for both of today's callers: a forgotten key costs at most one
+ * repeated line or one extra lookup, never a crash and never a wrong answer.
+ */
 export const MAX_REMEMBERED_SESSIONS = 50;
 
 export interface SessionRing {

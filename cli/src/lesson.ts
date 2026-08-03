@@ -116,7 +116,14 @@ export interface LessonEffect {
 
 export interface LessonAnswerResult {
   questionId: string;
-  outcome: AnswerOutcome;
+  /**
+   * What was recorded — or `null` when the server sent something this client does
+   * not recognize. DELIBERATELY nullable rather than defaulted: the obvious
+   * fallback, `not-yet`, is the one label this feature must never show by
+   * accident, and inventing a negative verdict out of a shape we failed to parse
+   * is exactly the failure the whole grading design is arranged around.
+   */
+  outcome: AnswerOutcome | null;
   /** 'got-it' | 'not-yet', or null when the answer was RECORDED rather than graded. */
   verdict: 'got-it' | 'not-yet' | null;
   graded: boolean;
@@ -221,9 +228,9 @@ export async function startLesson(
       { repo: `${repo.owner}/${repo.name}` },
       LESSON_START_TIMEOUT_MS,
     );
-    if (!res.ok) {
-      return { status: res.timedOut ? 'failed' : 'failed', detail: res.detail, repo };
-    }
+    // A timeout and a transport error read the same to the caller — `res.detail`
+    // already names which one it was, and neither is retried (see the header).
+    if (!res.ok) return { status: 'failed', detail: res.detail, repo };
 
     const rec = res.payload;
     const upgrade = readUpgrade(res.upgradeHeader, rec);
@@ -322,7 +329,7 @@ export async function answerLesson(
     const result = normalizeAnswer(rec, questionId);
     return {
       status: 'ok',
-      detail: `recorded (${result.outcome})`,
+      detail: `recorded (${result.outcome ?? 'unrecognized outcome'})`,
       result,
       ...(upgrade ? { upgrade } : {}),
     };
@@ -452,7 +459,8 @@ export function normalizeAnswer(raw: unknown, fallbackQuestionId: string): Lesso
   const les = (r.lesson && typeof r.lesson === 'object' ? r.lesson : {}) as Record<string, unknown>;
   return {
     questionId: typeof r.questionId === 'string' && r.questionId ? r.questionId : fallbackQuestionId,
-    outcome: OUTCOMES.includes(r.outcome as AnswerOutcome) ? (r.outcome as AnswerOutcome) : 'not-yet',
+    // Unrecognized → null, never `not-yet`. See LessonAnswerResult.outcome.
+    outcome: OUTCOMES.includes(r.outcome as AnswerOutcome) ? (r.outcome as AnswerOutcome) : null,
     verdict: r.verdict === 'got-it' || r.verdict === 'not-yet' ? r.verdict : null,
     graded: r.graded === true,
     note: typeof r.note === 'string' && r.note ? r.note : null,
@@ -612,6 +620,10 @@ export function formatLessonAnswer(outcome: LessonAnswerOutcome): string {
   } else if (r.outcome === 'bad-question') {
     out.push("Noted — that one won't be asked again on this repo.");
     out.push('This is not a wrong answer and it cost you nothing.');
+  } else {
+    // No verdict and no outcome we recognize. Say the neutral, true thing — never
+    // fill the gap with "Not yet.", which would be a verdict we were never given.
+    out.push('Recorded.');
   }
 
   if (r.note) out.push(r.note);

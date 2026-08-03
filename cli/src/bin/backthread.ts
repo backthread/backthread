@@ -215,6 +215,9 @@ export interface MainDeps {
   runOnboardingImpl?: (rest: string[]) => Promise<number>;
   /** Test seam for the `how`/`ask` grounded-ask dispatch. Defaults to queryDecisions. */
   queryDecisionsImpl?: typeof queryDecisions;
+  /** Test seams for `learn` (both modes touch config + the network). */
+  startLessonImpl?: typeof startLesson;
+  answerLessonImpl?: typeof answerLesson;
   /** Test seam for `logout` (touches ~/.backthread on disk). Defaults to runLogout. */
   runLogoutImpl?: typeof runLogout;
   /** Test seam for `update` (spawns npm / touches the network). Defaults to runUpdate. */
@@ -425,14 +428,18 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
             ? ('bad-question' as const)
             : null;
         // --text wins when given; otherwise read stdin (TTY-safe: resolves '').
+        // A declared outcome never waits on stdin — pressing "I disagree" is a
+        // complete reply on its own.
         const text = flagValue(rest, '--text') ?? (declared ? '' : await readStdinText());
-        const outcome = await answerLesson({ questionId, answer: text, outcome: declared });
+        const submit = deps.answerLessonImpl ?? answerLesson;
+        const outcome = await submit({ questionId, answer: text, outcome: declared });
         console.log(formatLessonAnswer(outcome));
         return outcome.status === 'ok' ? 0 : 1;
       }
       const cwd = flagValue(rest, '--cwd') ?? process.cwd();
       const repoFlag = flagValue(rest, '--repo');
-      const outcome = await startLesson({ cwd, ...(repoFlag ? { repo: repoFlag } : {}) });
+      const start = deps.startLessonImpl ?? startLesson;
+      const outcome = await start({ cwd, ...(repoFlag ? { repo: repoFlag } : {}) });
       console.log(formatLesson(outcome, learnInvocation()));
       return outcome.status === 'ok' ? 0 : 1;
     }

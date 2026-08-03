@@ -1,6 +1,5 @@
 ---
 description: Run today's short lesson about THIS codebase — a few causal questions built from what was actually recorded here (the decisions, the trade-offs, the rejected options), each answered in your own words and followed by the recorded rationale. Binary "Got it" / "Not yet", no score, no history of wrong answers. "I disagree" and "Bad question" are always available and cost you nothing.
-argument-hint: ""
 disable-model-invocation: true
 ---
 

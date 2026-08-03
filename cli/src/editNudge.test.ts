@@ -183,6 +183,53 @@ test('a session stops paying for lookups once its budget is spent', async () => 
   });
 });
 
+test('the budget counts round-trips, not attempts — an edit that never reaches the server costs nothing', async () => {
+  await withTempHome(async (env) => {
+    const calls = { n: 0 };
+    // Several edits outside a git repo, then several while signed out. None of
+    // these can reach the server, so none may consume the session's budget.
+    for (let i = 0; i < 4; i++) {
+      assert.deepEqual(
+        await runEditNudge(payload(), { ...deps(env, uncovered, calls), readRemoteImpl: () => null }),
+        {},
+      );
+    }
+    for (let i = 0; i < 4; i++) {
+      assert.deepEqual(
+        await runEditNudge(payload(), { ...deps(env, uncovered, calls), readConfigImpl: async () => ({}) }),
+        {},
+      );
+    }
+    assert.equal(calls.n, 0);
+    // The session still has its full budget AND its line.
+    const spoke = await runEditNudge(payload(), deps(env, uncovered, calls));
+    assert.match(String(spoke.systemMessage), /Billing/);
+    assert.equal(calls.n, 1);
+  });
+});
+
+test('a spent budget marks the session done, so later edits skip the local work too', async () => {
+  await withTempHome(async (env) => {
+    const calls = { n: 0 };
+    let gitReads = 0;
+    const counting = () => {
+      gitReads += 1;
+      return 'git@github.com:acme/widgets.git';
+    };
+    // Spend the budget, then one more edit — that one does the local work, finds
+    // the budget gone, and marks the session done.
+    for (let i = 0; i < MAX_PREFLIGHTS_PER_SESSION + 1; i++) {
+      await runEditNudge(payload(), { ...deps(env, covered, calls), readRemoteImpl: counting });
+    }
+    const afterBudget = gitReads;
+    for (let i = 0; i < 3; i++) {
+      assert.deepEqual(await runEditNudge(payload(), { ...deps(env, covered, calls), readRemoteImpl: counting }), {});
+    }
+    assert.equal(calls.n, MAX_PREFLIGHTS_PER_SESSION);
+    assert.equal(gitReads, afterBudget, 'past the budget it short-circuits before reading git at all');
+  });
+});
+
 test('every failure mode is silent and costs the caller nothing', async () => {
   const boom = (async () => {
     throw new Error('network down');

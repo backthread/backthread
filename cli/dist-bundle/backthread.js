@@ -35344,7 +35344,6 @@ async function runEditNudge(rawStdin, deps = {}) {
     const filePath = extractEditPath(rec.tool_input);
     if (!filePath) return {};
     if (await wasSessionClaimed(EDIT_NUDGE_FILE, sessionId, env)) return {};
-    if (!await claimPreflightSlot(sessionId, env)) return {};
     const cwd = typeof rec.cwd === "string" && rec.cwd ? rec.cwd : deps.cwd ?? process.cwd();
     const repo = resolveRepo(cwd, deps.readRemoteImpl);
     if (!repo) return {};
@@ -35353,6 +35352,10 @@ async function runEditNudge(rawStdin, deps = {}) {
     if (!relPath) return {};
     const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
     if (!config2.device_token) return {};
+    if (!await claimPreflightSlot(sessionId, env)) {
+      await claimSessionOnce(EDIT_NUDGE_FILE, sessionId, env);
+      return {};
+    }
     const verdict = await checkCoverage(repo, relPath, config2.device_token, deps);
     if (!verdict.speak) return {};
     if (!await claimSessionOnce(EDIT_NUDGE_FILE, sessionId, env)) return {};
@@ -35400,9 +35403,7 @@ async function startLesson(input, deps = {}) {
       { repo: `${repo.owner}/${repo.name}` },
       LESSON_START_TIMEOUT_MS
     );
-    if (!res.ok) {
-      return { status: res.timedOut ? "failed" : "failed", detail: res.detail, repo };
-    }
+    if (!res.ok) return { status: "failed", detail: res.detail, repo };
     const rec = res.payload;
     const upgrade = readUpgrade(res.upgradeHeader, rec);
     if (res.status === 409) {
@@ -35480,7 +35481,7 @@ async function answerLesson(input, deps = {}) {
     const result = normalizeAnswer(rec, questionId);
     return {
       status: "ok",
-      detail: `recorded (${result.outcome})`,
+      detail: `recorded (${result.outcome ?? "unrecognized outcome"})`,
       result,
       ...upgrade ? { upgrade } : {}
     };
@@ -35576,7 +35577,8 @@ function normalizeAnswer(raw, fallbackQuestionId) {
   const les = r.lesson && typeof r.lesson === "object" ? r.lesson : {};
   return {
     questionId: typeof r.questionId === "string" && r.questionId ? r.questionId : fallbackQuestionId,
-    outcome: OUTCOMES.includes(r.outcome) ? r.outcome : "not-yet",
+    // Unrecognized → null, never `not-yet`. See LessonAnswerResult.outcome.
+    outcome: OUTCOMES.includes(r.outcome) ? r.outcome : null,
     verdict: r.verdict === "got-it" || r.verdict === "not-yet" ? r.verdict : null,
     graded: r.graded === true,
     note: typeof r.note === "string" && r.note ? r.note : null,
@@ -35688,6 +35690,8 @@ function formatLessonAnswer(outcome) {
   } else if (r.outcome === "bad-question") {
     out.push("Noted \u2014 that one won't be asked again on this repo.");
     out.push("This is not a wrong answer and it cost you nothing.");
+  } else {
+    out.push("Recorded.");
   }
   if (r.note) out.push(r.note);
   const rev = r.reveal;
@@ -35921,13 +35925,15 @@ async function main(argv, deps = {}) {
         }
         const declared = rest.includes("--disagree") ? "disagree" : rest.includes("--bad-question") ? "bad-question" : null;
         const text = flagValue(rest, "--text") ?? (declared ? "" : await readStdinText());
-        const outcome2 = await answerLesson({ questionId, answer: text, outcome: declared });
+        const submit = deps.answerLessonImpl ?? answerLesson;
+        const outcome2 = await submit({ questionId, answer: text, outcome: declared });
         console.log(formatLessonAnswer(outcome2));
         return outcome2.status === "ok" ? 0 : 1;
       }
       const cwd = flagValue(rest, "--cwd") ?? process.cwd();
       const repoFlag = flagValue(rest, "--repo");
-      const outcome = await startLesson({ cwd, ...repoFlag ? { repo: repoFlag } : {} });
+      const start = deps.startLessonImpl ?? startLesson;
+      const outcome = await start({ cwd, ...repoFlag ? { repo: repoFlag } : {} });
       console.log(formatLesson(outcome, learnInvocation()));
       return outcome.status === "ok" ? 0 : 1;
     }
