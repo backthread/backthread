@@ -21,9 +21,7 @@
 // suppressing the nudge (never spamming, never crashing). When the session id is
 // unknown we likewise suppress rather than risk nudging every capture.
 
-import { join } from 'node:path';
-import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
-import { configDir, CONFIG_MODE, DIR_MODE } from './config.js';
+import { claimSessionOnce, throttleStatePath } from './sessionThrottle.js';
 import { buildRepoDeepLink, buildBillingUrl } from './urls.js';
 
 // The piggybacked repo-health signal off the capture (ingest-decisions) response.
@@ -72,56 +70,12 @@ export function parseNextStep(value: unknown): ServerNextStep | null | 'absent' 
 }
 
 // The throttle file: tiny, owner-only (0600), in the same dir as config.json.
+// The ring mechanics live in sessionThrottle.ts, shared with the pre-edit line —
+// each caller keeps its OWN file so one message can never silence the other.
+export const CONNECT_NUDGE_FILE = 'connect-nudge.json';
+
 export function nudgeStatePath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(configDir(env), 'connect-nudge.json');
-}
-
-// We keep a bounded ring of the most-recently-nudged session ids so concurrent
-// sessions each get exactly one nudge while the file stays tiny. Older ids fall off.
-const MAX_REMEMBERED = 50;
-
-interface NudgeState {
-  /** Session ids already nudged this install (most-recent last). */
-  nudged: string[];
-}
-
-// Parse the throttle blob defensively → empty state on anything unexpected. A
-// hand-corrupted (or partially-written) file must never break capture, so any
-// malformed shape just means "nothing nudged yet" (we'll re-show, harmless).
-function parseState(raw: string): NudgeState {
-  try {
-    const obj = JSON.parse(raw) as unknown;
-    if (obj && typeof obj === 'object' && Array.isArray((obj as NudgeState).nudged)) {
-      const nudged = (obj as NudgeState).nudged.filter((s): s is string => typeof s === 'string');
-      return { nudged };
-    }
-  } catch {
-    // fall through to empty
-  }
-  return { nudged: [] };
-}
-
-async function readState(env: NodeJS.ProcessEnv): Promise<NudgeState> {
-  try {
-    return parseState(await readFile(nudgeStatePath(env), 'utf8'));
-  } catch {
-    // Missing file (first run) or unreadable → empty state. Never throw.
-    return { nudged: [] };
-  }
-}
-
-async function writeState(state: NudgeState, env: NodeJS.ProcessEnv): Promise<void> {
-  try {
-    const dir = configDir(env);
-    await mkdir(dir, { recursive: true, mode: DIR_MODE });
-    await chmod(dir, DIR_MODE).catch(() => {});
-    const path = nudgeStatePath(env);
-    await writeFile(path, JSON.stringify(state) + '\n', { mode: CONFIG_MODE });
-    await chmod(path, CONFIG_MODE).catch(() => {});
-  } catch {
-    // A write failure just means the NEXT same-session capture might re-nudge — a
-    // mild over-nudge, never a crash. Swallow it (best-effort posture).
-  }
+  return throttleStatePath(CONNECT_NUDGE_FILE, env);
 }
 
 // Build the user-facing nudge copy. Tone: plain + lightly self-aware, matching the
@@ -285,12 +239,8 @@ async function nudgeOncePerSession(
   env: NodeJS.ProcessEnv,
   log: (msg: string) => void,
 ): Promise<boolean> {
-  const state = await readState(env);
-  if (state.nudged.includes(sessionId)) return false; // already nudged this session
+  if (!(await claimSessionOnce(CONNECT_NUDGE_FILE, sessionId, env))) return false;
   log(line);
-  const nudged = [...state.nudged, sessionId];
-  if (nudged.length > MAX_REMEMBERED) nudged.splice(0, nudged.length - MAX_REMEMBERED);
-  await writeState({ nudged }, env);
   return true;
 }
 

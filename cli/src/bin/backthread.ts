@@ -61,6 +61,15 @@ import { runSessionStart } from '../sessionStart.js';
 import { refreshStructure } from '../localGraph.js';
 import { syncDecisions } from '../localDecisions.js';
 import { runGrepContext } from '../grepContext.js';
+import { runEditNudge } from '../editNudge.js';
+import {
+  startLesson,
+  answerLesson,
+  formatLesson,
+  formatLessonAnswer,
+  learnInvocation,
+  readStdinText,
+} from '../lesson.js';
 
 const USAGE = `backthread — keep the thread on what your AI agent actually shipped
 
@@ -80,6 +89,14 @@ Setup
 Ask
   backthread how <question>     Ask how/why something here works — a grounded, cited answer
                           from your decision log (backs /backthread:how). [--cwd <path>]
+
+Learn
+  backthread learn              Today's short lesson about this codebase, built from what
+                          was actually recorded here (backs /backthread:learn).
+                          [--cwd <path>] [--repo <owner/name>]
+  backthread learn --answer <question-id>
+                          Submit one answer (text on stdin, or --text "…").
+                          [--disagree] [--bad-question] — neither costs you anything.
 
 Capture
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
@@ -116,6 +133,7 @@ const KNOWN_COMMANDS = [
   'whoami',
   'how',
   'ask',
+  'learn',
   'capture',
   'mcp',
   'graph',
@@ -197,6 +215,9 @@ export interface MainDeps {
   runOnboardingImpl?: (rest: string[]) => Promise<number>;
   /** Test seam for the `how`/`ask` grounded-ask dispatch. Defaults to queryDecisions. */
   queryDecisionsImpl?: typeof queryDecisions;
+  /** Test seams for `learn` (both modes touch config + the network). */
+  startLessonImpl?: typeof startLesson;
+  answerLessonImpl?: typeof answerLesson;
   /** Test seam for `logout` (touches ~/.backthread on disk). Defaults to runLogout. */
   runLogoutImpl?: typeof runLogout;
   /** Test seam for `update` (spawns npm / touches the network). Defaults to runUpdate. */
@@ -362,6 +383,65 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       const output = await runGrepContext(raw);
       console.log(JSON.stringify(output));
       return 0;
+    }
+    case 'edit-context': {
+      // The PreToolUse PRE-EDIT hook. CC is about to Edit/MultiEdit/Write a file;
+      // we ask the server once whether this person has coverage of that file's
+      // area and, at most ONCE per session and only on a clean `uncovered`
+      // verdict, return a single `systemMessage` line offering the recorded
+      // context. SYNCHRONOUS (CC reads this stdout), short-timeout, and SILENT on
+      // every other outcome — including any error. It NEVER blocks the edit: no
+      // permission decision, no exit 2, always exit 0.
+      const raw = await readRawHookInput().catch(() => '');
+      const output = await runEditNudge(raw);
+      console.log(JSON.stringify(output));
+      return 0;
+    }
+    case 'learn': {
+      // The /backthread:learn slash command. TWO modes on one subcommand:
+      //
+      //  • START (no --answer) — fetch today's lesson and print it, plus the exact
+      //    command to submit one answer. The CLI cannot prompt (it has no
+      //    interactive input at all), so the host agent runs the conversation.
+      //
+      //  • ANSWER (--answer <question-id>) — submit ONE answer and print the
+      //    binary verdict plus the recorded rationale. The answer text comes from
+      //    stdin (a quoted heredoc, so a person's backticks and quotes survive
+      //    intact) or from --text. `--disagree` / `--bad-question` submit the
+      //    person's own call instead of an answer; neither is graded and neither
+      //    costs them anything.
+      //
+      // Exits non-zero on a genuine failure (not logged in / no repo / rejected)
+      // so the host sees it; a caught-up or teaching-card lesson is a SUCCESS.
+      const answerFlagPresent = rest.includes('--answer');
+      if (answerFlagPresent) {
+        const questionId = flagValue(rest, '--answer');
+        if (!questionId) {
+          console.error(
+            '`--answer` needs a question id. Usage: backthread learn --answer <question-id> (answer text on stdin)',
+          );
+          return 1;
+        }
+        const declared = rest.includes('--disagree')
+          ? ('disagree' as const)
+          : rest.includes('--bad-question')
+            ? ('bad-question' as const)
+            : null;
+        // --text wins when given; otherwise read stdin (TTY-safe: resolves '').
+        // A declared outcome never waits on stdin — pressing "I disagree" is a
+        // complete reply on its own.
+        const text = flagValue(rest, '--text') ?? (declared ? '' : await readStdinText());
+        const submit = deps.answerLessonImpl ?? answerLesson;
+        const outcome = await submit({ questionId, answer: text, outcome: declared });
+        console.log(formatLessonAnswer(outcome));
+        return outcome.status === 'ok' ? 0 : 1;
+      }
+      const cwd = flagValue(rest, '--cwd') ?? process.cwd();
+      const repoFlag = flagValue(rest, '--repo');
+      const start = deps.startLessonImpl ?? startLesson;
+      const outcome = await start({ cwd, ...(repoFlag ? { repo: repoFlag } : {}) });
+      console.log(formatLesson(outcome, learnInvocation()));
+      return outcome.status === 'ok' ? 0 : 1;
     }
     case 'mcp': {
       // Start the MCP server over stdio. This is long-running: startMcpServer

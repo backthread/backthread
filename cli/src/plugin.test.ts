@@ -72,14 +72,26 @@ test('the manifest registers PreToolUse + SessionStart + SessionEnd + Stop', () 
 
 test('the PreToolUse grep hook runs the bundled bin SYNCHRONOUSLY, matches Grep|Glob, never detaches', () => {
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
-  const entry = hooks.hooks.PreToolUse[0];
-  assert.equal(entry.matcher, 'Grep|Glob', 'matches the Grep + Glob tools');
+  const entry = hooks.hooks.PreToolUse.find((e: any) => e.matcher === 'Grep|Glob');
+  assert.ok(entry, 'the grep-context PreToolUse entry is registered');
   const cmd: string = entry.hooks[0].command;
   assert.ok(cmd.includes(BUNDLE_REF), 'hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
   assert.ok(!/\bnpx\b/.test(cmd), 'hook must NOT use npx (a sync grep hook would block every grep on the resolve)');
   assert.ok(cmd.includes('grep-context'), 'hook routes through the grep-context command');
   assert.ok(cmd.includes('--agent claude-code'), 'hook stamps the claude-code provider');
   assert.ok(!cmd.includes('--detach'), 'PreToolUse must NOT detach — CC reads stdout for the additionalContext');
+});
+
+test('the PreToolUse pre-edit hook matches Edit|MultiEdit|Write, runs the bundled bin, and never detaches', () => {
+  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
+  const entry = hooks.hooks.PreToolUse.find((e: any) => e.matcher === 'Edit|MultiEdit|Write');
+  assert.ok(entry, 'the pre-edit PreToolUse entry is registered');
+  const cmd: string = entry.hooks[0].command;
+  assert.ok(cmd.includes(BUNDLE_REF), 'hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
+  assert.ok(!/\bnpx\b/.test(cmd), 'hook must NOT use npx (a sync edit hook would block every edit on the resolve)');
+  assert.ok(cmd.includes('edit-context'), 'hook routes through the edit-context command');
+  assert.ok(cmd.includes('--agent claude-code'), 'hook stamps the claude-code provider');
+  assert.ok(!cmd.includes('--detach'), 'PreToolUse must NOT detach — CC reads stdout for the hook JSON');
 });
 
 test('the Stop hook runs the bundled bin, detaches, and matches the SessionEnd capture command', () => {
@@ -106,7 +118,7 @@ test('the SessionStart routing hook runs the bundled bin SYNCHRONOUSLY (ARP-763)
 });
 
 test('slash commands prefer the bundled bin (npx only as a fallback)', () => {
-  for (const name of ['capture.md', 'start.md', 'how.md', 'blindspots.md']) {
+  for (const name of ['capture.md', 'start.md', 'how.md', 'blindspots.md', 'learn.md']) {
     const md = readFileSync(join(cliRoot, 'commands', name), 'utf8');
     assert.ok(md.includes(BUNDLE_REF), `${name} references the bundled bin via \${CLAUDE_PLUGIN_ROOT}`);
     // npx is allowed ONLY as the else-branch fallback, never the sole invocation.
@@ -126,6 +138,18 @@ test('/backthread:blindspots routes a blindspot-framed question through the `how
   assert.match(md, /What am I missing about \$ARGUMENTS/, 'the area is framed as a blindspot question');
   assert.match(md, /blindspot pass/i, "Thariq's vocabulary rides in the framed question");
   assert.match(md, /disable-model-invocation:\s*true/, 'blindspots.md is user-typed');
+});
+
+test('/backthread:learn runs the `learn` subcommand and lets the agent run the conversation', () => {
+  const md = readFileSync(join(cliRoot, 'commands', 'learn.md'), 'utf8');
+  assert.match(md, /node "\$BT" learn --cwd/, 'learn.md runs the deterministic `learn` subcommand');
+  assert.match(md, /disable-model-invocation:\s*true/, 'learn.md is user-typed');
+  // The product rules have to survive into the instructions the agent follows.
+  assert.match(md, /I disagree/, 'the no-cost replies are offered');
+  assert.match(md, /Bad question/, 'the no-cost replies are offered');
+  assert.match(md, /caught up/i, 'a quiet day is handled as a real completion');
+  assert.match(md, /stop and wait/i, 'the agent waits for the person instead of answering itself');
+  assert.doesNotMatch(md, /architectural memory/i);
 });
 
 test('the self-contained bundle is committed and is a node script', () => {

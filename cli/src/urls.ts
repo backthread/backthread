@@ -73,6 +73,30 @@ export function buildGroundedAskUrl(env: NodeJS.ProcessEnv = process.env): strin
   return new URL('/grounded-ask', workerBaseUrl(env)).toString();
 }
 
+// Build the /lesson/start URL the `learn` command POSTs `{ repo }` to. On the
+// WORKER origin, same device-token auth as /grounded-ask: the worker selects the
+// question-worthy recorded material, generates and quality-gates the questions,
+// and returns the lesson — so the cli stays a relay and every prompt/model change
+// lands server-side without a publish.
+export function buildLessonStartUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/lesson/start', workerBaseUrl(env)).toString();
+}
+
+// Build the /lesson/answer URL one answer is POSTed to. The server holds the
+// withheld answer key and owns the verdict — the client can neither see the key
+// nor declare itself correct.
+export function buildLessonAnswerUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/lesson/answer', workerBaseUrl(env)).toString();
+}
+
+// Build the /coverage-preflight URL the pre-edit hook POSTs `{ repo, path }` to.
+// Same worker origin + device-token auth. It answers ONE question — does this
+// person have coverage of the area that file belongs to — and the hook stays
+// silent on anything but a clean, confident "no".
+export function buildCoveragePreflightUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/coverage-preflight', workerBaseUrl(env)).toString();
+}
+
 // Production Supabase Functions origin — the host of the `ingest-decisions` Edge
 // Function the capture hook POSTs DERIVED decisions to (the persist leg, when
 // the router didn't already persist them server-side). Overridable via
