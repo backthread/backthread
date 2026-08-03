@@ -5,6 +5,20 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.17.0
+
+**Backthread can now ask *you* — a short lesson on your own codebase, in the terminal.** `/backthread:learn` runs a handful of questions about *this* repo, built from what was actually recorded here: the decisions, the reasoning behind them, the options that were rejected. You answer in your own words, and each answer gets a plain **"Got it" / "Not yet"** followed by the recorded reasoning — which is the part worth having. Nothing is scored, nothing is ranked, and no history of wrong answers is kept anywhere.
+
+- **"I disagree" and "Bad question" are first-class replies**, offered beside every question, and they cost you nothing. The recorded reasoning can be the thing that's out of date, and saying so should feel like contributing, not like filing a complaint. A disagreement is filed against the decision; a bad question is never asked again on that repo.
+- **Open questions aren't graded.** Some questions have no recorded answer because nobody ever wrote one down. Those are marked as such, and your reply becomes the record. There's no way to get one wrong.
+- **A quiet week is a finished lesson.** If little worth asking about has landed, you get a short teaching card or a plain "you're caught up" — never padding, and never an implication that you fell short because the repo was quiet.
+- **Runs as a conversation, not a TUI.** The CLI prints the lesson and Claude Code asks the questions, waits for you, and relays the verdict. All the generation, quality-gating and grading happen server-side, so questions improve without you upgrading anything.
+
+**One line before you edit an area you haven't been through.** The Claude Code plugin now registers a small pre-edit hook. At most **once per session**, when you're about to edit, rewrite or create a file in a part of the codebase you have no coverage of, it prints a single line pointing you at `/backthread:how` for what's already on record.
+
+- **It never blocks the edit.** Short timeout, no permission prompt, no way to deny a tool call. Anything other than a clean, confident answer — you already know the area, the path doesn't resolve, you're offline or signed out, the request is slow, the repo isn't connected — is simply silent. A line shown because a lookup hiccuped would be a false accusation about your own codebase, which is worse than no line at all.
+- **It sends one repo-relative path and nothing else.** The file is never opened, let alone read or uploaded. A session is also capped at a small number of lookups, so a long editing session never pays for this on every keystroke.
+
 ## 0.16.0
 
 **Per-repo capture, enforced on your machine: an off or unconnected repo's transcript now never leaves it.** Until now, `backthread` derived a session's decisions and sent them for every project on your machine; the server decided whether to keep them (dropping the ones for repos you'd turned off or hadn't connected). Now the check happens *before* anything is sent: at the end of a session `backthread` asks the server a one-line question — "is capture on for this repo, for me?" — carrying only the repo's `owner/name` (never the transcript, never your code). If the repo is turned off, or isn't connected to Backthread, the transcript is never read or sent. You control per-repo capture on the Repos page; connected repos are on by default.

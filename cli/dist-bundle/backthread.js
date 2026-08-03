@@ -2984,7 +2984,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve2.call(this, root, ref);
+      let _sch = resolve3.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3011,7 +3011,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve2(root, ref) {
+    function resolve3(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3642,55 +3642,55 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve2(baseURI, relativeURI, options) {
+    function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative, options, skipNormalization) {
+    function resolveComponent(base, relative2, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse3(serialize(base, options), options);
-        relative = parse3(serialize(relative, options), options);
+        relative2 = parse3(serialize(relative2, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative.scheme) {
-        target.scheme = relative.scheme;
-        target.userinfo = relative.userinfo;
-        target.host = relative.host;
-        target.port = relative.port;
-        target.path = removeDotSegments(relative.path || "");
-        target.query = relative.query;
+      if (!options.tolerant && relative2.scheme) {
+        target.scheme = relative2.scheme;
+        target.userinfo = relative2.userinfo;
+        target.host = relative2.host;
+        target.port = relative2.port;
+        target.path = removeDotSegments(relative2.path || "");
+        target.query = relative2.query;
       } else {
-        if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
-          target.userinfo = relative.userinfo;
-          target.host = relative.host;
-          target.port = relative.port;
-          target.path = removeDotSegments(relative.path || "");
-          target.query = relative.query;
+        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
+          target.userinfo = relative2.userinfo;
+          target.host = relative2.host;
+          target.port = relative2.port;
+          target.path = removeDotSegments(relative2.path || "");
+          target.query = relative2.query;
         } else {
-          if (!relative.path) {
+          if (!relative2.path) {
             target.path = base.path;
-            if (relative.query !== void 0) {
-              target.query = relative.query;
+            if (relative2.query !== void 0) {
+              target.query = relative2.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative.path[0] === "/") {
-              target.path = removeDotSegments(relative.path);
+            if (relative2.path[0] === "/") {
+              target.path = removeDotSegments(relative2.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative.path;
+                target.path = "/" + relative2.path;
               } else if (!base.path) {
-                target.path = relative.path;
+                target.path = relative2.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative.query;
+            target.query = relative2.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -3698,7 +3698,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative.fragment;
+      target.fragment = relative2.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -3900,7 +3900,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve2,
+      resolve: resolve3,
       resolveComponent,
       equal,
       serialize,
@@ -6928,6 +6928,15 @@ function buildCaptureScopeUrl(env = process.env) {
 function buildGroundedAskUrl(env = process.env) {
   return new URL("/grounded-ask", workerBaseUrl(env)).toString();
 }
+function buildLessonStartUrl(env = process.env) {
+  return new URL("/lesson/start", workerBaseUrl(env)).toString();
+}
+function buildLessonAnswerUrl(env = process.env) {
+  return new URL("/lesson/answer", workerBaseUrl(env)).toString();
+}
+function buildCoveragePreflightUrl(env = process.env) {
+  return new URL("/coverage-preflight", workerBaseUrl(env)).toString();
+}
 var DEFAULT_FUNCTIONS_URL = "https://yempemohevgpctkpstuf.supabase.co/functions/v1";
 function functionsBaseUrl(env = process.env) {
   const override = env.BACKTHREAD_FUNCTIONS_URL;
@@ -6964,10 +6973,10 @@ function browserCommand(platform) {
   }
 }
 function openBrowser(url2, platform = process.platform) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const launcher = browserCommand(platform);
     if (!launcher) {
-      resolve2(false);
+      resolve3(false);
       return;
     }
     try {
@@ -6975,11 +6984,11 @@ function openBrowser(url2, platform = process.platform) {
         stdio: "ignore",
         detached: true
       });
-      child.on("error", () => resolve2(false));
+      child.on("error", () => resolve3(false));
       child.unref();
-      setTimeout(() => resolve2(true), 0);
+      setTimeout(() => resolve3(true), 0);
     } catch {
-      resolve2(false);
+      resolve3(false);
     }
   });
 }
@@ -7459,14 +7468,14 @@ import { execFile } from "node:child_process";
 function runNpm(args) {
   const isWin = process.platform === "win32";
   const npm = isWin ? "npm.cmd" : "npm";
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     try {
       execFile(
         npm,
         args,
         { timeout: 12e4, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
         (err, stdout, stderr) => {
-          resolve2({
+          resolve3({
             ok: !err,
             stdout: (stdout ?? "").toString().trim(),
             stderr: (stderr ?? "").toString().trim()
@@ -7474,7 +7483,7 @@ function runNpm(args) {
         }
       );
     } catch (e) {
-      resolve2({ ok: false, stdout: "", stderr: e.message ?? String(e) });
+      resolve3({ ok: false, stdout: "", stderr: e.message ?? String(e) });
     }
   });
 }
@@ -8181,9 +8190,69 @@ async function checkCaptureScope(repo, config2, deps = {}) {
   }
 }
 
-// src/connectNudge.ts
+// src/sessionThrottle.ts
 import { join as join5 } from "node:path";
 import { readFile as readFile4, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
+var MAX_REMEMBERED_SESSIONS = 50;
+function throttleStatePath(fileName, env = process.env) {
+  return join5(configDir(env), fileName);
+}
+function parseSessionRing(raw) {
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object" && Array.isArray(obj.nudged)) {
+      return { nudged: obj.nudged.filter((s) => typeof s === "string") };
+    }
+  } catch {
+  }
+  return { nudged: [] };
+}
+async function readRing(fileName, env) {
+  try {
+    return parseSessionRing(await readFile4(throttleStatePath(fileName, env), "utf8"));
+  } catch {
+    return { nudged: [] };
+  }
+}
+async function writeRing(fileName, ring, env) {
+  try {
+    const dir = configDir(env);
+    await mkdir3(dir, { recursive: true, mode: DIR_MODE });
+    await chmod3(dir, DIR_MODE).catch(() => {
+    });
+    const path = throttleStatePath(fileName, env);
+    await writeFile3(path, JSON.stringify(ring) + "\n", { mode: CONFIG_MODE });
+    await chmod3(path, CONFIG_MODE).catch(() => {
+    });
+  } catch {
+  }
+}
+async function wasSessionClaimed(fileName, key, env = process.env) {
+  try {
+    if (!key || key.trim().length === 0) return false;
+    const ring = await readRing(fileName, env);
+    return ring.nudged.includes(key);
+  } catch {
+    return false;
+  }
+}
+async function claimSessionOnce(fileName, sessionId, env = process.env) {
+  try {
+    if (!sessionId || sessionId.trim().length === 0) return false;
+    const ring = await readRing(fileName, env);
+    if (ring.nudged.includes(sessionId)) return false;
+    const nudged = [...ring.nudged, sessionId];
+    if (nudged.length > MAX_REMEMBERED_SESSIONS) {
+      nudged.splice(0, nudged.length - MAX_REMEMBERED_SESSIONS);
+    }
+    await writeRing(fileName, { nudged }, env);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// src/connectNudge.ts
 function parseRepoStatus(value) {
   return value === "connected" || value === "not_connected" || value === "disconnected" ? value : null;
 }
@@ -8195,41 +8264,7 @@ function parseNextStep(value) {
   }
   return "absent";
 }
-function nudgeStatePath(env = process.env) {
-  return join5(configDir(env), "connect-nudge.json");
-}
-var MAX_REMEMBERED = 50;
-function parseState2(raw) {
-  try {
-    const obj = JSON.parse(raw);
-    if (obj && typeof obj === "object" && Array.isArray(obj.nudged)) {
-      const nudged = obj.nudged.filter((s) => typeof s === "string");
-      return { nudged };
-    }
-  } catch {
-  }
-  return { nudged: [] };
-}
-async function readState2(env) {
-  try {
-    return parseState2(await readFile4(nudgeStatePath(env), "utf8"));
-  } catch {
-    return { nudged: [] };
-  }
-}
-async function writeState2(state, env) {
-  try {
-    const dir = configDir(env);
-    await mkdir3(dir, { recursive: true, mode: DIR_MODE });
-    await chmod3(dir, DIR_MODE).catch(() => {
-    });
-    const path = nudgeStatePath(env);
-    await writeFile3(path, JSON.stringify(state) + "\n", { mode: CONFIG_MODE });
-    await chmod3(path, CONFIG_MODE).catch(() => {
-    });
-  } catch {
-  }
-}
+var CONNECT_NUDGE_FILE = "connect-nudge.json";
 function nudgeMessage(status, repo, env = process.env) {
   const link = buildRepoDeepLink(repo.owner, repo.name, env);
   if (status === "disconnected") {
@@ -8275,12 +8310,8 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
   }
 }
 async function nudgeOncePerSession(line, sessionId, env, log) {
-  const state = await readState2(env);
-  if (state.nudged.includes(sessionId)) return false;
+  if (!await claimSessionOnce(CONNECT_NUDGE_FILE, sessionId, env)) return false;
   log(line);
-  const nudged = [...state.nudged, sessionId];
-  if (nudged.length > MAX_REMEMBERED) nudged.splice(0, nudged.length - MAX_REMEMBERED);
-  await writeState2({ nudged }, env);
   return true;
 }
 function unconnectedSkipMessage(repo, env = process.env) {
@@ -8893,11 +8924,11 @@ async function installCodex(home, deps) {
 command = "${MCP_COMMAND}"
 args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
 `;
-    const sep = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
+    const sep2 = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
     const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
     const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
     await doMkdir(dirname3(tomlPath));
-    await doWrite(tomlPath, toml + sep + block);
+    await doWrite(tomlPath, toml + sep2 + block);
     writes.push({ path: tomlPath, wrote: true });
   }
   const hooksPath = join9(home, ".codex", "hooks.json");
@@ -9520,13 +9551,13 @@ async function updateFirstRunState(patch, env = process.env) {
 async function maybeShowTrustGate(deps = {}) {
   try {
     const env = deps.env ?? process.env;
-    const readState4 = deps.readStateImpl ?? readFirstRunState;
-    const state = await readState4(env);
+    const readState3 = deps.readStateImpl ?? readFirstRunState;
+    const state = await readState3(env);
     if (state.onboarded === true || state.trustShown === true) return false;
     const log = deps.log ?? ((m) => console.error(m));
     log(TRUST_COPY);
-    const writeState4 = deps.writeStateImpl ?? updateFirstRunState;
-    await writeState4({ trustShown: true }, env);
+    const writeState3 = deps.writeStateImpl ?? updateFirstRunState;
+    await writeState3({ trustShown: true }, env);
     return true;
   } catch {
     return false;
@@ -9537,8 +9568,8 @@ async function runStart(opts = {}, deps = {}) {
   const log = opts.log ?? ((m) => console.error(m));
   const cwd = opts.cwd ?? process.cwd();
   const entry = opts.entry ?? detectEntry({ claim: opts.claim, env });
-  const readState4 = deps.readStateImpl ?? readFirstRunState;
-  const existingState = await readState4(env).catch(() => ({}));
+  const readState3 = deps.readStateImpl ?? readFirstRunState;
+  const existingState = await readState3(env).catch(() => ({}));
   if (existingState.onboarded === true) {
     const readCfg = deps.readConfigImpl ?? readConfig;
     const cfg = await readCfg(env).catch(() => ({}));
@@ -9587,8 +9618,8 @@ async function runStart(opts = {}, deps = {}) {
     () => ({ status: "error", detail: "state fetch failed (swallowed)" })
   );
   log("\n" + renderNextStep(stateOut, env));
-  const writeState4 = deps.writeStateImpl ?? updateFirstRunState;
-  await writeState4({ onboarded: true, trustShown: true }, env);
+  const writeState3 = deps.writeStateImpl ?? updateFirstRunState;
+  await writeState3({ onboarded: true, trustShown: true }, env);
   return { exitCode: 0, status: "onboarded", authed: true };
 }
 function renderNextStep(out, env = process.env) {
@@ -9629,13 +9660,13 @@ async function maybeFirstCaptureConfirm(count, repoConnected, repo, deps = {}) {
     if (!repoConnected || !repo) return false;
     if (!(count > 0)) return false;
     const env = deps.env ?? process.env;
-    const readState4 = deps.readStateImpl ?? readFirstRunState;
-    const state = await readState4(env);
+    const readState3 = deps.readStateImpl ?? readFirstRunState;
+    const state = await readState3(env);
     if (state.firstCaptureShown === true) return false;
     const log = deps.log ?? ((m) => console.error(m));
     log(firstCaptureMessage(count, repo, env));
-    const writeState4 = deps.writeStateImpl ?? updateFirstRunState;
-    await writeState4({ firstCaptureShown: true }, env);
+    const writeState3 = deps.writeStateImpl ?? updateFirstRunState;
+    await writeState3({ firstCaptureShown: true }, env);
     return true;
   } catch {
     return false;
@@ -9661,11 +9692,11 @@ function parseHookInput(raw) {
   return {};
 }
 function readStream(stream) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     let data = "";
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => data += chunk);
-    stream.on("end", () => resolve2(data));
+    stream.on("end", () => resolve3(data));
     stream.on("error", reject);
   });
 }
@@ -9921,8 +9952,8 @@ function normalizeHookInput(payload, _agent) {
 function captureStatePath(env = process.env) {
   return join12(configDir(env), "capture-sessions.json");
 }
-var MAX_REMEMBERED2 = 200;
-function parseState3(raw) {
+var MAX_REMEMBERED = 200;
+function parseState2(raw) {
   try {
     const obj = JSON.parse(raw);
     if (obj && typeof obj === "object" && !Array.isArray(obj)) {
@@ -9940,14 +9971,14 @@ function parseState3(raw) {
   }
   return { captured: [], watermarks: {} };
 }
-async function readState3(env) {
+async function readState2(env) {
   try {
-    return parseState3(await readFile11(captureStatePath(env), "utf8"));
+    return parseState2(await readFile11(captureStatePath(env), "utf8"));
   } catch {
     return { captured: [], watermarks: {} };
   }
 }
-async function writeState3(state, env) {
+async function writeState2(state, env) {
   try {
     const dir = configDir(env);
     await mkdir8(dir, { recursive: true, mode: DIR_MODE });
@@ -9962,36 +9993,36 @@ async function writeState3(state, env) {
 }
 async function wasSessionCaptured(sessionId, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return false;
-  const state = await readState3(env);
+  const state = await readState2(env);
   return state.captured.includes(sessionId);
 }
 async function markSessionCaptured(sessionId, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return;
-  const state = await readState3(env);
+  const state = await readState2(env);
   if (state.captured.includes(sessionId)) return;
   const captured = [...state.captured, sessionId];
-  if (captured.length > MAX_REMEMBERED2) captured.splice(0, captured.length - MAX_REMEMBERED2);
+  if (captured.length > MAX_REMEMBERED) captured.splice(0, captured.length - MAX_REMEMBERED);
   const { [sessionId]: _dropped, ...watermarks } = state.watermarks;
-  await writeState3({ captured, watermarks }, env);
+  await writeState2({ captured, watermarks }, env);
 }
 async function captureWatermark(sessionId, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return 0;
-  const state = await readState3(env);
+  const state = await readState2(env);
   return state.watermarks[sessionId] ?? 0;
 }
 async function setCaptureWatermark(sessionId, turnCount, env = process.env) {
   if (!sessionId || sessionId.trim().length === 0) return;
   if (typeof turnCount !== "number" || !Number.isFinite(turnCount) || turnCount < 0) return;
-  const state = await readState3(env);
+  const state = await readState2(env);
   const prev = state.watermarks[sessionId] ?? 0;
   if (turnCount <= prev) return;
   const { [sessionId]: _old, ...rest } = state.watermarks;
   const watermarks = { ...rest, [sessionId]: turnCount };
   const keys = Object.keys(watermarks);
-  if (keys.length > MAX_REMEMBERED2) {
-    for (const k of keys.slice(0, keys.length - MAX_REMEMBERED2)) delete watermarks[k];
+  if (keys.length > MAX_REMEMBERED) {
+    for (const k of keys.slice(0, keys.length - MAX_REMEMBERED)) delete watermarks[k];
   }
-  await writeState3({ captured: state.captured, watermarks }, env);
+  await writeState2({ captured: state.captured, watermarks }, env);
 }
 function spawnDetached(rawPayload, agent, deps = {}) {
   const doSpawn = deps.spawnImpl ?? spawn2;
@@ -32096,7 +32127,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error51) {
@@ -32113,7 +32144,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const earlyReject = (error51) => {
         reject(error51);
       };
@@ -32191,7 +32222,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve2(parseResult.data);
+            resolve3(parseResult.data);
           }
         } catch (error51) {
           reject(error51);
@@ -32452,12 +32483,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve2, interval);
+      const timeoutId = setTimeout(resolve3, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -33557,7 +33588,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -34206,12 +34237,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve2) => {
+    return new Promise((resolve3) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve2();
+        resolve3();
       } else {
-        this._stdout.once("drain", resolve2);
+        this._stdout.once("drain", resolve3);
       }
     });
   }
@@ -35227,6 +35258,462 @@ async function runGrepContext(rawStdin, deps = {}) {
   }
 }
 
+// src/editNudge.ts
+import { relative, resolve as resolve2, isAbsolute as isAbsolute3, sep } from "node:path";
+var EDIT_NUDGE_FILE = "edit-nudge.json";
+var MAX_PREFLIGHTS_PER_SESSION = 3;
+var COVERAGE_PREFLIGHT_TIMEOUT_MS = 2e3;
+function interpretCoverageResponse(ok, status, payload) {
+  if (!ok || status !== 200) return { speak: false, signal: "unresolved", subsystem: null };
+  const rec = payload && typeof payload === "object" ? payload : {};
+  if (rec.signal !== "uncovered") {
+    const known = rec.signal === "covered" || rec.signal === "unresolved" ? rec.signal : "unresolved";
+    return { speak: false, signal: known, subsystem: null };
+  }
+  const subsystem = typeof rec.subsystem === "string" && rec.subsystem.trim().length > 0 ? rec.subsystem.trim() : null;
+  return { speak: true, signal: "uncovered", subsystem };
+}
+function editNudgeMessage(subsystem) {
+  const area = subsystem ? `"${subsystem}"` : "this part of the codebase";
+  const topic = subsystem ?? "this area";
+  return `Backthread: you haven't been through anything on ${area} yet \u2014 \`/backthread:how ${topic}\` shows what's already on record before you change it.`;
+}
+function extractEditPath(toolInput) {
+  if (!toolInput || typeof toolInput !== "object") return "";
+  const ti = toolInput;
+  for (const key of ["file_path", "path"]) {
+    const v = ti[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  }
+  return "";
+}
+function toRepoRelativePath(repoRoot, cwd, filePath) {
+  try {
+    const abs = isAbsolute3(filePath) ? filePath : resolve2(cwd, filePath);
+    const rel = relative(resolve2(repoRoot), abs);
+    if (!rel || rel.startsWith("..") || isAbsolute3(rel)) return null;
+    return sep === "/" ? rel : rel.split(sep).join("/");
+  } catch {
+    return null;
+  }
+}
+async function checkCoverage(repo, path, token, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COVERAGE_PREFLIGHT_TIMEOUT_MS);
+  try {
+    const res = await doFetch(buildCoveragePreflightUrl(env), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        // device token — never logged
+        "Content-Type": "application/json",
+        ...versionHeaders()
+      },
+      body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name }, path }),
+      signal: controller.signal
+    });
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    return interpretCoverageResponse(true, res.status, payload);
+  } catch {
+    return interpretCoverageResponse(false, 0, null);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function runEditNudge(rawStdin, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doReadConfig = deps.readConfigImpl ?? readConfig;
+  const resolveRoot = deps.resolveRepoRootImpl ?? resolveRepoRoot;
+  try {
+    let payload;
+    try {
+      payload = JSON.parse(rawStdin);
+    } catch {
+      return {};
+    }
+    const rec = payload && typeof payload === "object" ? payload : {};
+    const sessionId = typeof rec.session_id === "string" ? rec.session_id.trim() : "";
+    if (!sessionId) return {};
+    const filePath = extractEditPath(rec.tool_input);
+    if (!filePath) return {};
+    if (await wasSessionClaimed(EDIT_NUDGE_FILE, sessionId, env)) return {};
+    if (!await claimPreflightSlot(sessionId, env)) return {};
+    const cwd = typeof rec.cwd === "string" && rec.cwd ? rec.cwd : deps.cwd ?? process.cwd();
+    const repo = resolveRepo(cwd, deps.readRemoteImpl);
+    if (!repo) return {};
+    const repoRoot = resolveRoot(cwd);
+    const relPath = toRepoRelativePath(repoRoot, cwd, filePath);
+    if (!relPath) return {};
+    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
+    if (!config2.device_token) return {};
+    const verdict = await checkCoverage(repo, relPath, config2.device_token, deps);
+    if (!verdict.speak) return {};
+    if (!await claimSessionOnce(EDIT_NUDGE_FILE, sessionId, env)) return {};
+    return { systemMessage: editNudgeMessage(verdict.subsystem) };
+  } catch {
+    return {};
+  }
+}
+async function claimPreflightSlot(sessionId, env) {
+  for (let n = 1; n <= MAX_PREFLIGHTS_PER_SESSION; n++) {
+    if (await claimSessionOnce(EDIT_NUDGE_FILE, `${sessionId}#${n}`, env)) return true;
+  }
+  return false;
+}
+
+// src/lesson.ts
+var LESSON_START_TIMEOUT_MS = 9e4;
+var LESSON_ANSWER_TIMEOUT_MS = 6e4;
+function isDeclaredOutcome(v) {
+  return v === "disagree" || v === "bad-question";
+}
+async function startLesson(input, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const doReadConfig = deps.readConfigImpl ?? readConfig;
+  try {
+    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
+    if (!config2.device_token) {
+      return {
+        status: "no-auth",
+        detail: "not authenticated \u2014 run `backthread login` first (no device token in config)."
+      };
+    }
+    const repo = resolveQueryRepo(input, config2, deps.readRemoteImpl);
+    if (!repo) {
+      return {
+        status: "no-repo",
+        detail: 'could not determine a repo \u2014 run from the repo directory, pass repo "owner/name", or connect it first.'
+      };
+    }
+    const res = await postJson(
+      doFetch,
+      buildLessonStartUrl(env),
+      config2.device_token,
+      { repo: `${repo.owner}/${repo.name}` },
+      LESSON_START_TIMEOUT_MS
+    );
+    if (!res.ok) {
+      return { status: res.timedOut ? "failed" : "failed", detail: res.detail, repo };
+    }
+    const rec = res.payload;
+    const upgrade = readUpgrade(res.upgradeHeader, rec);
+    if (res.status === 409) {
+      return {
+        status: "in-progress",
+        detail: serverMessage(rec) ?? "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+        repo,
+        ...upgrade ? { upgrade } : {}
+      };
+    }
+    if (res.status < 200 || res.status >= 300) {
+      return {
+        status: "failed",
+        detail: `lesson start rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ""}`,
+        repo,
+        ...upgrade ? { upgrade } : {}
+      };
+    }
+    const lesson = normalizeLesson(rec, `${repo.owner}/${repo.name}`);
+    if (!lesson) {
+      return { status: "failed", detail: "lesson start returned no lesson.", repo };
+    }
+    return {
+      status: "ok",
+      detail: `${lesson.kind} lesson \xB7 ${lesson.items.length} item(s)`,
+      repo,
+      lesson,
+      ...upgrade ? { upgrade } : {}
+    };
+  } catch (e) {
+    return { status: "error", detail: `lesson failed (swallowed): ${e.message}` };
+  }
+}
+async function answerLesson(input, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const doReadConfig = deps.readConfigImpl ?? readConfig;
+  try {
+    const questionId = (input.questionId ?? "").trim();
+    if (!questionId) {
+      return { status: "failed", detail: "a question id is required \u2014 see the ids printed by `backthread learn`." };
+    }
+    const declared = isDeclaredOutcome(input.outcome) ? input.outcome : null;
+    const answer = typeof input.answer === "string" ? input.answer : "";
+    if (!declared && answer.trim().length === 0) {
+      return {
+        status: "failed",
+        detail: 'an answer is required \u2014 type what you think, or send "I disagree" / "Bad question" instead.'
+      };
+    }
+    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
+    if (!config2.device_token) {
+      return {
+        status: "no-auth",
+        detail: "not authenticated \u2014 run `backthread login` first (no device token in config)."
+      };
+    }
+    const res = await postJson(
+      doFetch,
+      buildLessonAnswerUrl(env),
+      config2.device_token,
+      { questionId, answer, ...declared ? { outcome: declared } : {} },
+      LESSON_ANSWER_TIMEOUT_MS
+    );
+    if (!res.ok) return { status: "failed", detail: res.detail };
+    const rec = res.payload;
+    const upgrade = readUpgrade(res.upgradeHeader, rec);
+    if (res.status < 200 || res.status >= 300) {
+      return {
+        status: "failed",
+        detail: `answer rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ""}`,
+        ...upgrade ? { upgrade } : {}
+      };
+    }
+    const result = normalizeAnswer(rec, questionId);
+    return {
+      status: "ok",
+      detail: `recorded (${result.outcome})`,
+      result,
+      ...upgrade ? { upgrade } : {}
+    };
+  } catch (e) {
+    return { status: "error", detail: `answer failed (swallowed): ${e.message}` };
+  }
+}
+async function postJson(doFetch, url2, token, body, timeoutMs) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(url2, {
+      method: "POST",
+      headers: {
+        // Bearer device token — never logged, never printed.
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...versionHeaders()
+      },
+      body: JSON.stringify(body),
+      signal: ac.signal
+    });
+    let payload;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    return {
+      ok: true,
+      status: res.status,
+      payload: payload && typeof payload === "object" ? payload : {},
+      detail: "",
+      timedOut: false,
+      upgradeHeader: res.headers?.get?.("x-backthread-upgrade") ?? null
+    };
+  } catch (e) {
+    const aborted2 = e.name === "AbortError";
+    return {
+      ok: false,
+      status: 0,
+      payload: {},
+      detail: aborted2 ? `timed out after ${Math.round(timeoutMs / 1e3)}s \u2014 try again.` : `request failed: ${e.message}`,
+      timedOut: aborted2,
+      upgradeHeader: null
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function serverMessage(rec) {
+  if (typeof rec.message === "string" && rec.message.length > 0) return rec.message;
+  if (typeof rec.error === "string" && rec.error.length > 0) return rec.error;
+  return null;
+}
+function readUpgrade(header, rec) {
+  if (header && header.length > 0) return header;
+  return typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
+}
+var RUNGS = ["teach", "recognise", "produce"];
+var KINDS = ["graded", "teaching-card", "caught-up"];
+function normalizeLesson(raw, fallbackRepo) {
+  const rec = raw && typeof raw === "object" ? raw : {};
+  const l = rec.lesson && typeof rec.lesson === "object" ? rec.lesson : null;
+  if (!l) return null;
+  const kind = KINDS.includes(l.kind) ? l.kind : "graded";
+  const items = Array.isArray(l.items) ? l.items.map(normalizeItem) : [];
+  return {
+    id: String(l.id ?? ""),
+    kind,
+    repo: typeof l.repo === "string" && l.repo ? l.repo : fallbackRepo,
+    createdAt: typeof l.createdAt === "string" ? l.createdAt : "",
+    cached: l.cached === true,
+    items
+  };
+}
+function normalizeItem(raw, index) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  return {
+    id: typeof r.id === "string" && r.id ? r.id : null,
+    ordinal: typeof r.ordinal === "number" ? r.ordinal : index + 1,
+    rung: RUNGS.includes(r.rung) ? r.rung : "recognise",
+    subsystem: typeof r.subsystem === "string" && r.subsystem ? r.subsystem : null,
+    body: String(r.body ?? ""),
+    isOpen: r.isOpen === true
+  };
+}
+var OUTCOMES = ["got-it", "not-yet", "disagree", "bad-question", "answered-open"];
+function normalizeAnswer(raw, fallbackQuestionId) {
+  const r = raw && typeof raw === "object" ? raw : {};
+  const rev = r.reveal && typeof r.reveal === "object" ? r.reveal : {};
+  const eff = r.effect && typeof r.effect === "object" ? r.effect : {};
+  const les = r.lesson && typeof r.lesson === "object" ? r.lesson : {};
+  return {
+    questionId: typeof r.questionId === "string" && r.questionId ? r.questionId : fallbackQuestionId,
+    outcome: OUTCOMES.includes(r.outcome) ? r.outcome : "not-yet",
+    verdict: r.verdict === "got-it" || r.verdict === "not-yet" ? r.verdict : null,
+    graded: r.graded === true,
+    note: typeof r.note === "string" && r.note ? r.note : null,
+    reveal: {
+      decided: typeof rev.decided === "string" && rev.decided ? rev.decided : null,
+      why: typeof rev.why === "string" && rev.why ? rev.why : null,
+      rationale: typeof rev.rationale === "string" && rev.rationale ? rev.rationale : null,
+      since: Array.isArray(rev.since) ? rev.since.map((s) => {
+        const n = s && typeof s === "object" ? s : {};
+        return {
+          title: typeof n.title === "string" ? n.title : null,
+          why: typeof n.why === "string" ? n.why : null,
+          decidedAt: typeof n.decidedAt === "string" ? n.decidedAt : null
+        };
+      }) : []
+    },
+    effect: { kind: typeof eff.kind === "string" ? eff.kind : "none", ...eff },
+    lesson: {
+      id: typeof les.id === "string" ? les.id : "",
+      completed: les.completed === true
+    }
+  };
+}
+function learnInvocation(argv = process.argv) {
+  const self = argv[1];
+  if (!self) return "backthread learn";
+  return `node "${self}" learn`;
+}
+function readStdinText(stdin = process.stdin) {
+  if (stdin.isTTY) return Promise.resolve("");
+  return new Promise((resolveText) => {
+    let data = "";
+    stdin.setEncoding("utf8");
+    stdin.on("data", (chunk) => data += chunk);
+    stdin.on("end", () => resolveText(data));
+    stdin.on("error", () => resolveText(""));
+  });
+}
+function rungLabel(item) {
+  if (item.rung === "teach") return "TEACH \u2014 nothing to answer, this one just tells you";
+  if (item.isOpen) return "OPEN \u2014 no recorded answer; your reply becomes the record";
+  return item.rung === "produce" ? "QUESTION (in your own words)" : "QUESTION";
+}
+function formatLesson(outcome, submitCommand) {
+  if (outcome.status !== "ok" || !outcome.lesson) {
+    const lines = [`backthread learn: ${outcome.detail}`];
+    if (outcome.status === "no-auth") lines.push("Run `backthread login`, then try again.");
+    if (outcome.upgrade) lines.push(outcome.upgrade);
+    return lines.join("\n");
+  }
+  const lesson = outcome.lesson;
+  const out = [];
+  out.push(`Backthread lesson \u2014 ${lesson.repo}`);
+  out.push(`lesson-id: ${lesson.id}${lesson.cached ? " (resuming the one you left unfinished)" : ""}`);
+  out.push("");
+  if (lesson.kind === "caught-up" || lesson.items.length === 0) {
+    out.push("You're caught up. Nothing new worth asking about has landed here since last time.");
+    out.push("That is the whole lesson \u2014 a quiet repo is a finished lesson, not a short one.");
+    if (outcome.upgrade) out.push("", outcome.upgrade);
+    return out.join("\n");
+  }
+  if (lesson.kind === "teaching-card") {
+    out.push("A quiet day \u2014 there was not enough new material to build questions from,");
+    out.push("so this lesson just tells you what changed. Reading it is the whole lesson.");
+    out.push("");
+  }
+  for (const item of lesson.items) {
+    const where = item.subsystem ? ` \xB7 ${item.subsystem}` : "";
+    out.push(`[${item.ordinal}] ${rungLabel(item)}${where}`);
+    if (item.id && item.rung !== "teach") out.push(`question-id: ${item.id}`);
+    out.push(item.body);
+    out.push("");
+  }
+  if (!lesson.items.some((i) => i.rung !== "teach" && i.id)) {
+    out.push("Nothing to answer here \u2014 reading it is the whole lesson.");
+    if (outcome.upgrade) out.push("", outcome.upgrade);
+    return out.join("\n");
+  }
+  out.push("--- how to submit an answer ---");
+  out.push("One question at a time. Pipe the person's own words in on stdin:");
+  out.push("");
+  out.push(`  ${submitCommand} --answer <question-id> <<'ANSWER'`);
+  out.push("  ...their answer, verbatim...");
+  out.push("  ANSWER");
+  out.push("");
+  out.push("Two more replies are always available, and neither costs anything:");
+  out.push(`  ${submitCommand} --answer <question-id> --disagree       (the record looks wrong to me)`);
+  out.push(`  ${submitCommand} --answer <question-id> --bad-question   (this question is no good)`);
+  if (outcome.upgrade) out.push("", outcome.upgrade);
+  return out.join("\n");
+}
+function formatLessonAnswer(outcome) {
+  if (outcome.status !== "ok" || !outcome.result) {
+    const lines = [`backthread learn: ${outcome.detail}`];
+    if (outcome.status === "no-auth") lines.push("Run `backthread login`, then try again.");
+    if (outcome.upgrade) lines.push(outcome.upgrade);
+    return lines.join("\n");
+  }
+  const r = outcome.result;
+  const out = [];
+  if (r.verdict === "got-it") out.push("Got it.");
+  else if (r.verdict === "not-yet") out.push("Not yet.");
+  else if (r.outcome === "answered-open") {
+    out.push("Recorded \u2014 thank you. Open questions are not graded: nobody had written this down,");
+    out.push("so your answer is now the record for it.");
+  } else if (r.outcome === "disagree") {
+    out.push("Noted \u2014 flagged against that decision as possibly out of date with the system.");
+    out.push("This is not a wrong answer and it cost you nothing.");
+  } else if (r.outcome === "bad-question") {
+    out.push("Noted \u2014 that one won't be asked again on this repo.");
+    out.push("This is not a wrong answer and it cost you nothing.");
+  }
+  if (r.note) out.push(r.note);
+  const rev = r.reveal;
+  if (rev.decided || rev.why || rev.rationale) {
+    out.push("");
+    out.push("--- what the record says ---");
+    if (rev.decided) out.push(`Decided: ${rev.decided}`);
+    if (rev.why) out.push(`Why: ${rev.why}`);
+    if (rev.rationale) out.push(`On record: ${rev.rationale}`);
+  }
+  if (rev.since.length > 0) {
+    out.push("");
+    out.push("Since then:");
+    for (const s of rev.since) {
+      const when = s.decidedAt ? ` (${s.decidedAt.slice(0, 10)})` : "";
+      out.push(`  - ${s.title ?? "a later decision"}${when}${s.why ? ` \u2014 ${s.why}` : ""}`);
+    }
+  }
+  if (r.lesson.completed) {
+    out.push("");
+    out.push("That was the last question \u2014 you're done for today.");
+  }
+  if (outcome.upgrade) out.push("", outcome.upgrade);
+  return out.join("\n");
+}
+
 // src/bin/backthread.ts
 var USAGE = `backthread \u2014 keep the thread on what your AI agent actually shipped
 
@@ -35246,6 +35733,14 @@ Setup
 Ask
   backthread how <question>     Ask how/why something here works \u2014 a grounded, cited answer
                           from your decision log (backs /backthread:how). [--cwd <path>]
+
+Learn
+  backthread learn              Today's short lesson about this codebase, built from what
+                          was actually recorded here (backs /backthread:learn).
+                          [--cwd <path>] [--repo <owner/name>]
+  backthread learn --answer <question-id>
+                          Submit one answer (text on stdin, or --text "\u2026").
+                          [--disagree] [--bad-question] \u2014 neither costs you anything.
 
 Capture
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
@@ -35278,6 +35773,7 @@ var KNOWN_COMMANDS = [
   "whoami",
   "how",
   "ask",
+  "learn",
   "capture",
   "mcp",
   "graph",
@@ -35407,6 +35903,34 @@ async function main(argv, deps = {}) {
       console.log(JSON.stringify(output));
       return 0;
     }
+    case "edit-context": {
+      const raw = await readRawHookInput().catch(() => "");
+      const output = await runEditNudge(raw);
+      console.log(JSON.stringify(output));
+      return 0;
+    }
+    case "learn": {
+      const answerFlagPresent = rest.includes("--answer");
+      if (answerFlagPresent) {
+        const questionId = flagValue(rest, "--answer");
+        if (!questionId) {
+          console.error(
+            "`--answer` needs a question id. Usage: backthread learn --answer <question-id> (answer text on stdin)"
+          );
+          return 1;
+        }
+        const declared = rest.includes("--disagree") ? "disagree" : rest.includes("--bad-question") ? "bad-question" : null;
+        const text = flagValue(rest, "--text") ?? (declared ? "" : await readStdinText());
+        const outcome2 = await answerLesson({ questionId, answer: text, outcome: declared });
+        console.log(formatLessonAnswer(outcome2));
+        return outcome2.status === "ok" ? 0 : 1;
+      }
+      const cwd = flagValue(rest, "--cwd") ?? process.cwd();
+      const repoFlag = flagValue(rest, "--repo");
+      const outcome = await startLesson({ cwd, ...repoFlag ? { repo: repoFlag } : {} });
+      console.log(formatLesson(outcome, learnInvocation()));
+      return outcome.status === "ok" ? 0 : 1;
+    }
     case "mcp": {
       await startMcpServer();
       return null;
@@ -35489,14 +36013,14 @@ function isEntryPoint() {
     const entry = process.argv[1];
     if (!entry) return false;
     const self = fileURLToPath2(import.meta.url);
-    const resolve2 = (p) => {
+    const resolve3 = (p) => {
       try {
         return realpathSync2(p);
       } catch {
         return p;
       }
     };
-    return resolve2(self) === resolve2(entry);
+    return resolve3(self) === resolve3(entry);
   } catch {
     return true;
   }
