@@ -21,6 +21,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Nothing we distribute may carry an internal reference (issue ids, tracker URLs,
+      # private repo names, company email domains) — in the npm tarball or in the bundles
+      # installed straight from git. Deliberately FIRST: it is a plain node script needing
+      # no install, and putting it behind the dependency gates below would mean an
+      # unrelated advisory silently stops it from ever running. It reads the COMMITTED
+      # bundle, which the sync step further down ties to a fresh build.
+      - name: No internal references in anything we distribute
+        run: npm run check:no-internal-refs
       # Lockfile integrity: it must be present, and `npm ci` (below) hard-fails if it's out
       # of sync with package.json — so an un-committed dependency change can't slip through.
       - name: Lockfile present
@@ -47,12 +55,6 @@ jobs:
       # deterministic for the lockfile-pinned version).
       - name: Committed bundle is in sync with src
         run: git diff --exit-code cli/dist-bundle/backthread.js
-      # Nothing we publish may carry an internal reference (issue ids, tracker URLs,
-      # private repo names, company email domains). Runs AFTER the bundle rebuild, so it
-      # scans the same bytes the tarball will carry — a comment that esbuild inlines into
-      # dist-bundle/backthread.js is caught here rather than by a reader on npm.
-      - name: No internal references in the published package
-        run: npm run check:no-internal-refs
       # Regression guard: every release workflow must keep npm build provenance on, so each
       # published package always carries a verifiable, tamper-evident build attestation.
       - name: Releases keep npm provenance on
