@@ -182,7 +182,7 @@ export interface BuildServerDeps {
 export function buildMcpServer(deps: BuildServerDeps = {}): McpServer {
   const server = new McpServer({
     name: deps.name ?? 'backthread',
-    // Report the package's real version (read from package.json, ARP-478) instead of a
+    // Report the package's real version (read from package.json) instead of a
     // pinned 0.0.0, so an MCP host's serverInfo shows the installed Backthread version.
     version: deps.version ?? cliVersion(),
   });

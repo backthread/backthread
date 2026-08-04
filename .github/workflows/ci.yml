@@ -1,7 +1,7 @@
 # CI — typecheck + test the `backthread` CLI on every PR + push to main, verify the
-# committed self-contained bundle is in sync with src (ARP-478), and hold the supply-chain
+# committed self-contained bundle is in sync with src, and hold the supply-chain
 # floor for a widely-`npx`'d package: a vulnerability gate, a lockfile-integrity gate, and
-# a guard that the release keeps npm provenance on (ARP-797).
+# a guard that the release keeps npm provenance on.
 #
 # GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
 # action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
@@ -42,11 +42,17 @@ jobs:
       - name: Test
         run: npm test
       # The Claude Code marketplace plugin is cloned from git with NO build step on
-      # install, so the COMMITTED bundle must equal a fresh build (ARP-477). `npm test`
+      # install, so the COMMITTED bundle must equal a fresh build. `npm test`
       # just rebuilt it; fail if it differs from what's committed (esbuild is
       # deterministic for the lockfile-pinned version).
       - name: Committed bundle is in sync with src
         run: git diff --exit-code cli/dist-bundle/backthread.js
+      # Nothing we publish may carry an internal reference (issue ids, tracker URLs,
+      # private repo names, company email domains). Runs AFTER the bundle rebuild, so it
+      # scans the same bytes the tarball will carry — a comment that esbuild inlines into
+      # dist-bundle/backthread.js is caught here rather than by a reader on npm.
+      - name: No internal references in the published package
+        run: npm run check:no-internal-refs
       # Regression guard: every release workflow must keep npm build provenance on, so each
       # published package always carries a verifiable, tamper-evident build attestation.
       - name: Releases keep npm provenance on

@@ -364,7 +364,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     const captured = {
       branch: gitContext.branch,
       headSha: gitContext.headSha,
-      gitUser: gitContext.gitUser, // ARP-1208 — committer identity for merge scoping
+      gitUser: gitContext.gitUser, // committer identity, for merge scoping
       at: decidedAt ?? null,
     };
 
@@ -447,7 +447,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       // Carry the session id so the connect-nudge can throttle once-per-session
       // — the SessionEnd hook fires once, but manual/MCP captures fire many times.
       sessionId,
-      // ARP-696 — the session's git context, for the held-state decision server-side.
+      // The session's git context, for the held-state decision server-side.
       captured,
       // first-capture confirmation seam (threaded so tests can stub it).
       firstCaptureConfirmImpl: deps.firstCaptureConfirmImpl,
@@ -505,7 +505,7 @@ async function persistDerived(
   // (respect any explicit dedupeKey/sessionId the server-side derivation set).
   const body = {
     repo: { owner: repo.owner, name: repo.name },
-    // ARP-696 — session-level git context (the ingest-decisions validator reads it
+    // Session-level git context (the ingest-decisions validator reads it
     // body-level and stamps each decision). Each field only when present; absent →
     // the server keeps the decision merged (back-compat). It's the repo-less /
     // self-persist path, so a held decision waits for the repo to connect + reconcile.
