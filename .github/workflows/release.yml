@@ -41,7 +41,7 @@ jobs:
     # reviewers) to it later if you want a manual approval gate before each publish.
     environment: release
     steps:
-      # SHA-pinned (not floating tags) — see ci.yml + .github/dependabot.yml (ARP-797).
+      # SHA-pinned (not floating tags) — see ci.yml + .github/dependabot.yml.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -62,6 +62,10 @@ jobs:
         run: npm test
       - name: Committed bundle is in sync with src
         run: git diff --exit-code cli/dist-bundle/backthread.js
+      # A publish is irreversible on npm, so re-run the internal-reference guard here and
+      # not only on the PR — the tarball is the artifact strangers read.
+      - name: No internal references in the published package
+        run: npm run check:no-internal-refs
       # Guard: the tag must match cli/package.json (and the manifests, via the lockstep
       # tests above) — never publish a version that doesn't match the tag.
       - name: Tag matches cli/package.json version

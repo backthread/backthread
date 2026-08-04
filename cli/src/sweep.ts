@@ -442,7 +442,7 @@ export async function runSweep(input: SweepInput = {}, deps: SweepDeps = {}): Pr
           log(
             `backthread sweep: ${files.length} transcript(s) in ${dirName} can't be attributed to ${repoSlug}` +
               (cls.cwd ? ` (cwd ${cls.cwd} is gone)` : ' (no cwd recorded)') +
-              ' — left for GitHub-derived recovery (ARP-538).',
+              ' — left for GitHub-derived recovery.',
           );
         }
         continue;

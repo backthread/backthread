@@ -1,7 +1,7 @@
 # CI — typecheck + test the `backthread` CLI on every PR + push to main, verify the
-# committed self-contained bundle is in sync with src (ARP-478), and hold the supply-chain
+# committed self-contained bundle is in sync with src, and hold the supply-chain
 # floor for a widely-`npx`'d package: a vulnerability gate, a lockfile-integrity gate, and
-# a guard that the release keeps npm provenance on (ARP-797).
+# a guard that the release keeps npm provenance on.
 #
 # GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
 # action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
@@ -21,6 +21,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Nothing we distribute may carry an internal reference (issue ids, tracker URLs,
+      # private repo names, company email domains) — in the npm tarball or in the bundles
+      # installed straight from git. Deliberately FIRST: it is a plain node script needing
+      # no install, and putting it behind the dependency gates below would mean an
+      # unrelated advisory silently stops it from ever running. It reads the COMMITTED
+      # bundle, which the sync step further down ties to a fresh build.
+      - name: No internal references in anything we distribute
+        run: npm run check:no-internal-refs
       # Lockfile integrity: it must be present, and `npm ci` (below) hard-fails if it's out
       # of sync with package.json — so an un-committed dependency change can't slip through.
       - name: Lockfile present
@@ -42,7 +50,7 @@ jobs:
       - name: Test
         run: npm test
       # The Claude Code marketplace plugin is cloned from git with NO build step on
-      # install, so the COMMITTED bundle must equal a fresh build (ARP-477). `npm test`
+      # install, so the COMMITTED bundle must equal a fresh build. `npm test`
       # just rebuilt it; fail if it differs from what's committed (esbuild is
       # deterministic for the lockfile-pinned version).
       - name: Committed bundle is in sync with src

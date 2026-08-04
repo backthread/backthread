@@ -5,6 +5,19 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.18.1
+
+**Nothing we publish carries an internal reference any more.** A few messages and shipped
+files still ended in an internal tracking id — something you'd read in `backthread doctor`,
+in `backthread sweep` output, or at the top of the Cursor wrapper script the installer
+writes into your home directory. They meant nothing to anyone outside the team, so they're
+gone; the sentences say the same thing without them.
+
+- A committed check (`npm run check:no-internal-refs`) now scans the exact file set that
+  goes into the published package and fails the build on an internal id, tracker URL,
+  private repository name or company email domain. It runs on every pull request **and**
+  again on the release tag, because a publish can't be taken back.
+
 ## 0.18.0
 
 **When your trial ends, `backthread` says so — once, and plainly.** An elapsed trial stops two things: new decisions are no longer stored, and your "How it works" diagram stops updating. Until now that was entirely silent (capture still succeeds, nothing errors, nothing already captured is lost — it just quietly stops being added to). Now the CLI prints a single line the first time it happens in a session, telling you the diagram has stopped updating and where to keep it live.

@@ -189,7 +189,7 @@ async function hookCheck(deps: DoctorDeps, env: NodeJS.ProcessEnv): Promise<Chec
       label: 'Capture hook',
       status: 'warn',
       detail:
-        'PROJECT-scoped only — blind in git worktrees + other repos (ARP-680). ' +
+        'PROJECT-scoped only — blind in git worktrees + other repos. ' +
         'Re-run `backthread install` for the user-scope hook.',
     };
   }
