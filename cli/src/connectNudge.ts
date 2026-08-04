@@ -118,6 +118,26 @@ export function freeLimitMessage(env: NodeJS.ProcessEnv = process.env): string {
   );
 }
 
+// The expired-trial line. When a trial elapses the server stops storing new
+// decisions AND stops rebuilding the diagram — reported the same silent way as the
+// cap above (a 200 skip, `captureSkipped: 'trial_expired'`, count 0), so the
+// always-exit-0 capture hook never errors and nothing already captured is lost.
+//
+// WHAT THIS SAYS, AND WHY. Not "upgrade" — that a map has stopped being true is a
+// correctness fact about the thing you're relying on, and it is worth more said
+// plainly than any pitch. The link is there because it's the fix, not because it's
+// the point. ONE line, ONCE per session, never mid-flow: a nag inside someone's
+// coding agent is the fastest way to get uninstalled.
+export const TRIAL_EXPIRED = 'trial_expired';
+
+export function trialExpiredMessage(env: NodeJS.ProcessEnv = process.env): string {
+  return (
+    `backthread: your trial has ended — your "How it works" diagram has stopped ` +
+    `updating and new decisions aren't being captured. Everything captured so far ` +
+    `stays readable: ${buildBillingUrl(env)}`
+  );
+}
+
 // Slugs that warrant appending the CLI's repo deep-link to the server's copy: the
 // connect-driven next steps point the user at the app's repo page. (The server copy
 // already carries the "why"; the CLI owns the URL — built from its repo config, not
@@ -158,10 +178,14 @@ export interface NudgeDeps {
   nextStep?: ServerNextStep | null | 'absent';
   /**
    * The response's `captureSkipped` reason, when the server didn't store this
-   * capture. `'free_limit_reached'` (the account is over its free-plan decision
-   * limit) surfaces the upgrade line and takes PRIORITY over the connect/next-step
-   * logic below (that repo is connected + healthy). Any other / absent value is
-   * ignored here (other skip reasons carry their own repoStatus/nextStep signals).
+   * capture. Two reasons surface a line here, and both take PRIORITY over the
+   * connect/next-step logic below (in both cases the repo is connected + healthy,
+   * so nothing else would fire):
+   *   * `'free_limit_reached'` — over the free-plan decision limit.
+   *   * `'trial_expired'`      — the trial elapsed, so the diagram has stopped
+   *                              updating too.
+   * Any other / absent value is ignored, INCLUDING a reason this version has never
+   * heard of — a wrong line about someone's own account is worse than no line.
    */
   captureSkipped?: string;
 }
@@ -209,6 +233,11 @@ export async function maybeNudge(
       // logic (that repo is connected + healthy, so nextStep is terminal and no
       // connect nudge would fire). Surface the upgrade line, throttled once/session.
       line = freeLimitMessage(env);
+    } else if (deps.captureSkipped === TRIAL_EXPIRED) {
+      // The trial elapsed: nothing new is being captured AND the diagram has
+      // stopped updating. Same priority + same throttle as the cap line above —
+      // this repo is connected and healthy, so nothing else would say it.
+      line = trialExpiredMessage(env);
     } else if (nextStep === null) {
       // Explicit terminal (fully onboarded) — the server says "no nudge".
       return false;

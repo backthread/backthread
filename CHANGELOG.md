@@ -5,6 +5,16 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.18.0
+
+**When your trial ends, `backthread` says so — once, and plainly.** An elapsed trial stops two things: new decisions are no longer stored, and your "How it works" diagram stops updating. Until now that was entirely silent (capture still succeeds, nothing errors, nothing already captured is lost — it just quietly stops being added to). Now the CLI prints a single line the first time it happens in a session, telling you the diagram has stopped updating and where to keep it live.
+
+- **One line per session, never per capture**, on stderr, best-effort — the same throttle the free-plan limit line uses. It can never interrupt or fail a capture, and a session that can't be identified stays silent rather than risk repeating itself.
+- **It is a correctness notice, not a pitch.** That a map you rely on has stopped being true is worth saying on its own; the link is there because it's the fix.
+- **A skip reason this version doesn't recognise prints nothing.** A wrong line about your own account is worse than no line.
+
+**`query` / `/backthread:how` now tell you when an answer comes from a frozen diagram.** If your diagram has stopped updating, answers are led by one line naming the date it stopped and how many commits have landed on your default branch since that aren't included. The wording and the numbers come from the server, so they stay accurate without you upgrading anything — this release needs no client change for it.
+
 ## 0.17.0
 
 **Backthread can now ask *you* — a short lesson on your own codebase, in the terminal.** `/backthread:learn` runs a handful of questions about *this* repo, built from what was actually recorded here: the decisions, the reasoning behind them, the options that were rejected. You answer in your own words, and each answer gets a plain **"Got it" / "Not yet"** followed by the recorded reasoning — which is the part worth having. Nothing is scored, nothing is ranked, and no history of wrong answers is kept anywhere.
