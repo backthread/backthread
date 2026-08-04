@@ -6,14 +6,18 @@
 // internal-only repository name or a company email address in a shipped file is at
 // best noise the reader can't act on, and at worst a small information leak.
 //
-// This check scans the SHIPPED SURFACE only — the exact file set `npm pack` puts in
-// the tarball (`files` in cli/package.json, plus package.json itself). Source files
-// that never reach the tarball are deliberately out of scope; the bundle is in scope,
-// so any comment that esbuild carries into `dist-bundle/backthread.js` is caught here.
+// This check scans the SHIPPED SURFACE only. Two things reach a stranger:
+//   • the npm tarball — the exact file set `npm pack` puts in it (`files` in
+//     cli/package.json, plus package.json itself), and
+//   • the bundles installed straight from git — the Claude Code plugin marketplace
+//     manifest and the Gemini / Codex extension directories under extensions/.
+// Source files that never reach either are deliberately out of scope; the built bundle
+// IS in scope, so any comment esbuild carries into `dist-bundle/backthread.js` is caught.
 //
 // Usage:
-//   node scripts/check-no-internal-refs.mjs            # scan the working tree's shipped files
+//   node scripts/check-no-internal-refs.mjs            # scan everything we distribute
 //   node scripts/check-no-internal-refs.mjs --dir DIR  # scan an extracted tarball (`package/`)
+//                                                      # — that mode checks only that package
 //
 // Exits 1 and prints every hit when something is found; exits 0 and prints OK when clean.
 
@@ -64,36 +68,51 @@ function shippedFiles(pkgDir) {
   return [...out].sort();
 }
 
+/** Distributed from git rather than npm: the plugin marketplace + the agent extensions. */
+const GIT_DISTRIBUTED = ['.claude-plugin/marketplace.json', 'extensions'];
+
 const dirArg = process.argv.indexOf('--dir');
-const target = dirArg === -1 ? join(ROOT, 'cli') : process.argv[dirArg + 1];
-if (!target || !existsSync(join(target, 'package.json'))) {
+const explicit = dirArg === -1 ? null : process.argv[dirArg + 1];
+const base = explicit ?? ROOT;
+const target = explicit ?? join(ROOT, 'cli');
+if (!existsSync(join(target, 'package.json'))) {
   console.error(`no package.json under ${target} — pass a package directory with --dir`);
   process.exit(2);
 }
 
 const files = shippedFiles(target);
+// Only when scanning the repo — an extracted tarball contains the npm package alone.
+if (!explicit) {
+  for (const rel of GIT_DISTRIBUTED) {
+    const abs = join(ROOT, rel);
+    if (!existsSync(abs)) continue;
+    if (statSync(abs).isDirectory()) files.push(...walk(abs));
+    else files.push(abs);
+  }
+}
+
 const findings = [];
 for (const abs of files) {
-  const ext = abs.slice(abs.lastIndexOf('.'));
-  if (SKIP_EXT.has(ext)) continue;
-  const rel = relative(target, abs).split(sep).join('/');
+  const name = abs.slice(abs.lastIndexOf(sep) + 1);
+  const dot = name.lastIndexOf('.');
+  if (dot > 0 && SKIP_EXT.has(name.slice(dot))) continue;
+  const rel = relative(base, abs).split(sep).join('/');
   const lines = readFileSync(abs, 'utf8').split('\n');
   lines.forEach((line, i) => {
-    for (const { name, re } of FORBIDDEN) {
-      re.lastIndex = 0;
-      for (const m of line.matchAll(re)) {
-        findings.push({ rel, line: i + 1, name, match: m[0], col: m.index ?? 0 });
+    for (const rule of FORBIDDEN) {
+      for (const m of line.matchAll(rule.re)) {
+        findings.push({ rel, line: i + 1, kind: rule.name, match: m[0] });
       }
     }
   });
 }
 
-console.log(`scanned ${files.length} shipped file(s) under ${target}`);
+console.log(`scanned ${files.length} distributed file(s) under ${base}`);
 if (findings.length === 0) {
-  console.log('OK — no internal references in the shipped surface.');
+  console.log('OK — no internal references in anything we distribute.');
   process.exit(0);
 }
-console.error(`\nFAIL — ${findings.length} internal reference(s) in files we publish:\n`);
-for (const f of findings) console.error(`  ${f.rel}:${f.line}  ${f.match}  (${f.name})`);
+console.error(`\nFAIL — ${findings.length} internal reference(s) in files we distribute:\n`);
+for (const f of findings) console.error(`  ${f.rel}:${f.line}  ${f.match}  (${f.kind})`);
 console.error('\nRewrite the text to say what it means without the internal reference.');
 process.exit(1);

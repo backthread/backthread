@@ -42,7 +42,7 @@ and each session is captured automatically.
   round-trip finishes in the background. The shared `--from-hook` entrypoint dedupes
   per session, so the per-turn `Stop` captures each session only once.
 
-## Verify-live status (spike-flavored — ARP-505 / ARP-507)
+## Verify-live status (not yet confirmed on a real install)
 
 Built against the official Codex plugin + hooks docs, but confirm on a real Codex
 install before relying on it:
@@ -55,7 +55,7 @@ install before relying on it:
   `--agent codex` path emits `{ "continue": true, … }`. Confirm the turn isn't blocked.
 
 The verified two-file fallback (write `~/.codex/config.toml` MCP + `[[hooks.Stop]]`) is
-`backthread install --agent codex` (ARP-503).
+`backthread install --agent codex`.
 
 ## Requirements
 
