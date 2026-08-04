@@ -8276,6 +8276,10 @@ var FREE_LIMIT_REACHED = "free_limit_reached";
 function freeLimitMessage(env = process.env) {
   return `backthread: you've reached your free-plan decision limit \u2014 new decisions aren't being captured. Upgrade to keep capturing: ${buildBillingUrl(env)}`;
 }
+var TRIAL_EXPIRED = "trial_expired";
+function trialExpiredMessage(env = process.env) {
+  return `backthread: your trial has ended \u2014 your "How it works" diagram has stopped updating and new decisions aren't being captured. Everything captured so far stays readable: ${buildBillingUrl(env)}`;
+}
 var LINKED_SLUGS = /* @__PURE__ */ new Set(["connect_repo", "cold_start"]);
 function nextStepMessage(step, repo, env = process.env) {
   const base = `backthread: ${step.body}`;
@@ -8294,6 +8298,8 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
     let line = null;
     if (deps.captureSkipped === FREE_LIMIT_REACHED) {
       line = freeLimitMessage(env);
+    } else if (deps.captureSkipped === TRIAL_EXPIRED) {
+      line = trialExpiredMessage(env);
     } else if (nextStep === null) {
       return false;
     } else if (nextStep !== "absent") {
@@ -9890,9 +9896,11 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
     env: ctx.env,
     log: ctx.log,
     nextStep: parseNextStep(rec.nextStep),
-    // The free-plan decision cap: when the server skips a capture over the free
-    // limit it flags `captureSkipped: 'free_limit_reached'`, and maybeNudge surfaces
-    // a one-per-session upgrade line (that repo is connected, so no other nudge fires).
+    // The two silent skips: over the free-plan decision cap
+    // (`captureSkipped: 'free_limit_reached'`) or an elapsed trial
+    // (`'trial_expired'`, which also stops the diagram updating). Both come back as
+    // a 200 with count 0 — never an error — and maybeNudge surfaces at most ONE
+    // line per session for either (that repo is connected, so no other nudge fires).
     captureSkipped: typeof rec.captureSkipped === "string" ? rec.captureSkipped : void 0
   });
   const confirm = ctx.firstCaptureConfirmImpl ?? maybeFirstCaptureConfirm;

@@ -581,9 +581,11 @@ async function persistDerived(
     env: ctx.env,
     log: ctx.log,
     nextStep: parseNextStep(rec.nextStep),
-    // The free-plan decision cap: when the server skips a capture over the free
-    // limit it flags `captureSkipped: 'free_limit_reached'`, and maybeNudge surfaces
-    // a one-per-session upgrade line (that repo is connected, so no other nudge fires).
+    // The two silent skips: over the free-plan decision cap
+    // (`captureSkipped: 'free_limit_reached'`) or an elapsed trial
+    // (`'trial_expired'`, which also stops the diagram updating). Both come back as
+    // a 200 with count 0 — never an error — and maybeNudge surfaces at most ONE
+    // line per session for either (that repo is connected, so no other nudge fires).
     captureSkipped: typeof rec.captureSkipped === 'string' ? rec.captureSkipped : undefined,
   });
 

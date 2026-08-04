@@ -9,6 +9,7 @@ import {
   nudgeMessage,
   nextStepMessage,
   freeLimitMessage,
+  trialExpiredMessage,
   maybeNudge,
   nudgeStatePath,
   type ServerNextStep,
@@ -316,5 +317,78 @@ test('the unified nextStep path still throttles once-per-session', async () => {
     assert.equal(await maybeNudge('connected', REPO, 'sess-X', { env, log, nextStep: step }), true);
     assert.equal(await maybeNudge('connected', REPO, 'sess-X', { env, log, nextStep: step }), false);
     assert.equal(lines.length, 1);
+  });
+});
+
+// --- maybeNudge: the expired trial (the map stops updating) -------------------
+//
+// When a trial elapses the server stops storing new decisions and stops rebuilding
+// the diagram. It says so with a 200 skip (`captureSkipped: 'trial_expired'`,
+// count 0) — never an error, because a capture hook that starts failing is a
+// capture hook that gets uninstalled. The one thing worth saying is that the map
+// has stopped being true, and it is worth saying exactly ONCE per session.
+
+test('trial_expired → one line per session, and it says the map stopped updating', async () => {
+  await withTempEnv(async (env) => {
+    const lines: string[] = [];
+    const log = (m: string) => lines.push(m);
+    // A frozen trial is a CONNECTED, healthy repo: 'connected' + a terminal
+    // nextStep, both of which would otherwise suppress every nudge.
+    const deps = { env, log, nextStep: null, captureSkipped: 'trial_expired' } as const;
+    assert.equal(await maybeNudge('connected', REPO, 'sess-A', deps), true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /trial/i);
+    assert.match(lines[0], /How it works/); // the customer's noun for the diagram
+    assert.doesNotMatch(lines[0], /architectural memory/i);
+    // Not an error, and never phrased as one — capture did not fail.
+    assert.doesNotMatch(lines[0], /error|failed/i);
+
+    // Throttled: every later capture in the same session stays silent.
+    assert.equal(await maybeNudge('connected', REPO, 'sess-A', deps), false);
+    assert.equal(await maybeNudge('connected', REPO, 'sess-A', deps), false);
+    assert.equal(lines.length, 1, 'one line for the whole session, however many captures');
+
+    // A NEW session says it again — once per session, not once per machine.
+    assert.equal(await maybeNudge('connected', REPO, 'sess-B', deps), true);
+    assert.equal(lines.length, 2);
+  });
+});
+
+test('trial_expired takes PRIORITY over a connect nudge', async () => {
+  await withTempEnv(async (env) => {
+    const lines: string[] = [];
+    const shown = await maybeNudge('not_connected', REPO, 'sess-A', {
+      env,
+      log: (m) => lines.push(m),
+      captureSkipped: 'trial_expired',
+    });
+    assert.equal(shown, true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /trial/i);
+    assert.doesNotMatch(lines[0], /isn't connected/);
+  });
+});
+
+test('trial_expired and the free-plan cap stay distinct messages', async () => {
+  const trial = trialExpiredMessage({ BACKTHREAD_APP_URL: 'https://example.test' } as NodeJS.ProcessEnv);
+  const free = freeLimitMessage({ BACKTHREAD_APP_URL: 'https://example.test' } as NodeJS.ProcessEnv);
+  assert.notEqual(trial, free);
+  assert.match(trial, /^backthread: /);
+  assert.equal(trial.includes('https://example.test/account/billing'), true);
+  // One line. This is a disclosure, not a banner.
+  assert.equal(trial.includes('\n'), false);
+});
+
+test('an UNKNOWN skip reason says nothing (a future reason must not print a wrong line)', async () => {
+  await withTempEnv(async (env) => {
+    const lines: string[] = [];
+    const shown = await maybeNudge('connected', REPO, 'sess-A', {
+      env,
+      log: (m) => lines.push(m),
+      nextStep: null,
+      captureSkipped: 'some_reason_this_version_never_heard_of',
+    });
+    assert.equal(shown, false);
+    assert.equal(lines.length, 0);
   });
 });
