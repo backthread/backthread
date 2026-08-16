@@ -67,7 +67,27 @@ test('the manifest registers PreToolUse + SessionStart + SessionEnd + Stop', () 
   // PreToolUse (grep-time local context); SessionStart (ambient routing); SessionEnd
   // (session-end backstop); Stop (per-turn capture — the incremental capture watermark
   // makes each fire cheap). Order doesn't matter to CC, so compare as a set.
-  assert.deepEqual([...Object.keys(hooks.hooks)].sort(), ['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop']);
+  // PostToolUse (the in-flow dead-time ask) joined them: it fires AFTER a tool the
+  // person waited on, which is the one moment they have nothing to do — and, being a
+  // Post hook on a non-editing tool, it is structurally incapable of standing between
+  // somebody and a file they are about to change.
+  assert.deepEqual(
+    [...Object.keys(hooks.hooks)].sort(),
+    ['PostToolUse', 'PreToolUse', 'SessionEnd', 'SessionStart', 'Stop'],
+  );
+});
+
+test('the PostToolUse dead-time hook waits on long tools only, runs the bundled bin, never detaches', () => {
+  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
+  assert.equal(hooks.hooks.PostToolUse.length, 1, 'exactly one PostToolUse registration');
+  const entry = hooks.hooks.PostToolUse[0];
+  assert.equal(entry.matcher, 'Bash|Task|WebFetch|WebSearch');
+  const cmd: string = entry.hooks[0].command;
+  assert.ok(cmd.includes(BUNDLE_REF), 'hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
+  assert.ok(!/\bnpx\b/.test(cmd), 'hook must NOT use npx (a sync hook would block on the resolve)');
+  assert.ok(cmd.includes('inflow-context'), 'hook routes through the inflow-context command');
+  assert.ok(cmd.includes('--agent claude-code'), 'hook stamps the claude-code provider');
+  assert.ok(!cmd.includes('--detach'), 'PostToolUse must NOT detach — CC reads stdout for the additionalContext');
 });
 
 test('the PreToolUse grep hook runs the bundled bin SYNCHRONOUSLY, matches Grep|Glob, never detaches', () => {
@@ -118,7 +138,7 @@ test('the SessionStart routing hook runs the bundled bin SYNCHRONOUSLY (ARP-763)
 });
 
 test('slash commands prefer the bundled bin (npx only as a fallback)', () => {
-  for (const name of ['capture.md', 'start.md', 'how.md', 'blindspots.md', 'learn.md']) {
+  for (const name of ['capture.md', 'start.md', 'how.md', 'blindspots.md', 'learn.md', 'ask-me.md']) {
     const md = readFileSync(join(cliRoot, 'commands', name), 'utf8');
     assert.ok(md.includes(BUNDLE_REF), `${name} references the bundled bin via \${CLAUDE_PLUGIN_ROOT}`);
     // npx is allowed ONLY as the else-branch fallback, never the sole invocation.

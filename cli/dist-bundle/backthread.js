@@ -6934,6 +6934,12 @@ function buildLessonStartUrl(env = process.env) {
 function buildLessonAnswerUrl(env = process.env) {
   return new URL("/lesson/answer", workerBaseUrl(env)).toString();
 }
+function buildInflowAskUrl(env = process.env) {
+  return new URL("/inflow/ask", workerBaseUrl(env)).toString();
+}
+function buildInflowAnswerUrl(env = process.env) {
+  return new URL("/inflow/answer", workerBaseUrl(env)).toString();
+}
 function buildCoveragePreflightUrl(env = process.env) {
   return new URL("/coverage-preflight", workerBaseUrl(env)).toString();
 }
@@ -35685,7 +35691,15 @@ function formatLessonAnswer(outcome) {
     if (outcome.upgrade) lines.push(outcome.upgrade);
     return lines.join("\n");
   }
-  const r = outcome.result;
+  const text = formatAnswerResult(
+    outcome.result,
+    "That was the last question \u2014 you're done for today."
+  );
+  return outcome.upgrade ? `${text}
+
+${outcome.upgrade}` : text;
+}
+function formatAnswerResult(r, completionLine) {
   const out = [];
   if (r.verdict === "got-it") out.push("Got it.");
   else if (r.verdict === "not-yet") out.push("Not yet.");
@@ -35718,12 +35732,374 @@ function formatLessonAnswer(outcome) {
       out.push(`  - ${s.title ?? "a later decision"}${when}${s.why ? ` \u2014 ${s.why}` : ""}`);
     }
   }
-  if (r.lesson.completed) {
+  if (r.lesson.completed && completionLine) {
     out.push("");
-    out.push("That was the last question \u2014 you're done for today.");
+    out.push(completionLine);
+  }
+  return out.join("\n");
+}
+
+// src/inflow.ts
+var INFLOW_TRIGGERS = ["dead-time", "on-demand"];
+var INFLOW_DEAD_TIME_TIMEOUT_MS = 2e3;
+var INFLOW_ON_DEMAND_TIMEOUT_MS = 2e4;
+var INFLOW_ANSWER_TIMEOUT_MS = 6e4;
+async function requestAsk(input, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const doReadConfig = deps.readConfigImpl ?? readConfig;
+  try {
+    if (!INFLOW_TRIGGERS.includes(input.trigger)) {
+      return { status: "failed", detail: `unknown trigger "${String(input.trigger)}".` };
+    }
+    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
+    if (!config2.device_token) {
+      return {
+        status: "no-auth",
+        detail: "not authenticated \u2014 run `backthread login` first (no device token in config)."
+      };
+    }
+    const repo = resolveQueryRepo(input, config2, deps.readRemoteImpl);
+    if (!repo) {
+      return {
+        status: "no-repo",
+        detail: 'could not determine a repo \u2014 run from the repo directory, pass repo "owner/name", or connect it first.'
+      };
+    }
+    const res = await postJson2(
+      doFetch,
+      buildInflowAskUrl(env),
+      config2.device_token,
+      // The COMPLETE request body. Two fields, both of them about the repo and the
+      // moment — nothing about the person, and nothing that could be tallied.
+      { repo: `${repo.owner}/${repo.name}`, trigger: input.trigger },
+      input.timeoutMs ?? INFLOW_ON_DEMAND_TIMEOUT_MS
+    );
+    if (!res.ok) return { status: "failed", detail: res.detail, repo };
+    const upgrade = readUpgrade2(res.payload);
+    if (res.status < 200 || res.status >= 300) {
+      return {
+        status: "failed",
+        detail: `ask rejected (${res.status})${serverMessage2(res.payload) ? `: ${serverMessage2(res.payload)}` : ""}`,
+        repo,
+        ...upgrade ? { upgrade } : {}
+      };
+    }
+    const promise2 = normalizePromise(res.payload.promise);
+    const reason = normalizeReason(res.payload.reason);
+    const ask = normalizeAsk(res.payload.ask);
+    if (reason === "served" && !ask) {
+      return { status: "failed", detail: "the ask came back in a shape this client does not recognise.", repo };
+    }
+    return {
+      status: "ok",
+      detail: reason,
+      repo,
+      ask,
+      reason,
+      ...promise2 ? { promise: promise2 } : {},
+      ...upgrade ? { upgrade } : {}
+    };
+  } catch (e) {
+    return { status: "error", detail: `ask failed (swallowed): ${e.message}` };
+  }
+}
+async function answerAsk(input, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const doReadConfig = deps.readConfigImpl ?? readConfig;
+  try {
+    const token = (input.token ?? "").trim();
+    if (!token) {
+      return { status: "failed", detail: "an ask token is required \u2014 it was printed with the question." };
+    }
+    const declared = input.outcome === "disagree" || input.outcome === "bad-question" ? input.outcome : null;
+    const answer = typeof input.answer === "string" ? input.answer : "";
+    if (!declared && answer.trim().length === 0) {
+      return {
+        status: "failed",
+        detail: 'an answer is required \u2014 type what you think, or send "I disagree" / "Bad question" instead.'
+      };
+    }
+    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
+    if (!config2.device_token) {
+      return {
+        status: "no-auth",
+        detail: "not authenticated \u2014 run `backthread login` first (no device token in config)."
+      };
+    }
+    const res = await postJson2(
+      doFetch,
+      buildInflowAnswerUrl(env),
+      config2.device_token,
+      { token, ...declared ? { outcome: declared } : { answer } },
+      INFLOW_ANSWER_TIMEOUT_MS
+    );
+    if (!res.ok) return { status: "failed", detail: res.detail };
+    const upgrade = readUpgrade2(res.payload);
+    if (res.status < 200 || res.status >= 300) {
+      return {
+        status: "failed",
+        detail: expiryAwareDetail(res.status, res.payload),
+        ...upgrade ? { upgrade } : {}
+      };
+    }
+    const result = normalizeAnswer(res.payload, "");
+    return {
+      status: "ok",
+      detail: `recorded (${result.outcome ?? "unrecognized outcome"})`,
+      result,
+      ...upgrade ? { upgrade } : {}
+    };
+  } catch (e) {
+    return { status: "error", detail: `answer failed (swallowed): ${e.message}` };
+  }
+}
+function expiryAwareDetail(status, payload) {
+  const slug = serverMessage2(payload) ?? "";
+  if (status === 410 || slug === "ask_expired") {
+    return "that ask has expired \u2014 it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.";
+  }
+  if (slug === "ask_material_moved") {
+    return "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.";
+  }
+  return `answer rejected (${status})${slug ? `: ${slug}` : ""}`;
+}
+async function postJson2(doFetch, url2, token, body, timeoutMs) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(url2, {
+      method: "POST",
+      headers: {
+        // Device token — never logged, never printed.
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...versionHeaders()
+      },
+      body: JSON.stringify(body),
+      signal: ac.signal
+    });
+    let payload;
+    try {
+      payload = await res.json();
+    } catch {
+      payload = null;
+    }
+    return {
+      ok: true,
+      status: res.status,
+      payload: payload && typeof payload === "object" ? payload : {},
+      detail: ""
+    };
+  } catch (e) {
+    const aborted2 = e.name === "AbortError";
+    return {
+      ok: false,
+      status: 0,
+      payload: {},
+      detail: aborted2 ? "timed out \u2014 try again." : `request failed: ${e.message}`
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function serverMessage2(rec) {
+  if (typeof rec.message === "string" && rec.message.length > 0) return rec.message;
+  if (typeof rec.error === "string" && rec.error.length > 0) return rec.error;
+  return null;
+}
+function readUpgrade2(rec) {
+  return typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
+}
+var RUNGS2 = ["teach", "recognise", "produce"];
+var REASONS = ["served", "nothing-banked", "nothing-new"];
+function normalizeReason(raw) {
+  return REASONS.includes(raw) ? raw : "nothing-new";
+}
+function normalizeAsk(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw;
+  const token = typeof r.token === "string" ? r.token.trim() : "";
+  const body = typeof r.body === "string" ? r.body.trim() : "";
+  if (!token || !body) return null;
+  return {
+    token,
+    expiresAt: typeof r.expiresAt === "string" ? r.expiresAt : "",
+    rung: RUNGS2.includes(r.rung) ? r.rung : "recognise",
+    shape: typeof r.shape === "string" && r.shape ? r.shape : null,
+    subsystem: typeof r.subsystem === "string" && r.subsystem ? r.subsystem : null,
+    body,
+    isOpen: r.isOpen === true,
+    materialKey: typeof r.materialKey === "string" ? r.materialKey : ""
+  };
+}
+function normalizePromise(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw;
+  const short = typeof r.short === "string" ? r.short.trim() : "";
+  const title = typeof r.title === "string" ? r.title.trim() : "";
+  const points = Array.isArray(r.points) ? r.points.filter((p) => typeof p === "string" && p.trim().length > 0) : [];
+  if (!short && !title && points.length === 0) return null;
+  return { short, title, points };
+}
+function askInvocation(argv = process.argv) {
+  const self = argv[1];
+  if (!self) return "backthread ask-me";
+  return `node "${self}" ask-me`;
+}
+function formatAskBlock(ask, promise2, submit) {
+  const out = [];
+  if (promise2?.short) out.push(promise2.short, "");
+  const label = ask.isOpen ? "OPEN \u2014 nothing on record answers this; a reply becomes the record" : ask.rung === "produce" ? "QUESTION (in their own words)" : "QUESTION";
+  out.push(`${label}${ask.subsystem ? ` \xB7 ${ask.subsystem}` : ""}`);
+  out.push(ask.body);
+  out.push("");
+  out.push("To submit a reply, pipe their exact words in on stdin:");
+  out.push("");
+  out.push(`  ${submit} --answer '${ask.token}' <<'ANSWER'`);
+  out.push("  ...their reply, verbatim...");
+  out.push("  ANSWER");
+  out.push("");
+  out.push("The same command with --disagree or --bad-question instead of the heredoc says");
+  out.push('"the record looks wrong to me" / "this question is no good". Neither is graded,');
+  out.push("neither is a wrong answer, and neither costs them anything.");
+  if (ask.expiresAt) {
+    out.push("");
+    out.push(`This ask expires on its own at ${ask.expiresAt}, and then it is simply gone.`);
+  }
+  return out.join("\n");
+}
+function formatAsk(outcome, submit) {
+  if (outcome.status !== "ok") {
+    const lines = [`backthread ask-me: ${outcome.detail}`];
+    if (outcome.status === "no-auth") lines.push("Run `backthread login`, then try again.");
+    if (outcome.upgrade) lines.push(outcome.upgrade);
+    return lines.join("\n");
+  }
+  const out = [];
+  if (outcome.ask) {
+    out.push(formatAskBlock(outcome.ask, outcome.promise ?? null, submit));
+    out.push("");
+    out.push(`Why this is safe to ignore: ${submit} --promise`);
+  } else if (outcome.reason === "nothing-banked") {
+    out.push("Nothing on record here to ask about yet.");
+    out.push("");
+    out.push("Backthread only asks about what was actually written down in this repo \u2014 the");
+    out.push("decisions, why they were made, the options that were rejected. Nothing has been");
+    out.push("recorded here yet, so there is nothing to ask. That is a fact about the record.");
+  } else {
+    out.push("Nothing on record here worth asking about right now.");
+    out.push("");
+    out.push("That is the whole answer, and it is a complete one \u2014 a quiet repo means nothing");
+    out.push("new was written down, which is a fact about the record and not about anyone.");
   }
   if (outcome.upgrade) out.push("", outcome.upgrade);
   return out.join("\n");
+}
+function formatAskAnswer(outcome) {
+  if (outcome.status !== "ok" || !outcome.result) {
+    const lines = [`backthread ask-me: ${outcome.detail}`];
+    if (outcome.status === "no-auth") lines.push("Run `backthread login`, then try again.");
+    if (outcome.upgrade) lines.push(outcome.upgrade);
+    return lines.join("\n");
+  }
+  const text = formatAnswerResult(outcome.result, null);
+  return outcome.upgrade ? `${text}
+
+${outcome.upgrade}` : text;
+}
+function formatPromise(outcome) {
+  if (outcome.status !== "ok") {
+    const lines = [`backthread ask-me: ${outcome.detail}`];
+    if (outcome.status === "no-auth") lines.push("Run `backthread login`, then try again.");
+    return lines.join("\n");
+  }
+  const promise2 = outcome.promise;
+  if (!promise2 || !promise2.title && promise2.points.length === 0) {
+    return "backthread ask-me: the server sent no statement this time \u2014 nothing is being claimed here that cannot be shown.";
+  }
+  const out = [];
+  if (promise2.title) out.push(promise2.title, "");
+  for (const point of promise2.points) out.push(`  - ${point}`);
+  out.push("");
+  out.push("These are properties of the code, not a policy \u2014 the client that asks you is in");
+  out.push("this open-source repo and the endpoint it calls writes nothing when it asks.");
+  return out.join("\n");
+}
+
+// src/inflowHook.ts
+var INFLOW_SESSION_FILE = "inflow-ask.json";
+var DEAD_TIME_TOOLS = ["Bash", "Task", "WebFetch", "WebSearch"];
+function isDeadTimeTool(toolName) {
+  return typeof toolName === "string" && DEAD_TIME_TOOLS.includes(toolName);
+}
+function inflowHookContext(block) {
+  return [
+    "Backthread \u2014 one optional question for the person you are working with. It arrived",
+    "while you were mid-task and they were waiting on you. It is NOT part of their request",
+    "and it is not a check on your work.",
+    "",
+    block,
+    "",
+    "How to handle it:",
+    "  - Relay it verbatim at your next natural break \u2014 after the step you are on, never",
+    "    in the middle of one. It must not change what you were asked to do, and it must",
+    "    not delay it.",
+    "  - Do not answer it yourself, and do not hint at the answer.",
+    "  - If they reply, submit their exact words with the command above and relay the",
+    "    result verbatim. Never soften a verdict and never add a score, a tally, or a",
+    "    note about anything they were asked before.",
+    "  - If they ignore it, or say no, drop it completely. Do not repeat it, do not remind",
+    "    them, and do not mention it again in this session. It expires on its own and",
+    "    nothing about it is recorded either way."
+  ].join("\n");
+}
+async function runInflowDeadTime(rawStdin, deps = {}) {
+  const env = deps.env ?? process.env;
+  const doReadConfig = deps.readConfigImpl ?? readConfig;
+  try {
+    let payload;
+    try {
+      payload = JSON.parse(rawStdin);
+    } catch {
+      return {};
+    }
+    const rec = payload && typeof payload === "object" ? payload : {};
+    const sessionId = typeof rec.session_id === "string" ? rec.session_id.trim() : "";
+    if (!sessionId) return {};
+    if (!isDeadTimeTool(rec.tool_name)) return {};
+    if (await wasSessionClaimed(INFLOW_SESSION_FILE, sessionId, env)) return {};
+    const cwd = typeof rec.cwd === "string" && rec.cwd ? rec.cwd : deps.cwd ?? process.cwd();
+    const repo = resolveRepo(cwd, deps.readRemoteImpl);
+    if (!repo) return {};
+    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
+    if (!config2.device_token) return {};
+    await claimSessionOnce(INFLOW_SESSION_FILE, sessionId, env);
+    const outcome = await (deps.requestAskImpl ?? requestAsk)(
+      {
+        trigger: "dead-time",
+        repo: { owner: repo.owner, name: repo.name },
+        cwd,
+        timeoutMs: INFLOW_DEAD_TIME_TIMEOUT_MS
+      },
+      deps
+    );
+    if (outcome.status !== "ok" || !outcome.ask) return {};
+    const block = formatAskBlock(
+      outcome.ask,
+      outcome.promise ?? null,
+      askInvocation(deps.argv ?? process.argv)
+    );
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext: inflowHookContext(block)
+      }
+    };
+  } catch {
+    return {};
+  }
 }
 
 // src/bin/backthread.ts
@@ -35753,6 +36129,14 @@ Learn
   backthread learn --answer <question-id>
                           Submit one answer (text on stdin, or --text "\u2026").
                           [--disagree] [--bad-question] \u2014 neither costs you anything.
+  backthread ask-me             Ask Backthread to ask YOU one question about this codebase,
+                          from what was actually recorded here. Ignore it and nothing
+                          happens \u2014 nothing is written down unless you answer.
+                          [--cwd <path>] [--repo <owner/name>]
+  backthread ask-me --answer <token>
+                          Answer that one question (text on stdin, or --text "\u2026").
+                          [--disagree] [--bad-question]
+  backthread ask-me --promise   What is and isn't recorded when you're asked \u2014 in full.
 
 Capture
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
@@ -35786,6 +36170,7 @@ var KNOWN_COMMANDS = [
   "how",
   "ask",
   "learn",
+  "ask-me",
   "capture",
   "mcp",
   "graph",
@@ -35920,6 +36305,41 @@ async function main(argv, deps = {}) {
       const output = await runEditNudge(raw);
       console.log(JSON.stringify(output));
       return 0;
+    }
+    case "inflow-context": {
+      const raw = await readRawHookInput().catch(() => "");
+      const output = await runInflowDeadTime(raw);
+      console.log(JSON.stringify(output));
+      return 0;
+    }
+    case "ask-me": {
+      if (rest.includes("--answer")) {
+        const token = flagValue(rest, "--answer");
+        if (!token) {
+          console.error(
+            "`--answer` needs the ask token that was printed with the question. Usage: backthread ask-me --answer <token> (reply text on stdin)"
+          );
+          return 1;
+        }
+        const declared = rest.includes("--disagree") ? "disagree" : rest.includes("--bad-question") ? "bad-question" : null;
+        const text = flagValue(rest, "--text") ?? (declared ? "" : await readStdinText());
+        const submit = deps.answerAskImpl ?? answerAsk;
+        const outcome2 = await submit({ token, answer: text, outcome: declared });
+        console.log(formatAskAnswer(outcome2));
+        return outcome2.status === "ok" ? 0 : 1;
+      }
+      const cwd = flagValue(rest, "--cwd") ?? process.cwd();
+      const repoFlag = flagValue(rest, "--repo");
+      const ask = deps.requestAskImpl ?? requestAsk;
+      const outcome = await ask({
+        trigger: "on-demand",
+        cwd,
+        ...repoFlag ? { repo: repoFlag } : {}
+      });
+      console.log(
+        rest.includes("--promise") ? formatPromise(outcome) : formatAsk(outcome, askInvocation())
+      );
+      return outcome.status === "ok" ? 0 : 1;
     }
     case "learn": {
       const answerFlagPresent = rest.includes("--answer");

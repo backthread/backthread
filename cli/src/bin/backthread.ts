@@ -62,6 +62,15 @@ import { refreshStructure } from '../localGraph.js';
 import { syncDecisions } from '../localDecisions.js';
 import { runGrepContext } from '../grepContext.js';
 import { runEditNudge } from '../editNudge.js';
+import { runInflowDeadTime } from '../inflowHook.js';
+import {
+  requestAsk,
+  answerAsk,
+  formatAsk,
+  formatAskAnswer,
+  formatPromise,
+  askInvocation,
+} from '../inflow.js';
 import {
   startLesson,
   answerLesson,
@@ -97,6 +106,14 @@ Learn
   backthread learn --answer <question-id>
                           Submit one answer (text on stdin, or --text "…").
                           [--disagree] [--bad-question] — neither costs you anything.
+  backthread ask-me             Ask Backthread to ask YOU one question about this codebase,
+                          from what was actually recorded here. Ignore it and nothing
+                          happens — nothing is written down unless you answer.
+                          [--cwd <path>] [--repo <owner/name>]
+  backthread ask-me --answer <token>
+                          Answer that one question (text on stdin, or --text "…").
+                          [--disagree] [--bad-question]
+  backthread ask-me --promise   What is and isn't recorded when you're asked — in full.
 
 Capture
   backthread capture            Capture this session's decisions (run by the SessionEnd/Stop hook)
@@ -134,6 +151,7 @@ const KNOWN_COMMANDS = [
   'how',
   'ask',
   'learn',
+  'ask-me',
   'capture',
   'mcp',
   'graph',
@@ -218,6 +236,9 @@ export interface MainDeps {
   /** Test seams for `learn` (both modes touch config + the network). */
   startLessonImpl?: typeof startLesson;
   answerLessonImpl?: typeof answerLesson;
+  /** Test seams for `ask-me` (all three modes touch config + the network). */
+  requestAskImpl?: typeof requestAsk;
+  answerAskImpl?: typeof answerAsk;
   /** Test seam for `logout` (touches ~/.backthread on disk). Defaults to runLogout. */
   runLogoutImpl?: typeof runLogout;
   /** Test seam for `update` (spawns npm / touches the network). Defaults to runUpdate. */
@@ -396,6 +417,78 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       const output = await runEditNudge(raw);
       console.log(JSON.stringify(output));
       return 0;
+    }
+    case 'inflow-context': {
+      // The PostToolUse DEAD-TIME hook. A tool the person was waiting on has just
+      // finished, so this is the one moment they have nothing to do; at most ONCE
+      // per session, it asks the server for a single question about this repo and
+      // injects it as `hookSpecificOutput.additionalContext` for the agent to relay
+      // at its next natural break.
+      //
+      // It fires AFTER the tool, never before one, and never around an edit — a
+      // question that lands the instant somebody reaches for a file is a toll gate.
+      // SILENT on everything else including every error, and `{}` (say nothing) is
+      // by far the most common output. ALWAYS exit 0.
+      const raw = await readRawHookInput().catch(() => '');
+      const output = await runInflowDeadTime(raw);
+      console.log(JSON.stringify(output));
+      return 0;
+    }
+    case 'ask-me': {
+      // The /backthread:ask-me slash command — the ON-DEMAND half of the same
+      // feature the hook above triggers passively. THREE modes:
+      //
+      //  • ASK (no flags) — fetch one question and print it, plus the exact command
+      //    to answer it. "Nothing on record here" is the common reply and a
+      //    COMPLETE one: no error, no percentage, no "you're caught up", no count.
+      //
+      //  • ANSWER (--answer <token>) — submit one reply and print the verdict plus
+      //    the recorded rationale, rendered through the same function the lesson
+      //    uses. `--disagree` / `--bad-question` submit the person's own call
+      //    instead; neither is graded and neither costs them anything.
+      //
+      //  • PROMISE (--promise) — print, in full, what is and is not recorded when
+      //    somebody is asked. The sentences come from the server so they cannot
+      //    drift from the behaviour they describe.
+      //
+      // The token is OPAQUE and is never written anywhere: it lives in the terminal
+      // scrollback for half an hour and then it is gone.
+      if (rest.includes('--answer')) {
+        const token = flagValue(rest, '--answer');
+        if (!token) {
+          console.error(
+            '`--answer` needs the ask token that was printed with the question. Usage: backthread ask-me --answer <token> (reply text on stdin)',
+          );
+          return 1;
+        }
+        const declared = rest.includes('--disagree')
+          ? ('disagree' as const)
+          : rest.includes('--bad-question')
+            ? ('bad-question' as const)
+            : null;
+        const text = flagValue(rest, '--text') ?? (declared ? '' : await readStdinText());
+        const submit = deps.answerAskImpl ?? answerAsk;
+        const outcome = await submit({ token, answer: text, outcome: declared });
+        console.log(formatAskAnswer(outcome));
+        return outcome.status === 'ok' ? 0 : 1;
+      }
+      const cwd = flagValue(rest, '--cwd') ?? process.cwd();
+      const repoFlag = flagValue(rest, '--repo');
+      const ask = deps.requestAskImpl ?? requestAsk;
+      const outcome = await ask({
+        trigger: 'on-demand',
+        cwd,
+        ...(repoFlag ? { repo: repoFlag } : {}),
+      });
+      // `--promise` renders the statement the SAME reply already carries — the
+      // server sends it on every response, including the ones with no question in
+      // them, precisely so somebody deciding whether to want this at all can read it.
+      console.log(
+        rest.includes('--promise')
+          ? formatPromise(outcome)
+          : formatAsk(outcome, askInvocation()),
+      );
+      return outcome.status === 'ok' ? 0 : 1;
     }
     case 'learn': {
       // The /backthread:learn slash command. TWO modes on one subcommand:

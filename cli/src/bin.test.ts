@@ -422,6 +422,149 @@ test('`backthread edit-context` exits 0 on a malformed payload — it can never 
   assert.equal('continue' in parsed, false);
 });
 
+// --- `inflow-context` dispatch (the dead-time hook) ---------------------------
+//
+// Both payloads stop inside runInflowDeadTime BEFORE any config read, git read or
+// request, which is what makes them safe here. The contract pinned is the same one
+// the other hooks keep: valid JSON on stdout, exit 0, whatever happens.
+
+test('`backthread inflow-context` prints valid JSON and exits 0 when there is nothing to do', async () => {
+  // No session id → nothing to hold "once per session" against → silence, before I/O.
+  const { out, result } = await withHookInput(
+    JSON.stringify({ cwd: '/repo', tool_name: 'Bash' }),
+    () => main(['inflow-context', '--agent', 'claude-code']),
+  );
+  assert.equal(result, 0);
+  assert.deepEqual(JSON.parse(out), {}, 'an empty object = say nothing at all');
+});
+
+test('`backthread inflow-context` exits 0 on a malformed payload, and never blocks anything', async () => {
+  const { out, result } = await withHookInput('not json at all {{{', () => main(['inflow-context']));
+  assert.equal(result, 0);
+  const parsed = JSON.parse(out);
+  assert.deepEqual(parsed, {});
+  assert.equal('permissionDecision' in parsed, false);
+  assert.equal('continue' in parsed, false);
+});
+
+test('`backthread inflow-context` says nothing after an editing tool, before any I/O', async () => {
+  for (const tool of ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']) {
+    const { out, result } = await withHookInput(
+      JSON.stringify({ session_id: 's', cwd: '/repo', tool_name: tool }),
+      () => main(['inflow-context']),
+    );
+    assert.equal(result, 0);
+    assert.deepEqual(JSON.parse(out), {}, `${tool} must produce nothing`);
+  }
+});
+
+// --- `ask-me` dispatch (the on-demand trigger) --------------------------------
+
+test('`backthread ask-me` prints the question and exits 0', async () => {
+  const { out, result } = await captureConsole(() =>
+    main(['ask-me', '--cwd', '/repo'], {
+      requestAskImpl: async (input) => {
+        assert.equal(input.trigger, 'on-demand');
+        return {
+          status: 'ok',
+          detail: 'served',
+          reason: 'served',
+          ask: {
+            token: 'tok',
+            expiresAt: '',
+            rung: 'recognise',
+            shape: null,
+            subsystem: null,
+            body: 'WHY DOES IT WORK LIKE THAT',
+            isOpen: false,
+            materialKey: 'm',
+          },
+          promise: { short: 'IGNORE ME FREELY', title: 't', points: ['p'] },
+        };
+      },
+    }),
+  );
+  assert.equal(result, 0);
+  assert.match(out, /IGNORE ME FREELY/);
+  assert.match(out, /WHY DOES IT WORK LIKE THAT/);
+});
+
+test('`backthread ask-me` exits 0 when there is nothing on record — a quiet repo is not a failure', async () => {
+  const { out, result } = await captureConsole(() =>
+    main(['ask-me'], {
+      requestAskImpl: async () => ({ status: 'ok', detail: 'nothing-banked', ask: null, reason: 'nothing-banked' }),
+    }),
+  );
+  assert.equal(result, 0, 'nothing to ask is a success');
+  assert.match(out, /Nothing on record here/);
+});
+
+test('`backthread ask-me --promise` prints the full statement', async () => {
+  const { out, result } = await captureConsole(() =>
+    main(['ask-me', '--promise'], {
+      requestAskImpl: async () => ({
+        status: 'ok',
+        detail: 'nothing-banked',
+        ask: null,
+        reason: 'nothing-banked',
+        promise: { short: 's', title: 'THE TITLE', points: ['POINT ONE', 'POINT TWO'] },
+      }),
+    }),
+  );
+  assert.equal(result, 0);
+  assert.match(out, /THE TITLE/);
+  assert.match(out, /POINT ONE/);
+  assert.match(out, /POINT TWO/);
+});
+
+test('`backthread ask-me --answer` submits the token and never falls through to a new ask', async () => {
+  let asked = false;
+  let submitted: unknown = null;
+  const { result } = await captureConsole(() =>
+    main(['ask-me', '--answer', 'tok-123', '--text', 'because it merged'], {
+      requestAskImpl: async () => {
+        asked = true;
+        return { status: 'ok', detail: 'served' };
+      },
+      answerAskImpl: async (input) => {
+        submitted = input;
+        return { status: 'ok', detail: 'ok', result: undefined };
+      },
+    }),
+  );
+  assert.equal(result, 0);
+  assert.equal(asked, false, 'answering must never silently start a new ask');
+  assert.deepEqual(submitted, { token: 'tok-123', answer: 'because it merged', outcome: null });
+});
+
+test('`backthread ask-me --answer` with no token fails loudly rather than asking again', async () => {
+  let asked = false;
+  const { err, result } = await captureConsole(() =>
+    main(['ask-me', '--answer'], {
+      requestAskImpl: async () => {
+        asked = true;
+        return { status: 'ok', detail: 'served' };
+      },
+    }),
+  );
+  assert.equal(result, 1);
+  assert.equal(asked, false);
+  assert.match(err, /needs the ask token/);
+});
+
+test('`backthread ask-me --disagree` submits the declared outcome, not text', async () => {
+  let submitted: unknown = null;
+  await captureConsole(() =>
+    main(['ask-me', '--answer', 'tok', '--disagree'], {
+      answerAskImpl: async (input) => {
+        submitted = input;
+        return { status: 'ok', detail: 'ok' };
+      },
+    }),
+  );
+  assert.deepEqual(submitted, { token: 'tok', answer: '', outcome: 'disagree' });
+});
+
 // --- the default runOnboarding is wired (smoke: it is a function) ------------
 
 test('runOnboarding is exported and callable (default dispatch target)', () => {

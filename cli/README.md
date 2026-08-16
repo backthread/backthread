@@ -95,6 +95,37 @@ nothing — the record can be the thing that's wrong. On a quiet week you get a
 short teaching card, or simply "you're caught up": that's a finished lesson, not
 a failed one.
 
+### One question while you wait (`/backthread:ask-me`)
+
+The other direction. `/backthread:ask-me` has Backthread ask **you** one question
+about this codebase, from what was actually recorded here. The plugin also offers
+one, unprompted, at the only moment you have nothing to do — **after** a long tool
+call your agent was running while you watched it. At most **once per session**.
+
+**Ignore it and nothing happens, and that is a property of the code rather than a
+policy:**
+
+- **Nothing is written down when you are asked.** The endpoint that hands your
+  agent a question performs no writes at all — the question exists only inside a
+  signed, half-hour token that lives in your terminal scrollback and nowhere else.
+  If you do not answer, there is no row anywhere to find later: no queue, no nag,
+  no badge, no re-ask. Nothing is stored on your machine either — you can diff the
+  config directory across an ask you answered and one you ignored and get the same
+  bytes.
+- **Nothing counts** how often you are asked or how often you answer. Not for you,
+  not for your team, not in aggregate. There is no such number to expose.
+- **Your lead sees what the team understands, never who replied.** "Did not answer"
+  and "was not asked" are the same thing here, because neither one was recorded.
+
+Run `backthread ask-me --promise` to read that statement in full, from the server
+that enforces it. The whole client is `cli/src/inflow.ts` and `cli/src/inflowHook.ts`
+if you would rather check than take our word for it — same reason the redactor is
+open source.
+
+**It is never a pre-edit trigger.** The ask fires *after* a `Bash`, `Task`,
+`WebFetch` or `WebSearch` call, never before one and never around `Edit` / `Write`
+/ `MultiEdit`. Nobody should be stopped before they want to touch anything.
+
 The plugin also registers one small **pre-edit** hook. At most **once per
 session**, when you're about to edit a part of the codebase you haven't been
 through, it prints a single line pointing at `/backthread:how`. It sends one

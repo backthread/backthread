@@ -5,6 +5,43 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.19.0
+
+**One question about your codebase, and ignoring it costs you nothing — provably.**
+`/backthread:ask-me` turns the usual direction around: instead of you asking Backthread
+how something works, Backthread asks you one question built from what was actually
+recorded in this repo. The plugin also offers one unprompted, at the only moment you have
+nothing to do — *after* a long `Bash` / `Task` / `WebFetch` / `WebSearch` call your agent
+was running while you watched it — at most once per session.
+
+The reason to trust it is that there is nowhere to keep a gradebook:
+
+- **Nothing is written down when you are asked.** The endpoint that serves the question
+  performs no writes at all; the question exists only inside a signed, half-hour token
+  that lives in your terminal scrollback. Ignore it and there is no row anywhere to find
+  later — no queue, no nag, no badge, no re-ask.
+- **Nothing is stored on your machine either.** The token never touches disk. The one file
+  this writes is a session id, and its bytes are *identical* whether a question came back,
+  none did, or the request failed — so "asked and ignored" and "never asked" cannot be
+  told apart locally any more than they can on the server. There is a test that diffs the
+  three.
+- **Nothing counts** how often you are asked or how often you answer — not for you, not
+  for your team, not in aggregate.
+- **It is never a pre-edit trigger.** It fires *after* a tool you were waiting on, never
+  before one, and never around `Edit` / `Write` / `MultiEdit`. Nobody should be stopped
+  before they want to touch anything.
+
+`backthread ask-me --promise` prints that statement in full, straight from the server that
+enforces it — the client holds no copy of the sentences, so they cannot drift away from
+the behaviour they describe. The client is `cli/src/inflow.ts` and `cli/src/inflowHook.ts`,
+open like the rest of it, for the same reason the redactor is.
+
+- A quiet repo is a finished answer, not an empty one: "nothing on record here", never a
+  zero, never a percentage, never "you're caught up".
+- Answering from the terminal goes through the same grader the browser uses, so what you
+  get back is the same binary verdict plus the recorded reasoning — and it earns the same
+  coverage. No streak, and no "done for today": there is no sitting to be done with.
+
 ## 0.18.1
 
 **Nothing we publish carries an internal reference any more.** A few messages and shipped
