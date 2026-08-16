@@ -603,8 +603,27 @@ export function formatLessonAnswer(outcome: LessonAnswerOutcome): string {
     if (outcome.upgrade) lines.push(outcome.upgrade);
     return lines.join('\n');
   }
+  const text = formatAnswerResult(
+    outcome.result,
+    "That was the last question — you're done for today.",
+  );
+  return outcome.upgrade ? `${text}\n\n${outcome.upgrade}` : text;
+}
 
-  const r = outcome.result;
+/**
+ * The verdict + recorded rationale, shared by the lesson and the in-flow ask so the
+ * two surfaces cannot start rendering the same graded answer differently. The server
+ * grades both through the SAME handler; rendering them through two copies of this
+ * function is how they would quietly diverge.
+ *
+ * `completionLine` is what to say when the server reports the lesson finished — a
+ * sitting can end, and a single in-flow ask has no sitting to be done with, so that
+ * surface passes null. It is the ONLY difference between the two.
+ */
+export function formatAnswerResult(
+  r: LessonAnswerResult,
+  completionLine: string | null,
+): string {
   const out: string[] = [];
 
   // The verdict line. BINARY, and only ever these two words — everything else is
@@ -647,10 +666,9 @@ export function formatLessonAnswer(outcome: LessonAnswerOutcome): string {
     }
   }
 
-  if (r.lesson.completed) {
+  if (r.lesson.completed && completionLine) {
     out.push('');
-    out.push("That was the last question — you're done for today.");
+    out.push(completionLine);
   }
-  if (outcome.upgrade) out.push('', outcome.upgrade);
   return out.join('\n');
 }

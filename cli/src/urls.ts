@@ -89,6 +89,23 @@ export function buildLessonAnswerUrl(env: NodeJS.ProcessEnv = process.env): stri
   return new URL('/lesson/answer', workerBaseUrl(env)).toString();
 }
 
+// Build the /inflow/ask URL the in-flow ask POSTs `{ repo, trigger }` to. Same
+// worker origin + device-token auth. The endpoint is bank-only (no inference, no
+// wait) and PERFORMS NO WRITES: the question it hands back exists only inside the
+// short-lived signed token in the reply, which this client renders and forgets. An
+// unanswered ask therefore leaves nothing behind on either side of the wire.
+export function buildInflowAskUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/inflow/ask', workerBaseUrl(env)).toString();
+}
+
+// Build the /inflow/answer URL a reply is POSTed to — the ONLY point at which an
+// in-flow ask becomes data, and only because somebody chose to reply. The server
+// holds the withheld answer key and owns the verdict; grading runs through the same
+// handler the browser uses, so a terminal answer is indistinguishable downstream.
+export function buildInflowAnswerUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL('/inflow/answer', workerBaseUrl(env)).toString();
+}
+
 // Build the /coverage-preflight URL the pre-edit hook POSTs `{ repo, path }` to.
 // Same worker origin + device-token auth. It answers ONE question — does this
 // person have coverage of the area that file belongs to — and the hook stays
