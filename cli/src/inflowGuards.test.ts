@@ -17,17 +17,43 @@
 //
 // Every one was mutation-proven: the forbidden thing was added, the guard was watched
 // go red, and the mutation was reverted. If you change one of these, do the same.
+//
+// ⚠️ THE FIRST ROUND OF THESE GUARDS WAS SHAPED FOR THE ABUSES THE AUTHOR IMAGINED AND
+// OPEN TO EVERY OTHER SHAPE — fifteen mutants survived an independent pass. Every one
+// of them went out through a channel the guards were not watching rather than through
+// one they were: a count in a REQUEST HEADER, a count in a QUERY STRING (the body
+// allowlist read `new URL(url).pathname` and never the search), a spool written to
+// `os.tmpdir()` (the disk snapshot walked only the config dir), a count on STDOUT (in
+// a hook whose stdout is a JSON contract), a count in an ENV VAR, a count SPELLED OUT
+// so it carried no digit, and counts hidden in render branches the fixture never took
+// (the error branch, an open question, the `produce` rung).
+//
+// So the allowlists below are now over EVERY channel that leaves this process, not the
+// three that were easiest to reason about: the whole request (url INCLUDING its search,
+// method, header names, body keys), every byte written under a sandboxed HOME *and*
+// TMPDIR, every write to stdout and stderr, the process environment, and every render
+// branch rather than one fixture's. The lesson generalises past this file: a guard
+// written about the shape you feared is a guard about your imagination.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, readdir, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { runInflowDeadTime, DEAD_TIME_TOOLS, INFLOW_SESSION_FILE } from './inflowHook.js';
-import { requestAsk, answerAsk, formatAsk, formatAskBlock, formatPromise, INFLOW_TRIGGERS } from './inflow.js';
+import {
+  requestAsk,
+  answerAsk,
+  formatAsk,
+  formatAskBlock,
+  formatAskAnswer,
+  formatPromise,
+  INFLOW_TRIGGERS,
+} from './inflow.js';
 import { inflowHookContext } from './inflowHook.js';
+import { throttleStatePath } from './sessionThrottle.js';
 import { ASK, PROMISE, TOKEN, stubFetch, SIGNED_IN } from './inflowFixtures.test.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -40,28 +66,91 @@ function payload(over: Record<string, unknown> = {}): string {
   return JSON.stringify({ session_id: 'sess-1', tool_name: 'Bash', cwd: '/repo', ...over });
 }
 
-async function withTempHome<T>(fn: (env: NodeJS.ProcessEnv, dir: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), 'bt-guard-'));
+/**
+ * A sandbox with the config dir AND the process temp dir inside it, so a write to
+ * either is visible to the snapshot below.
+ *
+ * ⚠️ `TMPDIR` IS REDIRECTED ON PURPOSE, and it is not tidiness. A spool written to
+ * `os.tmpdir()` instead of the config dir is exactly the queue this design exists to
+ * prevent, and it survived a whole round of guards that walked the config dir alone.
+ * `os.tmpdir()` reads `process.env.TMPDIR` on each call, so pointing it here is enough
+ * to catch it.
+ */
+async function withTempHome<T>(
+  fn: (env: NodeJS.ProcessEnv, dir: string) => Promise<T>,
+): Promise<T> {
+  const root = await mkdtemp(join(tmpdir(), 'bt-guard-'));
+  const configHome = join(root, 'config');
+  const scratch = join(root, 'tmp');
+  await mkdir(configHome, { recursive: true });
+  await mkdir(scratch, { recursive: true });
+  const prevTmp = process.env.TMPDIR;
+  process.env.TMPDIR = scratch;
   try {
-    return await fn({ BACKTHREAD_CONFIG_DIR: dir }, dir);
+    return await fn({ BACKTHREAD_CONFIG_DIR: configHome, TMPDIR: scratch, HOME: root }, root);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    if (prevTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = prevTmp;
+    await rm(root, { recursive: true, force: true });
   }
 }
 
 /**
- * Every byte this path left on disk, as a sorted list of `name contents`.
+ * Every byte this path left on disk under `dir`, RECURSIVELY, as a sorted list of
+ * `relative-path contents`.
  *
- * Deliberately the WHOLE directory rather than one known file: a spool written to a
- * filename nobody thought of is exactly the failure a named-file check misses.
+ * Deliberately the whole tree rather than one known file or one known directory: a
+ * spool written to a filename nobody thought of, in a directory nobody thought of, is
+ * precisely the failure a named-file check misses — and it is the failure that
+ * actually happened.
  */
-async function snapshotDir(dir: string): Promise<string[]> {
-  const names = (await readdir(dir).catch(() => [])).sort();
+async function snapshotDir(dir: string, prefix = ''): Promise<string[]> {
+  const entries = (await readdir(dir, { withFileTypes: true }).catch(() => [])).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
   const out: string[] = [];
-  for (const name of names) {
-    out.push(`${name} ${await readFile(join(dir, name), 'utf8').catch(() => '<unreadable>')}`);
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...(await snapshotDir(join(dir, entry.name), rel)));
+    else out.push(`${rel} ${await readFile(join(dir, entry.name), 'utf8').catch(() => '<unreadable>')}`);
   }
   return out;
+}
+
+/**
+ * Run `fn` with stdout, stderr and both console channels captured.
+ *
+ * The dead-time hook's STDOUT IS A CONTRACT — the host agent parses it as one JSON
+ * object — so a stray `console.log` anywhere under it is both a leak and a corruption,
+ * and nothing was watching that channel at all.
+ */
+async function withOutputCaptured<T>(fn: () => Promise<T>): Promise<{ value: T; wrote: string[] }> {
+  const wrote: string[] = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  const realWarn = console.warn;
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErrW = process.stderr.write.bind(process.stderr);
+  console.log = (...a: unknown[]) => void wrote.push(`console.log ${a.join(' ')}`);
+  console.error = (...a: unknown[]) => void wrote.push(`console.error ${a.join(' ')}`);
+  console.warn = (...a: unknown[]) => void wrote.push(`console.warn ${a.join(' ')}`);
+  process.stdout.write = ((c: unknown) => {
+    wrote.push(`stdout ${String(c)}`);
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((c: unknown) => {
+    wrote.push(`stderr ${String(c)}`);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { value: await fn(), wrote };
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+    console.warn = realWarn;
+    process.stdout.write = realOut;
+    process.stderr.write = realErrW;
+  }
 }
 
 /**
@@ -154,6 +243,32 @@ test('GUARD: the trigger vocabulary is the two in-flow moments and nothing else'
   }
 });
 
+test('GUARD: every hook in the manifest routes to a known subcommand', async () => {
+  // The two guards above key on the literal string `inflow-context`, which means a
+  // SECOND registration under a different subcommand name — one that forwards to the
+  // same code with the tool name rewritten — walks past both of them. Measured: it did.
+  //
+  // So the manifest's whole command vocabulary is closed. A new entrypoint has to be
+  // named here, deliberately, before any hook may call it, and only `inflow-context`
+  // may reach the in-flow ask.
+  const KNOWN_HOOK_COMMANDS = ['grep-context', 'edit-context', 'session-start', 'capture', 'inflow-context'];
+  const manifest = JSON.parse(await readFile(join(HERE, '..', 'hooks', 'hooks.json'), 'utf8')) as {
+    hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+  };
+  for (const [event, entries] of Object.entries(manifest.hooks)) {
+    for (const entry of entries) {
+      for (const { command } of entry.hooks) {
+        const named = KNOWN_HOOK_COMMANDS.filter((c) => command.includes(c));
+        assert.equal(
+          named.length,
+          1,
+          `${event} runs a command this guard does not recognise: ${command}`,
+        );
+      }
+    }
+  }
+});
+
 // ═══ PROPERTY 2 — AN IGNORED ASK LEAVES NOTHING BEHIND ═════════════════════════════
 
 test('GUARD: the disk is byte-identical whether a question came back, none did, or it failed', async () => {
@@ -179,7 +294,77 @@ test('GUARD: the disk is byte-identical whether a question came back, none did, 
   // server refuses to keep.
   assert.deepEqual(snapshots.served, snapshots.empty, 'a served ask must leave no more than an empty one');
   assert.deepEqual(snapshots.served, snapshots.failed, 'a served ask must leave no more than a failed one');
-  assert.deepEqual(snapshots.served, [`${INFLOW_SESSION_FILE} {"nudged":["sess-1"]}\n`]);
+  assert.deepEqual(snapshots.served, [`config/${INFLOW_SESSION_FILE} {"nudged":["sess-1"]}\n`]);
+});
+
+test('GUARD: an aged ring is still a spent ring — nothing may re-ask on the clock', async () => {
+  // A re-ask does not have to write anything new to exist. Backdate the ring an hour
+  // and fire again: a suppression that quietly expires leaves the bytes identical and
+  // slips past every disk guard in this file, while re-asking the same person all day.
+  // Every other test writes the ring milliseconds before reading it, so this branch is
+  // the only thing that ever exercises an OLD one.
+  await withTempHome(async (env) => {
+    const { fetchImpl, calls } = SERVED();
+    const deps = { env, fetchImpl, readConfigImpl: SIGNED_IN, readRemoteImpl: REMOTE };
+    await runInflowDeadTime(payload(), deps);
+    assert.equal(calls.length, 1);
+    const ringPath = throttleStatePath(INFLOW_SESSION_FILE, env);
+    const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    await utimes(ringPath, longAgo, longAgo);
+    await runInflowDeadTime(payload(), deps);
+    assert.equal(calls.length, 1, 'a month-old claim is still a claim — time may not un-spend it');
+  });
+});
+
+test('GUARD: nothing on this path writes to stdout, stderr or the environment', async () => {
+  // The hook prints ONE JSON object and the host parses it. A stray log line under it
+  // is a leak and a corruption at once, and it is the channel a "no counts" guard
+  // written about request bodies never looks at. The environment is the same story:
+  // a counter accumulated in a variable is still a counter.
+  await withTempHome(async (env) => {
+    const before = JSON.stringify(process.env);
+    const { fetchImpl } = SERVED();
+    const { value, wrote } = await withOutputCaptured(async () => {
+      const out = await runInflowDeadTime(payload(), {
+        env,
+        fetchImpl,
+        readConfigImpl: SIGNED_IN,
+        readRemoteImpl: REMOTE,
+      });
+      await requestAsk({ trigger: 'on-demand', repo: 'acme/widgets' }, {
+        fetchImpl: SERVED().fetchImpl,
+        readConfigImpl: SIGNED_IN,
+      });
+      await answerAsk({ token: TOKEN, answer: 'because' }, {
+        fetchImpl: stubFetch(200, { outcome: 'got-it', reveal: { since: [] }, effect: {}, lesson: {} }).fetchImpl,
+        readConfigImpl: SIGNED_IN,
+      });
+      return out;
+    });
+    assert.ok(value.hookSpecificOutput, 'precondition: this run really did serve a question');
+    assert.deepEqual(wrote, [], 'this path speaks only through its return value');
+    assert.equal(JSON.stringify(process.env), before, 'nothing may accumulate in the environment');
+  });
+});
+
+test('GUARD: the hook returns exactly one channel — the same question twice is the nag', async () => {
+  // `systemMessage` alongside `additionalContext` would show the person the question
+  // and tell the agent to relay it: one ask delivered twice. The header argues against
+  // it at length, which historically is the best predictor that nothing checks it.
+  await withTempHome(async (env) => {
+    const { fetchImpl } = SERVED();
+    const out = await runInflowDeadTime(payload(), {
+      env,
+      fetchImpl,
+      readConfigImpl: SIGNED_IN,
+      readRemoteImpl: REMOTE,
+    });
+    assert.deepEqual(Object.keys(out), ['hookSpecificOutput']);
+    assert.deepEqual(Object.keys(out.hookSpecificOutput ?? {}).sort(), [
+      'additionalContext',
+      'hookEventName',
+    ]);
+  });
 });
 
 test('GUARD: the token is never written anywhere on the machine', async () => {
@@ -257,10 +442,29 @@ test('GUARD: every request this path makes is on a closed allowlist of url, meth
   // the whole leak in its query string and never touches a body at all.
   assert.deepEqual(escaped, [], 'nothing on this path may call fetch outside the injected seam');
   assert.equal(seen.length, 3, 'one ask from the hook, one on demand, one answer');
+  // Header names are on the allowlist too. A count rides in a header just as happily
+  // as in a body, and a guard that reads only the body waves it through.
+  const ALLOWED_HEADERS = [
+    'authorization',
+    'content-type',
+    'x-backthread-version',
+    'x-backthread-agent',
+    'x-backthread-redact-version',
+    'x-backthread-platform',
+    'x-backthread-node',
+  ];
   for (const { url, init } of seen) {
-    const path = new URL(url).pathname;
+    const parsed = new URL(url);
+    const path = parsed.pathname;
     assert.ok(path in ALLOWED, `unexpected endpoint: ${path}`);
+    // The WHOLE url, not its pathname. A query string is the cheapest possible place
+    // to put a tally and it is invisible to a pathname check.
+    assert.equal(parsed.search, '', `${path} must carry no query string`);
+    assert.equal(parsed.hash, '', `${path} must carry no fragment`);
     assert.equal(init.method, 'POST', `${path} must be a POST`);
+    for (const name of Object.keys((init.headers ?? {}) as Record<string, string>)) {
+      assert.ok(ALLOWED_HEADERS.includes(name.toLowerCase()), `${path} sent an unexpected header: ${name}`);
+    }
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
     for (const key of Object.keys(body)) {
       assert.ok(ALLOWED[path].includes(key), `${path} sent an unexpected field: ${key}`);
@@ -271,17 +475,22 @@ test('GUARD: every request this path makes is on a closed allowlist of url, meth
   }
 });
 
-test('GUARD: nothing rendered to a person carries a number of any kind', () => {
-  // The server's own fields are stripped first, so this is a claim about OUR copy:
-  // a tally, a streak, a "3rd this week" or a percentage would survive the strip and
-  // turn this red.
-  // The one place the counting words legitimately appear is the sentence that
-  // FORBIDS them. It is asserted present and then removed, so the scan below is
-  // about what we would show somebody rather than about what we tell the agent not
-  // to invent — and deleting that sentence to quiet this guard turns it red instead.
+test('GUARD: nothing rendered to a person carries a quantity, on any branch', () => {
+  // Two things went wrong the first time this was written, and both are fixed here.
+  //
+  // 1. IT SCANNED FOR DIGITS. "That is your third question this week" carries no digit
+  //    and none of the banned words, and it walked straight through. Numbers spelled
+  //    out are still numbers, so the vocabulary now covers them.
+  // 2. IT SCANNED ONE FIXTURE'S HAPPY PATH. A count added under `if (ask.isOpen)`, or
+  //    on the `produce` rung, or in the FAILURE branch of `formatAsk`, was invisible —
+  //    the surfaces below now include every branch a person can actually reach.
+  //
+  // The server's own fields are stripped first, so this is a claim about OUR copy.
+  // The one place the counting words legitimately appear is the sentence that FORBIDS
+  // them: it is asserted present and then removed, so deleting it to quiet this guard
+  // turns the guard red instead of green.
   const PROHIBITION = 'never add a score, a tally, or a';
-  const agentRules = inflowHookContext('');
-  assert.ok(agentRules.includes(PROHIBITION), 'the agent is still told not to invent a tally');
+  assert.ok(inflowHookContext('').includes(PROHIBITION), 'the agent is still told not to invent a tally');
 
   const strip = (text: string): string => {
     let out = text;
@@ -300,20 +509,49 @@ test('GUARD: nothing rendered to a person carries a number of any kind', () => {
     }
     return out;
   };
+
+  const OPEN = { ...ASK, isOpen: true };
+  const PRODUCE = { ...ASK, rung: 'produce' as const };
+  const ANSWER = {
+    questionId: 'q',
+    outcome: 'got-it' as const,
+    verdict: 'got-it' as const,
+    graded: true,
+    note: null,
+    reveal: { decided: null, why: null, rationale: null, since: [] },
+    effect: { kind: 'none' },
+    lesson: { id: 'l', completed: true },
+  };
+
   const surfaces: Record<string, string> = {
     'the question block': formatAskBlock(ASK, PROMISE, 'bt ask-me'),
+    'the question block, open': formatAskBlock(OPEN, PROMISE, 'bt ask-me'),
+    'the question block, produce rung': formatAskBlock(PRODUCE, PROMISE, 'bt ask-me'),
+    'the question block, no promise sent': formatAskBlock(ASK, null, 'bt ask-me'),
     'the injected instructions': inflowHookContext(formatAskBlock(ASK, PROMISE, 'bt ask-me')),
     'a served on-demand ask': formatAsk({ status: 'ok', detail: 'served', ask: ASK, reason: 'served', promise: PROMISE }, 'bt ask-me'),
-    'an empty on-demand ask': formatAsk({ status: 'ok', detail: 'nothing-banked', ask: null, reason: 'nothing-banked' }, 'bt ask-me'),
+    'an empty on-demand ask (nothing banked)': formatAsk({ status: 'ok', detail: 'nothing-banked', ask: null, reason: 'nothing-banked' }, 'bt ask-me'),
+    'an empty on-demand ask (nothing new)': formatAsk({ status: 'ok', detail: 'nothing-new', ask: null, reason: 'nothing-new' }, 'bt ask-me'),
+    'a failed on-demand ask': formatAsk({ status: 'failed', detail: 'the worker said no' }, 'bt ask-me'),
+    'a signed-out on-demand ask': formatAsk({ status: 'no-auth', detail: 'no token' }, 'bt ask-me'),
+    'a repo-less on-demand ask': formatAsk({ status: 'no-repo', detail: 'no repo' }, 'bt ask-me'),
+    'a graded answer': formatAskAnswer({ status: 'ok', detail: 'ok', result: ANSWER }),
+    'a failed answer': formatAskAnswer({ status: 'failed', detail: 'the worker said no' }),
     'the full statement': formatPromise({ status: 'ok', detail: 'served', promise: PROMISE }),
+    'the statement, none sent': formatPromise({ status: 'ok', detail: 'served' }),
+    'the statement, failed': formatPromise({ status: 'no-auth', detail: 'no token' }),
   };
+
+  // Spelled-out ORDINALS are included, because "your third question this week" is
+  // exactly what a well-meaning edit reaches for once digits are banned. Bare cardinals
+  // ("one optional question") are deliberately NOT here — they are ordinary English on
+  // this surface, and a guard that cries at them gets weakened rather than obeyed.
+  const QUANTITY =
+    /streak|tally|so far|in a row|out of|remaining|pending|score|%|\bstats?\b|\bcount(s|ed|ing)?\b|\btotal\b|\btimes\b|this week|today|\b(twice|thrice|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b/i;
   for (const [label, text] of Object.entries(surfaces)) {
-    assert.doesNotMatch(strip(text), /\d/, `${label} must contain no number of our own`);
-    assert.doesNotMatch(
-      strip(text),
-      /streak|tally|so far|in a row|out of|remaining|pending|score|%|\bstats?\b/i,
-      `${label} must not imply a running total`,
-    );
+    const ours = strip(text);
+    assert.doesNotMatch(ours, /\d/, `${label} must contain no number of our own`);
+    assert.doesNotMatch(ours, QUANTITY, `${label} must not imply a running total`);
   }
 });
 
@@ -334,7 +572,7 @@ test('GUARD: nothing on this path names a participation quantity', async () => {
 
 // ═══ PROPERTY 4 — A QUIET SESSION IS A FIRST-CLASS COMPLETION ══════════════════════
 
-test('GUARD: an empty record is silence in the flow and a complete answer on demand', async () => {
+test('GUARD: an empty record is silence in the flow and a first-class completion on demand', async () => {
   await withTempHome(async (env) => {
     const out = await runInflowDeadTime(payload(), {
       env,

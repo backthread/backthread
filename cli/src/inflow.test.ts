@@ -22,6 +22,46 @@ import {
 } from './inflow.js';
 import { TOKEN, ASK, PROMISE, stubFetch, SIGNED_IN } from './inflowFixtures.test.js';
 
+// --- the guard suite is present and ran ------------------------------------------
+
+test('the guard suite exists and still guards every property it claims to', async () => {
+  // A TRIPWIRE, because `node --test src/*.test.ts` is a glob: deleting
+  // `inflowGuards.test.ts` outright leaves the suite GREEN and every negative property
+  // in this feature unguarded, with nothing to notice. Measured — it did.
+  //
+  // Named properties rather than a bare count, so that renaming a guard is fine and
+  // dropping the thing it protects is not.
+  const { readFile } = await import('node:fs/promises');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const src = await readFile(
+    join(dirname(fileURLToPath(import.meta.url)), 'inflowGuards.test.ts'),
+    'utf8',
+  );
+  const REQUIRED = [
+    'PostToolUse and nowhere else',
+    'matcher names no editing tool',
+    'refuses every editing tool',
+    'trigger vocabulary',
+    'routes to a known subcommand',
+    'byte-identical whether a question came back',
+    'aged ring is still a spent ring',
+    'writes to stdout, stderr or the environment',
+    'exactly one channel',
+    'token is never written anywhere',
+    'produce a re-ask from what was stored',
+    'closed allowlist of url, method and body keys',
+    'carries a quantity, on any branch',
+    'names a participation quantity',
+    'first-class completion',
+    'holds no promise sentences of its own',
+    'permission to ignore rides with the question',
+  ];
+  for (const name of REQUIRED) {
+    assert.ok(src.includes(name), `the guard for "${name}" is gone`);
+  }
+});
+
 // --- the two triggers ------------------------------------------------------------
 
 test('the trigger list is exactly the two in-flow moments', () => {

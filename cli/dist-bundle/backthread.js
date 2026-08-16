@@ -36308,7 +36308,7 @@ async function main(argv, deps = {}) {
     }
     case "inflow-context": {
       const raw = await readRawHookInput().catch(() => "");
-      const output = await runInflowDeadTime(raw);
+      const output = await (deps.runInflowDeadTimeImpl ?? runInflowDeadTime)(raw);
       console.log(JSON.stringify(output));
       return 0;
     }

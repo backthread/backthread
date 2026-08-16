@@ -389,12 +389,15 @@ test('a dangling `--answer` fails fast instead of starting a lesson', async () =
 // worth pinning: whatever happens, this command prints valid JSON and exits 0, so
 // it can never stall or deny an edit.
 
-async function withHookInput(payload: string, fn: () => Promise<unknown>): Promise<{ out: string; result: unknown }> {
+async function withHookInput(
+  payload: string,
+  fn: () => Promise<unknown>,
+): Promise<{ out: string; err: string; result: unknown }> {
   const prev = process.env.BACKTHREAD_HOOK_INPUT;
   process.env.BACKTHREAD_HOOK_INPUT = payload;
   try {
-    const { out, result } = await captureConsole(fn);
-    return { out, result };
+    const { out, err, result } = await captureConsole(fn);
+    return { out, err, result };
   } finally {
     if (prev === undefined) delete process.env.BACKTHREAD_HOOK_INPUT;
     else process.env.BACKTHREAD_HOOK_INPUT = prev;
@@ -456,6 +459,29 @@ test('`backthread inflow-context` says nothing after an editing tool, before any
     assert.equal(result, 0);
     assert.deepEqual(JSON.parse(out), {}, `${tool} must produce nothing`);
   }
+});
+
+test('`backthread inflow-context` prints EXACTLY one JSON object when it has a question', async () => {
+  // The contract that matters and had no test: the host parses this stdout. One object,
+  // one key, nothing else on the stream — not a log line, not a second write.
+  const { out, err, result } = await withHookInput(
+    JSON.stringify({ session_id: 's', cwd: '/repo', tool_name: 'Bash' }),
+    () =>
+      main(['inflow-context'], {
+        runInflowDeadTimeImpl: async () => ({
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUse' as const,
+            additionalContext: 'THE QUESTION',
+          },
+        }),
+      }),
+  );
+  assert.equal(result, 0);
+  assert.equal(err, '', 'nothing may reach stderr either');
+  assert.equal(out.split('\n').filter((l) => l.trim().length > 0).length, 1, 'exactly one line');
+  const parsed = JSON.parse(out) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(parsed), ['hookSpecificOutput']);
+  assert.match(out, /THE QUESTION/);
 });
 
 // --- `ask-me` dispatch (the on-demand trigger) --------------------------------

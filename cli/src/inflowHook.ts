@@ -23,6 +23,15 @@
 // feature gets uninstalled. So a session claims once and is then finished with this
 // hook entirely — no second ask, no second round-trip, no second local read.
 //
+// ⚠️ THE HONEST BOUND IS "AMONG THE LAST `MAX_REMEMBERED_SESSIONS` SESSION IDS ON THIS
+// MACHINE", not "once, ever". The ring evicts, so a session resumed after fifty other
+// sessions have started on the same machine can be asked a second time, and a ring file
+// that is deleted or corrupted resets everyone. Written down rather than glossed,
+// because "at most once per session" is the sentence somebody will otherwise rely on:
+// the bound is real, it is rare, and it is bounded — what it is not is unconditional.
+// Widening the ring would trade a rarer re-ask for a bigger file and would not remove
+// the case, so it is stated instead of pretended away.
+//
 // The claim is spent BEFORE the request, not after a question comes back, and the
 // distinction is load-bearing rather than an optimisation:
 //

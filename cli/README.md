@@ -103,24 +103,23 @@ one, unprompted, at the only moment you have nothing to do — **after** a long 
 call your agent was running while you watched it. At most **once per session**.
 
 **Ignore it and nothing happens, and that is a property of the code rather than a
-policy:**
+policy.** `backthread ask-me --promise` prints the exact statement, and it is worth
+reading there rather than here: **it comes from the server that enforces it**, so it
+cannot drift from the behaviour it describes the way a README can. In outline —
+nothing is written down when you are asked, nothing counts how often you are asked or
+answer, and your lead sees what the team understands rather than who replied.
 
-- **Nothing is written down when you are asked.** The endpoint that hands your
-  agent a question performs no writes at all — the question exists only inside a
-  signed, half-hour token that lives in your terminal scrollback and nowhere else.
-  If you do not answer, there is no row anywhere to find later: no queue, no nag,
-  no badge, no re-ask. Nothing is stored on your machine either — you can diff the
-  config directory across an ask you answered and one you ignored and get the same
-  bytes.
-- **Nothing counts** how often you are asked or how often you answer. Not for you,
-  not for your team, not in aggregate. There is no such number to expose.
-- **Your lead sees what the team understands, never who replied.** "Did not answer"
-  and "was not asked" are the same thing here, because neither one was recorded.
+What that rests on, mechanically: the endpoint that hands your agent a question
+performs no writes at all — the question exists only inside a signed, half-hour token
+that lives in your terminal scrollback and nowhere else. Nothing is stored on your
+machine either; you can diff the config directory across an ask you answered and one
+you ignored and get the same bytes, which is what the tests do. The whole client is
+`cli/src/inflow.ts` and `cli/src/inflowHook.ts` if you would rather check than take
+our word for it — same reason the redactor is open source.
 
-Run `backthread ask-me --promise` to read that statement in full, from the server
-that enforces it. The whole client is `cli/src/inflow.ts` and `cli/src/inflowHook.ts`
-if you would rather check than take our word for it — same reason the redactor is
-open source.
+One honest caveat about "once per session": the machine remembers the last few dozen
+session ids, so a session resumed long afterwards can be offered a second question.
+Rare, bounded, and written down rather than glossed.
 
 **It is never a pre-edit trigger.** The ask fires *after* a `Bash`, `Task`,
 `WebFetch` or `WebSearch` call, never before one and never around `Edit` / `Write`

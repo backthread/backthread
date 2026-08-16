@@ -11,8 +11,9 @@ recorded in this repo. You answer in your own words, and you get back the reason
 that was written down at the time, which is the part worth having.
 
 **Nothing is written down when you are asked.** If you do not answer, there is no row
-anywhere to find later: no queue, no nag, no badge, no re-ask. Run
-`backthread ask-me --promise` to read the whole statement.
+anywhere to find later: no queue, no nag, no badge, no re-ask. The full statement lives
+behind `backthread ask-me --promise`, and that is the authoritative wording — it comes
+from the server that enforces it, so it cannot drift from what the code actually does.
 
 ## The question
 

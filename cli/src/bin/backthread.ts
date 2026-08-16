@@ -239,6 +239,13 @@ export interface MainDeps {
   /** Test seams for `ask-me` (all three modes touch config + the network). */
   requestAskImpl?: typeof requestAsk;
   answerAskImpl?: typeof answerAsk;
+  /**
+   * Test seam for the dead-time hook. It exists so a test can reach the SERVED path
+   * and assert what lands on stdout: the host agent parses this command's stdout as
+   * one JSON object, so a stray line under it corrupts the contract — and without a
+   * seam the only reachable paths were the ones that return `{}` before any I/O.
+   */
+  runInflowDeadTimeImpl?: typeof runInflowDeadTime;
   /** Test seam for `logout` (touches ~/.backthread on disk). Defaults to runLogout. */
   runLogoutImpl?: typeof runLogout;
   /** Test seam for `update` (spawns npm / touches the network). Defaults to runUpdate. */
@@ -430,7 +437,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // SILENT on everything else including every error, and `{}` (say nothing) is
       // by far the most common output. ALWAYS exit 0.
       const raw = await readRawHookInput().catch(() => '');
-      const output = await runInflowDeadTime(raw);
+      const output = await (deps.runInflowDeadTimeImpl ?? runInflowDeadTime)(raw);
       console.log(JSON.stringify(output));
       return 0;
     }

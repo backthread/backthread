@@ -41,6 +41,9 @@ open like the rest of it, for the same reason the redactor is.
 - Answering from the terminal goes through the same grader the browser uses, so what you
   get back is the same binary verdict plus the recorded reasoning — and it earns the same
   coverage. No streak, and no "done for today": there is no sitting to be done with.
+- One honest caveat on "once per session": the machine remembers the last few dozen
+  session ids, so a session resumed long afterwards can be offered a second question.
+  Rare and bounded — written down rather than glossed.
 
 ## 0.18.1
 
