@@ -30,7 +30,7 @@ function ctx(repoDir: string, dirNodes: string[]): FrameworkContext {
     edges: [],
     externals: [],
   };
-  return { repoDir, rootPath: '', match: { adapter: 'go-gorm', confidence: 1, rootPath: '' }, graph, cluster: { fileModuleMap: {}, moduleIds: new Set() } };
+  return { repoDir, rootPath: '', match: { adapter: 'go-gorm', confidence: 1, rootPath: '' }, graph };
 }
 
 const GO_MOD = 'module github.com/acme/app\n\nrequire gorm.io/gorm v1.25.0\n';

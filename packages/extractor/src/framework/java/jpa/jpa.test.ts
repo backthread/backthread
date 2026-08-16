@@ -88,7 +88,6 @@ describe('roleTags + association edges + grouping', () => {
       rootPath: '',
       match: { adapter: 'java-jpa', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set() },
     };
   }
 

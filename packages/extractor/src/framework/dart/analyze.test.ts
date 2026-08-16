@@ -64,7 +64,6 @@ describe('parseDartScope', () => {
       rootPath: '',
       match: { adapter: 'dart', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set() },
     };
     const scope = parseDartScope(ctx);
     expect(scope.dartFiles.sort()).toEqual(['lib/home.dart', 'lib/main.dart']);

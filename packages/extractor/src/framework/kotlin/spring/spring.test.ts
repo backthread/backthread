@@ -74,7 +74,6 @@ describe('roleTags + controller→collaborator edges', () => {
       rootPath: '',
       match: { adapter: 'spring', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set() },
     };
   }
 

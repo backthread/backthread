@@ -218,7 +218,6 @@ describe('obanAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'oban', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     edges = await obanAdapter.syntheticEdges!(ctx);
     roles = await obanAdapter.roleTags!(ctx);
@@ -272,7 +271,6 @@ describe('obanAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'oban', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const e2 = await obanAdapter.syntheticEdges!(ctx2);
     const r2 = await obanAdapter.roleTags!(ctx2);

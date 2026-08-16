@@ -254,7 +254,6 @@ describe('fastStreamAdapter analysis (groupingPrior / syntheticEdges / roleTags)
       rootPath: '',
       match: { adapter: 'faststream', confidence: 1, rootPath: '', metadata: { faststream: true, taskiq: true } },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await fastStreamAdapter.groupingPrior!(ctx));
     edges = await fastStreamAdapter.syntheticEdges!(ctx);

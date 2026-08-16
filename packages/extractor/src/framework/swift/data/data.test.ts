@@ -32,7 +32,6 @@ async function contextFor(repoDir: string): Promise<FrameworkContext> {
     rootPath: '',
     match: { adapter: 'swift-data', confidence: 1, rootPath: '' },
     graph,
-    cluster: { fileModuleMap: {}, moduleIds: new Set() },
   };
 }
 const parsed = (text: string) => ({ text, decls: typeDeclarations(text), imports: scanImports(text), properties: properties(text) });

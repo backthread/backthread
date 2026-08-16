@@ -80,7 +80,6 @@ describe('roleTags + association edges (integration)', () => {
       rootPath: '',
       match: { adapter: 'kotlin-orm', confidence: 1, rootPath: '' },
       graph: { root: repoDir, files: files.map(([id]) => ({ id, loc: 5, language: 'kt' })), edges: [], externals: [] },
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
   }
 

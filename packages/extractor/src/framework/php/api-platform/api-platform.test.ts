@@ -34,7 +34,6 @@ async function apiPlatformRepo(files: Record<string, string>): Promise<Framework
     rootPath: '',
     graph,
     match: { adapter: 'api-platform', confidence: 0.9, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

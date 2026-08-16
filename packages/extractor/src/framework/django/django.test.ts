@@ -315,7 +315,6 @@ describe('djangoAdapter analysis (groupingPrior / syntheticEdges / roleTags)', (
       rootPath: '',
       match: { adapter: 'django', confidence: 1, rootPath: '', metadata: { drf: true, ninja: true } },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await djangoAdapter.groupingPrior!(ctx));
     edges = await djangoAdapter.syntheticEdges!(ctx);

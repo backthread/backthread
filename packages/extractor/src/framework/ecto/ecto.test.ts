@@ -255,7 +255,6 @@ describe('ectoAdapter analysis (groupingPrior / syntheticEdges / roleTags)', () 
       rootPath: '',
       match: { adapter: 'ecto', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await ectoAdapter.groupingPrior!(ctx));
     edges = await ectoAdapter.syntheticEdges!(ctx);
@@ -344,7 +343,6 @@ describe('ectoAdapter analysis (groupingPrior / syntheticEdges / roleTags)', () 
       rootPath: '',
       match: { adapter: 'ecto', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const g2 = (await ectoAdapter.groupingPrior!(ctx2)).groups;
     const e2 = await ectoAdapter.syntheticEdges!(ctx2);

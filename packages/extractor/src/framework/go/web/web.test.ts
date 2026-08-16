@@ -31,7 +31,7 @@ function ctx(repoDir: string, dirNodes: string[]): FrameworkContext {
     edges: [],
     externals: [],
   };
-  return { repoDir, rootPath: '', match: { adapter: 'go-web', confidence: 1, rootPath: '' }, graph, cluster: { fileModuleMap: {}, moduleIds: new Set() } };
+  return { repoDir, rootPath: '', match: { adapter: 'go-web', confidence: 1, rootPath: '' }, graph };
 }
 
 const GO_MOD = 'module github.com/acme/app\n\nrequire github.com/gin-gonic/gin v1.9.1\n';

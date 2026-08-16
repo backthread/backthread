@@ -30,7 +30,6 @@ async function repo(files: Record<string, string>): Promise<FrameworkContext> {
       externals: [],
     } as NormalizedGraph,
     match: { adapter: 'sinatra', confidence: 0.85, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

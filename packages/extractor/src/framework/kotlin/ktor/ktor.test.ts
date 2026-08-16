@@ -34,7 +34,6 @@ function ctx(repoDir: string, files: Array<[string, string]>): FrameworkContext 
     rootPath: '',
     match: { adapter: 'ktor', confidence: 1, rootPath: '' },
     graph,
-    cluster: { fileModuleMap: {}, moduleIds: new Set() },
   };
 }
 

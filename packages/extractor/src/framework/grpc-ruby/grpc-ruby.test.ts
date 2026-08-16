@@ -25,7 +25,6 @@ async function repo(files: Record<string, string>): Promise<FrameworkContext> {
     rootPath: '',
     graph: { root: dir, files: Object.keys(files).filter((f) => f.endsWith('.rb')).map((id) => ({ id, loc: 1, language: 'rb' })), edges: [], externals: [] } as NormalizedGraph,
     match: { adapter: 'grpc-ruby', confidence: 0.85, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

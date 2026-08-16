@@ -43,7 +43,6 @@ describe('shared python analyze helpers', () => {
       rootPath: '',
       match: { adapter: 'test', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
 
     const scope = parsePythonScope(ctx);
@@ -71,7 +70,6 @@ describe('shared python analyze helpers', () => {
       rootPath: '',
       match: { adapter: 'test', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     });
     const binds = scope.parsed.get('a/main.py')!.bindings;
     expect(binds.get('bmod')).toBe('a/b.py'); // import a.b as bmod

@@ -42,7 +42,6 @@ async function elixirRepo(files: Record<string, string>): Promise<FrameworkConte
     rootPath: '',
     graph,
     match: { adapter: 'test', confidence: 1, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

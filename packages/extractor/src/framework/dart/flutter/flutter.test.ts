@@ -34,7 +34,6 @@ async function ctxFor(dir: string): Promise<FrameworkContext> {
     rootPath: '',
     match: { adapter: 'flutter', confidence: 0.9, rootPath: '' },
     graph,
-    cluster: { fileModuleMap: {}, moduleIds: new Set() },
   };
 }
 

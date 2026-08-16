@@ -121,7 +121,6 @@ describe('parseSwiftScope', () => {
       rootPath: '',
       match: { adapter: 'test', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set() },
     };
   }
 

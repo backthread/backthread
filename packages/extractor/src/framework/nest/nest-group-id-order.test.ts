@@ -63,7 +63,6 @@ async function groupIds(dir: string): Promise<string[]> {
     rootPath: '',
     match: { adapter: 'nest', confidence: 1, rootPath: '' },
     graph,
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   };
   const { groups } = await nestAdapter.groupingPrior!(ctx);
   return groups.map((g) => g.id).sort();

@@ -45,7 +45,6 @@ async function fixtureCtx(dir: string, tools: Partial<OrchestratorTools>): Promi
     rootPath: '',
     match: { adapter: 'orchestrator', confidence: 1, rootPath: '', metadata: { tools: { ...NO_TOOLS, ...tools } } },
     graph,
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   };
   return { ctx, graph };
 }
