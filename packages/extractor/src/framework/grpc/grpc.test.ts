@@ -285,7 +285,6 @@ describe('grpcAdapter analysis (groupingPrior / syntheticEdges / roleTags)', () 
       rootPath: '',
       match: { adapter: 'grpc', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await grpcAdapter.groupingPrior!(ctx));
     edges = await grpcAdapter.syntheticEdges!(ctx);

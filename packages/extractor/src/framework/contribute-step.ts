@@ -62,14 +62,39 @@
 // Degrade, don't abort (mirrors extractInfra's call-site discipline): a malformed
 // adapter must never sink an otherwise-good snapshot — a throw anywhere degrades
 // to the empty contribution + a warning, and the snapshot assembles without it.
+//
+// ── TWO PHASES, SEPARATELY CALLABLE ──
+// The step is split into a TREE phase and a CLUSTER phase:
+//
+//   collectFrameworkContributions({ repoDir, graph })
+//       detect + run every adapter hook. Needs only the working tree and the
+//       structural graph. Everything it returns is in FILE-ID space and is
+//       SERIALISABLE by construction (RawFrameworkContributions — plain arrays,
+//       no Maps, no absolute paths).
+//
+//   applyFrameworkContributions({ raw, cluster })
+//       resolve file ids → module ids, validate the 8 verbs, collapse roles,
+//       arbitrate the grouping priors, mutate the cluster, emit every log.
+//
+// `contributeFrameworkGraph` is now just their composition, so the single-machine
+// path and CI-mode extraction — where the tree and the cluster live on different
+// machines — run ONE implementation rather than two that drift. The raw value is
+// the wire format between them, which is why the trust boundary (parseEdgeKind)
+// sits in the CLUSTER phase: the tree phase may be a machine we don't own.
 
-import { ModuleId, parseEdgeKind, type Edge } from '../types.js';
+import { ModuleId, parseEdgeKind, type Edge, type ModuleKind } from '../types.js';
 import type { ClusterResult } from '../cluster/louvain.js';
 import type { NormalizedGraph } from '../graph/types.js';
 import { crossLanguageApiEdges } from '../graph/cross-language.js';
 import { registerBuiltinFrameworkAdapters, registerLanguageScopedFrameworkAdapters } from './register.js';
 import { detectFrameworks, listFrameworkAdapters } from './registry.js';
-import type { FrameworkAdapter, FrameworkContext, FrameworkEdge, RoleTag } from './types.js';
+import type {
+  FrameworkAdapter,
+  FrameworkClusterView,
+  FrameworkContext,
+  FrameworkEdge,
+  RoleTag,
+} from './types.js';
 
 export interface FrameworkContributions {
   /** Module-resolved, self-edge-free, deduped, 8-verb-validated edges. */
@@ -115,12 +140,79 @@ const EMPTY: FrameworkContributions = {
   },
 };
 
-export async function contributeFrameworkGraph(args: {
+// ---------------------------------------------------------------------------
+// The wire format between the two phases.
+
+/** One adapter's synthetic edge, in FILE-ID space. `metadata` is deliberately dropped. */
+export interface RawFrameworkEdge {
+  /** The adapter that emitted it — carried so a rejected edge names its producer. */
+  adapter: string;
+  source: string;
+  target: string;
+  /** UNVALIDATED. `parseEdgeKind` runs in the cluster phase, which is the trust boundary. */
+  kind: string;
+}
+
+/** One adapter's role tag for a FILE (or module) id. `metadata` is deliberately dropped. */
+export interface RawFrameworkRole {
+  adapter: string;
+  id: string;
+  role: string;
+  kind: ModuleKind;
+  priority?: number;
+}
+
+/** One adapter's grouping-prior group, in FILE-ID space. */
+export interface RawFrameworkGroup {
+  adapter: string;
+  /** The adapter's own group id, NOT yet namespaced. */
+  id: string;
+  label: string;
+  fileIds: string[];
+}
+
+/**
+ * Everything the framework adapters derive from the TREE, before any cluster
+ * exists. Serialisable by construction — no Maps, no methods, no absolute paths.
+ */
+export interface RawFrameworkContributions {
+  /** `manifest.matches.length`. Feeds `counts.adapters`. */
+  adapters: number;
+  /** Adapter `syntheticEdges`, in match order then emission order. */
+  edges: RawFrameworkEdge[];
+  /** The cross-language full-stack seam. Folded AFTER `edges` — dedupe is first-wins. */
+  crossLanguageEdges: RawFrameworkEdge[];
+  /** Adapter `roleTags`, in match order then emission order. */
+  roles: RawFrameworkRole[];
+  /** Adapter `groupingPrior` groups, in match order then emission order. */
+  groups: RawFrameworkGroup[];
+}
+
+/** The producer's `EMPTY`. A factory, not a shared const: the raw value travels
+ * over a wire and a caller may legitimately splice into its arrays. */
+function emptyRaw(): RawFrameworkContributions {
+  return { adapters: 0, edges: [], crossLanguageEdges: [], roles: [], groups: [] };
+}
+
+/** The `adapter` name stamped on the cross-language seam's edges. */
+const CROSS_LANGUAGE = 'cross-language';
+
+// ---------------------------------------------------------------------------
+// Phase 1 — the TREE.
+
+/**
+ * Run detection + every framework adapter hook against the working tree, and
+ * return their contributions in FILE-ID space, unresolved and unvalidated.
+ *
+ * Needs NO cluster: it is exactly the half of the step that can run on a
+ * machine that only has the checkout (CI-mode extraction). Degrade-on-throw is
+ * unchanged — a malformed adapter yields the empty raw value plus a warning.
+ */
+export async function collectFrameworkContributions(args: {
   repoDir: string;
   graph: NormalizedGraph;
-  cluster: ClusterResult;
-}): Promise<FrameworkContributions> {
-  const { repoDir, graph, cluster } = args;
+}): Promise<RawFrameworkContributions> {
+  const { repoDir, graph } = args;
   try {
     registerBuiltinFrameworkAdapters();
     await registerLanguageScopedFrameworkAdapters(repoDir);
@@ -131,7 +223,8 @@ export async function contributeFrameworkGraph(args: {
     // the framework manifest, so it fires even when the FastAPI backend sits in a
     // nested package the root detect didn't claim. Empty for a single-language repo
     // (so single-language output stays byte-identical). File-id space; folded
-    // through the SAME resolve/dedup as the adapters' syntheticEdges below.
+    // through the SAME resolve/dedup as the adapters' syntheticEdges by the
+    // cluster phase.
     let xlangEdges: FrameworkEdge[] = [];
     try {
       xlangEdges = crossLanguageApiEdges({ repoDir, graph });
@@ -143,40 +236,26 @@ export async function contributeFrameworkGraph(args: {
 
     if (manifest.matches.length === 0 && xlangEdges.length === 0) {
       // No framework detected AND no cross-language seam → generic behavior unchanged.
-      return EMPTY;
+      // The cluster phase turns this empty raw value straight back into EMPTY.
+      return emptyRaw();
     }
 
     const adaptersByName = new Map<string, FrameworkAdapter>(
       listFrameworkAdapters().map((a) => [a.name, a]),
     );
-    const moduleIds = new Set(cluster.modules.map((m) => m.id));
-    const fileModuleMap = cluster.fileModuleMap;
-    // file id or module id → module id (or null when it resolves to nothing on
-    // the canvas — a dropped file, or an endpoint outside the cluster).
-    const resolve = (id: string): string | null => {
-      if (moduleIds.has(id)) return id;
-      const viaFile = fileModuleMap[id];
-      if (viaFile && moduleIds.has(viaFile)) return viaFile;
-      return null;
+
+    const raw: RawFrameworkContributions = {
+      adapters: manifest.matches.length,
+      edges: [],
+      crossLanguageEdges: xlangEdges.map((fe) => ({
+        adapter: CROSS_LANGUAGE,
+        source: fe.source,
+        target: fe.target,
+        kind: fe.kind,
+      })),
+      roles: [],
+      groups: [],
     };
-
-    const edgesByKey = new Map<string, Edge>();
-    // moduleId → the highest-priority role seen + the distinct roles that landed
-    // on it (for the collapse log).
-    const roleByModule = new Map<string, RoleTag>();
-    const distinctRolesByModule = new Map<string, Set<string>>();
-    let rawEdges = 0;
-    let droppedSelf = 0;
-    let droppedUnresolved = 0;
-    let droppedBadKind = 0;
-    const unresolvedEndpoints = new Set<string>();
-
-    // grouping priors collected across adapters, namespaced by adapter
-    // (`<adapter>:<group.id>`) so two adapters' groups never collide. Resolved +
-    // applied as a subsystem override AFTER the loop (see below).
-    const groupsByKey = new Map<string, { label: string; fileIds: string[] }>();
-    let rawGroups = 0;
-    let droppedGroupUnresolved = 0;
 
     for (const match of manifest.matches) {
       const adapter = adaptersByName.get(match.adapter);
@@ -186,7 +265,6 @@ export async function contributeFrameworkGraph(args: {
         rootPath: match.rootPath,
         match,
         graph,
-        cluster: { fileModuleMap, moduleIds },
       };
 
       // --- syntheticEdges ---------------------------------------------------
@@ -201,36 +279,14 @@ export async function contributeFrameworkGraph(args: {
           fwEdges = [];
         }
         for (const fe of fwEdges) {
-          rawEdges++;
-          const src = resolve(fe.source);
-          const tgt = resolve(fe.target);
-          if (!src || !tgt) {
-            droppedUnresolved++;
-            if (!src) unresolvedEndpoints.add(fe.source);
-            if (!tgt) unresolvedEndpoints.add(fe.target);
-            continue;
-          }
-          if (src === tgt) {
-            // Intra-module contribution (e.g. navigation within one cluster)
-            // collapses to a self-edge — dropped at the producer, exactly as
-            // aggregateModuleEdges + the infra join do.
-            droppedSelf++;
-            continue;
-          }
-          let kind;
-          try {
-            kind = parseEdgeKind(fe.kind);
-          } catch (err) {
-            // A non-8-verb framework edge is a producer bug; drop + log it
-            // rather than sink the snapshot (degrade-on-throw).
-            droppedBadKind++;
-            console.warn(`  ⚠ framework adapter '${match.adapter}' emitted ${(err as Error).message}`);
-            continue;
-          }
-          const key = `${src}→${tgt}:${kind}`;
-          if (!edgesByKey.has(key)) {
-            edgesByKey.set(key, { source: ModuleId(src), target: ModuleId(tgt), kind });
-          }
+          // `metadata` is deliberately dropped: nothing downstream reads it and
+          // it is the one field that could smuggle an absolute path onto the wire.
+          raw.edges.push({
+            adapter: match.adapter,
+            source: fe.source,
+            target: fe.target,
+            kind: fe.kind,
+          });
         }
       }
 
@@ -246,26 +302,20 @@ export async function contributeFrameworkGraph(args: {
           tags = new Map();
         }
         for (const [endpoint, tag] of tags) {
-          const moduleId = resolve(endpoint);
-          if (!moduleId) {
-            unresolvedEndpoints.add(endpoint);
-            continue;
-          }
-          let seen = distinctRolesByModule.get(moduleId);
-          if (!seen) {
-            seen = new Set();
-            distinctRolesByModule.set(moduleId, seen);
-          }
-          seen.add(tag.role);
-          const cur = roleByModule.get(moduleId);
-          if (cur === undefined || beats(tag, cur)) roleByModule.set(moduleId, tag);
+          raw.roles.push({
+            adapter: match.adapter,
+            id: endpoint,
+            role: tag.role,
+            kind: tag.kind,
+            priority: tag.priority,
+          });
         }
       }
 
       // --- groupingPrior ------------------------------------------
-      // Collect now (in FILE-id space); resolve + apply as a subsystem override
-      // after the loop, so a group spanning several adapters'/modules' files is
-      // arbitrated globally. classificationsNeeded is deferred (not run here).
+      // Collect in FILE-id space; the cluster phase resolves + applies the
+      // subsystem override, so a group spanning several adapters'/modules' files
+      // is arbitrated globally. classificationsNeeded is deferred (not run here).
       if (adapter.groupingPrior) {
         let prior;
         try {
@@ -277,42 +327,113 @@ export async function contributeFrameworkGraph(args: {
           prior = undefined;
         }
         for (const group of prior?.groups ?? []) {
-          rawGroups++;
-          // Namespace the id by adapter (the documented FrameworkGroup contract)
-          // so it's a unique, deterministic subsystem id across adapters.
-          const key = `${match.adapter}:${group.id}`;
-          const existing = groupsByKey.get(key);
-          if (existing) existing.fileIds.push(...group.fileIds);
-          else groupsByKey.set(key, { label: group.label, fileIds: [...group.fileIds] });
+          raw.groups.push({
+            adapter: match.adapter,
+            id: group.id,
+            label: group.label,
+            fileIds: [...group.fileIds],
+          });
         }
       }
     }
 
-    // --- cross-language full-stack seam ----------------------------
-    // Fold the frontend→backend HTTP-API edges through the SAME file-id→module
-    // resolution + self-edge drop + 8-verb validation + dedup as the adapter
-    // syntheticEdges above (so a seam edge that duplicates a structural edge, or
-    // collapses to one module, is handled identically).
-    for (const fe of xlangEdges) {
+    return raw;
+  } catch (err) {
+    console.warn(
+      `  ⚠ framework contribution failed (${(err as Error).message}) — continuing without framework edges/roles`,
+    );
+    return emptyRaw();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — the CLUSTER.
+
+/**
+ * Resolve raw, file-id-space adapter contributions against a cluster: validate
+ * the 8 verbs, drop self/unresolved edges, dedupe, collapse roles per module,
+ * arbitrate the grouping priors and MUTATE `cluster.modules[]` accordingly.
+ *
+ * This is the trust boundary. `raw` may have been produced on another machine,
+ * so nothing in it is assumed well-formed — `parseEdgeKind` runs HERE.
+ */
+export function applyFrameworkContributions(args: {
+  raw: RawFrameworkContributions;
+  cluster: ClusterResult;
+}): FrameworkContributions {
+  const { raw, cluster } = args;
+  try {
+    if (
+      raw.adapters === 0 &&
+      raw.edges.length === 0 &&
+      raw.crossLanguageEdges.length === 0 &&
+      raw.roles.length === 0 &&
+      raw.groups.length === 0
+    ) {
+      // No framework detected AND no cross-language seam → generic behavior unchanged.
+      return EMPTY;
+    }
+
+    // The file-id → module-id join, in the shape the published
+    // `FrameworkClusterView` names. A hook no longer receives it (the tree phase
+    // runs before any cluster exists) — this phase performs the resolution instead.
+    const view: FrameworkClusterView = {
+      fileModuleMap: cluster.fileModuleMap,
+      moduleIds: new Set(cluster.modules.map((m) => m.id)),
+    };
+    // file id or module id → module id (or null when it resolves to nothing on
+    // the canvas — a dropped file, or an endpoint outside the cluster).
+    const resolve = (id: string): string | null => {
+      if (view.moduleIds.has(id)) return id;
+      const viaFile = view.fileModuleMap[id];
+      if (viaFile && view.moduleIds.has(viaFile)) return viaFile;
+      return null;
+    };
+
+    const edgesByKey = new Map<string, Edge>();
+    // moduleId → the highest-priority role seen + the distinct roles that landed
+    // on it (for the collapse log).
+    const roleByModule = new Map<string, RoleTag>();
+    const distinctRolesByModule = new Map<string, Set<string>>();
+    let rawEdges = 0;
+    let droppedSelf = 0;
+    let droppedUnresolved = 0;
+    let droppedBadKind = 0;
+    const unresolvedEndpoints = new Set<string>();
+
+    // --- edges, adapters first then the cross-language full-stack seam -------
+    // ONE pipeline for both (so a seam edge that duplicates a structural edge, or
+    // collapses to one module, is handled identically), and the seam folds LAST:
+    // dedupe is first-wins, so an adapter edge is never displaced by a seam edge.
+    for (const e of [...raw.edges, ...raw.crossLanguageEdges]) {
       rawEdges++;
-      const src = resolve(fe.source);
-      const tgt = resolve(fe.target);
+      const src = resolve(e.source);
+      const tgt = resolve(e.target);
       if (!src || !tgt) {
         droppedUnresolved++;
-        if (!src) unresolvedEndpoints.add(fe.source);
-        if (!tgt) unresolvedEndpoints.add(fe.target);
+        if (!src) unresolvedEndpoints.add(e.source);
+        if (!tgt) unresolvedEndpoints.add(e.target);
         continue;
       }
       if (src === tgt) {
+        // Intra-module contribution (e.g. navigation within one cluster)
+        // collapses to a self-edge — dropped at the producer, exactly as
+        // aggregateModuleEdges + the infra join do.
         droppedSelf++;
         continue;
       }
       let kind;
       try {
-        kind = parseEdgeKind(fe.kind);
+        kind = parseEdgeKind(e.kind);
       } catch (err) {
+        // A non-8-verb framework edge is a producer bug; drop + log it
+        // rather than sink the snapshot (degrade-on-throw).
         droppedBadKind++;
-        console.warn(`  ⚠ cross-language edge emitted ${(err as Error).message}`);
+        console.warn(
+          e.adapter === CROSS_LANGUAGE
+            ? `  ⚠ cross-language edge emitted ${(err as Error).message}`
+            : `  ⚠ framework adapter '${e.adapter}' emitted ${(err as Error).message}`,
+        );
         continue;
       }
       const key = `${src}→${tgt}:${kind}`;
@@ -320,8 +441,43 @@ export async function contributeFrameworkGraph(args: {
         edgesByKey.set(key, { source: ModuleId(src), target: ModuleId(tgt), kind });
       }
     }
-    if (xlangEdges.length > 0) {
-      console.log(`  [cross-language] ${xlangEdges.length} frontend→backend API edge(s) contributed`);
+    if (raw.crossLanguageEdges.length > 0) {
+      console.log(
+        `  [cross-language] ${raw.crossLanguageEdges.length} frontend→backend API edge(s) contributed`,
+      );
+    }
+
+    // --- roles --------------------------------------------------------------
+    for (const r of raw.roles) {
+      const tag: RoleTag = { role: r.role, kind: r.kind, priority: r.priority };
+      const moduleId = resolve(r.id);
+      if (!moduleId) {
+        unresolvedEndpoints.add(r.id);
+        continue;
+      }
+      let seen = distinctRolesByModule.get(moduleId);
+      if (!seen) {
+        seen = new Set();
+        distinctRolesByModule.set(moduleId, seen);
+      }
+      seen.add(tag.role);
+      const cur = roleByModule.get(moduleId);
+      if (cur === undefined || beats(tag, cur)) roleByModule.set(moduleId, tag);
+    }
+
+    // --- groups -------------------------------------------------------------
+    // Namespaced by adapter (`<adapter>:<group.id>`) so two adapters' groups
+    // never collide; a repeated key APPENDS its files (one logical group split
+    // across several emissions).
+    const groupsByKey = new Map<string, { label: string; fileIds: string[] }>();
+    let rawGroups = 0;
+    let droppedGroupUnresolved = 0;
+    for (const g of raw.groups) {
+      rawGroups++;
+      const key = `${g.adapter}:${g.id}`;
+      const existing = groupsByKey.get(key);
+      if (existing) existing.fileIds.push(...g.fileIds);
+      else groupsByKey.set(key, { label: g.label, fileIds: [...g.fileIds] });
     }
 
     // --- apply the grouping override -------------------------------
@@ -428,7 +584,7 @@ export async function contributeFrameworkGraph(args: {
       roles: roleByModule,
       subsystems,
       counts: {
-        adapters: manifest.matches.length,
+        adapters: raw.adapters,
         rawEdges,
         edges: edges.length,
         droppedSelf,
@@ -446,6 +602,23 @@ export async function contributeFrameworkGraph(args: {
     );
     return EMPTY;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Both phases, on one machine.
+
+/**
+ * The single-machine path: collect from the tree, then apply to the cluster.
+ * Kept as the composition (not a third implementation) so the CI path — which
+ * runs the two halves on different machines — can never drift from it.
+ */
+export async function contributeFrameworkGraph(args: {
+  repoDir: string;
+  graph: NormalizedGraph;
+  cluster: ClusterResult;
+}): Promise<FrameworkContributions> {
+  const raw = await collectFrameworkContributions({ repoDir: args.repoDir, graph: args.graph });
+  return applyFrameworkContributions({ raw, cluster: args.cluster });
 }
 
 // Higher RoleTag.priority wins; lexical role tiebreak keeps it deterministic

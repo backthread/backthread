@@ -169,8 +169,18 @@ export type { GateModule, GroupingGateResult } from './cluster/grouping-gate.js'
 
 // ── Framework adapters ──
 export { detectFrameworkStack } from './framework/detect-step.js';
-export { contributeFrameworkGraph } from './framework/contribute-step.js';
-export type { FrameworkContributions } from './framework/contribute-step.js';
+export {
+  contributeFrameworkGraph,
+  collectFrameworkContributions,
+  applyFrameworkContributions,
+} from './framework/contribute-step.js';
+export type {
+  FrameworkContributions,
+  RawFrameworkContributions,
+  RawFrameworkEdge,
+  RawFrameworkRole,
+  RawFrameworkGroup,
+} from './framework/contribute-step.js';
 export {
   registerFrameworkAdapter,
   listFrameworkAdapters,

@@ -161,7 +161,6 @@ describe('celeryAdapter analysis (syntheticEdges / roleTags)', () => {
     rootPath: '',
     match: { adapter: 'celery', confidence: 1, rootPath: '' },
     graph,
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   });
 
   beforeAll(async () => {

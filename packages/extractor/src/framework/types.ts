@@ -95,15 +95,15 @@ export interface FrameworkManifest {
 // The post-detect contribution hooks (DECLARED now; unimplemented for RN).
 
 /**
- * A POST-CLUSTER view of the clustering result, the seam between file-id space
- * (where a framework hook works — it greps source) and module-id space (what
- * the diagram renders).  firmed this onto the context (Slice 1 deferred
- * it): the `syntheticEdges`/`roleTags` hooks emit contributions in the graph
- * FILE-ID space (repo-relative posix paths), and the contribution step
- * (contribute-step.ts) resolves them to MODULE ids through `fileModuleMap`. The
- * view is carried on the context so a hook that wants module-level precision
- * (a future grouping-aware adapter) can resolve itself; the RN adapter does NOT
- * need it (it stays in file-id space and lets the step resolve).
+ * A POST-CLUSTER view of the clustering result: the seam between file-id space
+ * (where a framework hook works — it greps source) and module-id space (what the
+ * diagram renders).
+ *
+ * It is NO LONGER carried on `FrameworkContext` — the hooks run from the tree
+ * alone, before any cluster exists (see `FrameworkContext`). It stays exported
+ * because it names the join `applyFrameworkContributions` performs (and which it
+ * builds internally), and because it is part of the published surface: a host
+ * that resolves file ids to modules itself types that view with it.
  */
 export interface FrameworkClusterView {
   /** fileId (repo-relative posix) → moduleId — the post-cluster join key. */
@@ -114,11 +114,16 @@ export interface FrameworkClusterView {
 
 /**
  * Context for the multi-stage contribution hooks. Carries the detect match +
- * repo (so a hook can re-read config), the structural code graph the
- * contributions reference (file ids = repo-relative posix paths), and the
- * POST-CLUSTER module view so the step + any module-aware hook can
- * resolve file ids to modules. Slice 1's comment promised the shape "firms up
- * as + implements the first real hooks" — `cluster` is that firming.
+ * repo (so a hook can re-read config) and the structural code graph the
+ * contributions reference (file ids = repo-relative posix paths).
+ *
+ * A hook runs from the TREE ALONE, BEFORE any cluster exists — there is
+ * deliberately no cluster here. CI-mode extraction runs this phase on the
+ * customer's own runner, which has the checkout and nothing else; a hook that
+ * needed a cluster simply could not run there. So every hook emits its
+ * contributions in FILE-ID space, and `applyFrameworkContributions` (the
+ * later, cluster-side phase) resolves them to module ids through
+ * `FrameworkClusterView.fileModuleMap`.
  */
 export interface FrameworkContext {
   repoDir: string;
@@ -128,8 +133,6 @@ export interface FrameworkContext {
   match: DetectMatch;
   /** The structural code graph (file ids = repo-relative posix paths). */
   graph: NormalizedGraph;
-  /** the post-cluster file→module view (the render-side join key). */
-  cluster: FrameworkClusterView;
 }
 
 /**

@@ -235,7 +235,6 @@ describe('graphqlAdapter analysis (groupingPrior / syntheticEdges / roleTags)', 
       rootPath: '',
       match: { adapter: 'graphql', confidence: 1, rootPath: '', metadata: { strawberry: true, graphene: true } },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await graphqlAdapter.groupingPrior!(ctx));
     edges = await graphqlAdapter.syntheticEdges!(ctx);

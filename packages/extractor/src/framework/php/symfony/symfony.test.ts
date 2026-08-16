@@ -34,7 +34,6 @@ async function symfonyRepo(files: Record<string, string>): Promise<FrameworkCont
     rootPath: '',
     graph,
     match: { adapter: 'symfony', confidence: 0.9, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

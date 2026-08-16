@@ -230,7 +230,6 @@ describe('broadwayAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'broadway', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     edges = await broadwayAdapter.syntheticEdges!(ctx);
     roles = await broadwayAdapter.roleTags!(ctx);
@@ -274,7 +273,6 @@ describe('broadwayAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'broadway', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const e2 = await broadwayAdapter.syntheticEdges!(ctx2);
     const r2 = await broadwayAdapter.roleTags!(ctx2);

@@ -209,7 +209,6 @@ describe('fastApiAdapter analysis (groupingPrior / syntheticEdges / roleTags)', 
       rootPath: '',
       match: { adapter: 'fastapi', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await fastApiAdapter.groupingPrior!(ctx));
     edges = await fastApiAdapter.syntheticEdges!(ctx);

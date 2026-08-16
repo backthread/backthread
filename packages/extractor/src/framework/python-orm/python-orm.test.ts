@@ -222,7 +222,6 @@ describe('pythonOrmAdapter analysis (groupingPrior / syntheticEdges / roleTags)'
       rootPath: '',
       match: { adapter: 'python-orm', confidence: 1, rootPath: '', metadata: { orms: ['sqlalchemy', 'sqlmodel'] } },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await pythonOrmAdapter.groupingPrior!(ctx));
     edges = await pythonOrmAdapter.syntheticEdges!(ctx);
@@ -322,7 +321,6 @@ describe('pythonOrmAdapter marker generalization (Tortoise / Beanie / Peewee)', 
         metadata: { orms: ['tortoise-orm', 'beanie', 'peewee'] },
       },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const roles = await pythonOrmAdapter.roleTags!(ctx);
     expect(roles.get('db/user.py')).toMatchObject({ role: 'model', kind: 'service' });

@@ -258,7 +258,6 @@ describe('phoenixAdapter analysis (groupingPrior / syntheticEdges / roleTags)', 
       rootPath: '',
       match: { adapter: 'phoenix', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await phoenixAdapter.groupingPrior!(ctx));
     edges = await phoenixAdapter.syntheticEdges!(ctx);
@@ -342,7 +341,6 @@ describe('phoenixAdapter analysis (groupingPrior / syntheticEdges / roleTags)', 
       rootPath: '',
       match: { adapter: 'phoenix', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const g2 = (await phoenixAdapter.groupingPrior!(ctx2)).groups;
     const e2 = await phoenixAdapter.syntheticEdges!(ctx2);

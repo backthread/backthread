@@ -35,7 +35,6 @@ async function ormRepo(files: Record<string, string>): Promise<FrameworkContext>
     rootPath: '',
     graph,
     match: { adapter: 'php-orm', confidence: 0.85, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

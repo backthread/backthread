@@ -139,7 +139,7 @@ describe('parseKotlinScope name resolution', () => {
       edges: [],
       externals: [],
     };
-    return { repoDir, rootPath: '', match: { adapter: 'x', confidence: 1, rootPath: '' }, graph, cluster: { fileModuleMap: {}, moduleIds: new Set() } };
+    return { repoDir, rootPath: '', match: { adapter: 'x', confidence: 1, rootPath: '' }, graph };
   }
 
   it('resolves a simple name via same-package, explicit import, and wildcard', async () => {

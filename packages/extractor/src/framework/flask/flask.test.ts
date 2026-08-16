@@ -213,7 +213,6 @@ describe('flaskAdapter analysis (groupingPrior / syntheticEdges / roleTags)', ()
       rootPath: '',
       match: { adapter: 'flask', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await flaskAdapter.groupingPrior!(ctx));
     edges = await flaskAdapter.syntheticEdges!(ctx);

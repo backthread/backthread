@@ -140,7 +140,6 @@ describe('roleTags + nav edges (integration)', () => {
       rootPath: '',
       match: { adapter: 'android', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set() },
     };
   }
 

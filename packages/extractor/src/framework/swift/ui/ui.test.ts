@@ -35,7 +35,6 @@ async function contextFor(repoDir: string): Promise<FrameworkContext> {
     rootPath: '',
     match: { adapter: 'swift-ui', confidence: 1, rootPath: '' },
     graph,
-    cluster: { fileModuleMap: {}, moduleIds: new Set() },
   };
 }
 

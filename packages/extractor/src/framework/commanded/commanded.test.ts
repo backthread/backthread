@@ -286,7 +286,6 @@ describe('commandedAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'commanded', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     edges = await commandedAdapter.syntheticEdges!(ctx);
     roles = await commandedAdapter.roleTags!(ctx);
@@ -376,7 +375,6 @@ describe('commandedAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'commanded', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const e2 = await commandedAdapter.syntheticEdges!(ctx2);
     const r2 = await commandedAdapter.roleTags!(ctx2);

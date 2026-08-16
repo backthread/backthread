@@ -231,7 +231,6 @@ describe('grpcElixirAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'grpc-elixir', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     edges = await grpcElixirAdapter.syntheticEdges!(ctx);
     roles = await grpcElixirAdapter.roleTags!(ctx);
@@ -277,7 +276,6 @@ describe('grpcElixirAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'grpc-elixir', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const e2 = await grpcElixirAdapter.syntheticEdges!(ctx2);
     const r2 = await grpcElixirAdapter.roleTags!(ctx2);

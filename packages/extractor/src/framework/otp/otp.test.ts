@@ -173,7 +173,6 @@ describe('otpAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'otp', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     edges = await otpAdapter.syntheticEdges!(ctx);
     roles = await otpAdapter.roleTags!(ctx);
@@ -269,7 +268,6 @@ describe('otpAdapter analysis (syntheticEdges / roleTags)', () => {
         rootPath: '',
         match: { adapter: 'otp', confidence: 1, rootPath: '' },
         graph: g,
-        cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
       };
       const es = await otpAdapter.syntheticEdges!(c);
       const keys = new Set(es.map(edgeKey));
@@ -291,7 +289,6 @@ describe('otpAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'otp', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const e2 = await otpAdapter.syntheticEdges!(ctx2);
     const r2 = await otpAdapter.roleTags!(ctx2);

@@ -311,7 +311,6 @@ describe('ashAdapter analysis (groupingPrior / syntheticEdges / roleTags)', () =
       rootPath: '',
       match: { adapter: 'ash', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await ashAdapter.groupingPrior!(ctx));
     edges = await ashAdapter.syntheticEdges!(ctx);
@@ -424,7 +423,6 @@ describe('ashAdapter analysis (groupingPrior / syntheticEdges / roleTags)', () =
       rootPath: '',
       match: { adapter: 'ash', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const g2 = (await ashAdapter.groupingPrior!(ctx2)).groups;
     const e2 = await ashAdapter.syntheticEdges!(ctx2);

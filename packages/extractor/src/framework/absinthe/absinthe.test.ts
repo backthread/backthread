@@ -207,7 +207,6 @@ describe('absintheAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'absinthe', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     edges = await absintheAdapter.syntheticEdges!(ctx);
     roles = await absintheAdapter.roleTags!(ctx);
@@ -269,7 +268,6 @@ describe('absintheAdapter analysis (syntheticEdges / roleTags)', () => {
       rootPath: '',
       match: { adapter: 'absinthe', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const e2 = await absintheAdapter.syntheticEdges!(ctx2);
     const r2 = await absintheAdapter.roleTags!(ctx2);

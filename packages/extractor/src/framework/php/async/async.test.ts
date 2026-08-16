@@ -34,7 +34,6 @@ async function asyncRepo(files: Record<string, string>): Promise<FrameworkContex
     rootPath: '',
     graph,
     match: { adapter: 'php-async', confidence: 0.8, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

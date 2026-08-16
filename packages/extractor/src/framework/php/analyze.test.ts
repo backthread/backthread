@@ -43,7 +43,6 @@ async function phpRepo(files: Record<string, string>): Promise<FrameworkContext>
     rootPath: '',
     graph,
     match: { adapter: 'test', confidence: 1, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 

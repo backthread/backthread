@@ -245,7 +245,6 @@ describe('litestarAdapter analysis (groupingPrior / syntheticEdges / roleTags)',
       rootPath: '',
       match: { adapter: 'litestar', confidence: 1, rootPath: '', metadata: {} },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     ({ groups } = await litestarAdapter.groupingPrior!(ctx));
     edges = await litestarAdapter.syntheticEdges!(ctx);

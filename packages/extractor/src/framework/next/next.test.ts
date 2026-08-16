@@ -161,7 +161,6 @@ describe('nextAdapter contribution hooks (, file-id space)', () => {
       rootPath: '',
       match: { adapter: 'next', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
       logged.push(a.join(' '));
@@ -265,7 +264,6 @@ describe('nextAdapter contribution hooks (, file-id space)', () => {
       rootPath: '',
       match: { adapter: 'next', confidence: 1, rootPath: '' },
       graph,
-      cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
     };
     const g2 = (await nextAdapter.groupingPrior!(ctx)).groups;
     const e2 = await nextAdapter.syntheticEdges!(ctx);

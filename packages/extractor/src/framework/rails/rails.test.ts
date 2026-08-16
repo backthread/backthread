@@ -34,7 +34,6 @@ async function railsRepo(files: Record<string, string>): Promise<FrameworkContex
     rootPath: '',
     graph,
     match: { adapter: 'rails', confidence: 0.9, rootPath: '' },
-    cluster: { fileModuleMap: {}, moduleIds: new Set<string>() },
   } as FrameworkContext;
 }
 
