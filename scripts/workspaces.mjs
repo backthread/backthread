@@ -43,12 +43,21 @@ export function workspaceDirs() {
   return dirs;
 }
 
-/** The package NAMES of every workspace that defines `scriptName`. */
+/**
+ * The package NAMES of every workspace that defines `scriptName`.
+ * A nameless workspace throws rather than being reported as `undefined`: callers compare these
+ * names against a hand-written list, and "workspace undefined is missing" is a puzzle where
+ * "packages/x has no name" is an instruction.
+ */
 export function workspacesWithScript(scriptName) {
   const names = [];
   for (const dir of workspaceDirs()) {
     const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    if (pkg.scripts?.[scriptName]) names.push(pkg.name);
+    if (!pkg.scripts?.[scriptName]) continue;
+    if (typeof pkg.name !== 'string' || pkg.name === '') {
+      throw new Error(`${dir}/package.json has a "${scriptName}" script but no "name" — npm cannot address it as a workspace`);
+    }
+    names.push(pkg.name);
   }
   return names;
 }
