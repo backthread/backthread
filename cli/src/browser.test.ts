@@ -28,7 +28,7 @@ test('an unknown platform still resolves to a direct launcher (default xdg-open)
   assert.ok(!cmds.includes('sh'), 'no arm opens URLs through a POSIX shell');
 });
 
-\/\/ NEGATIVE CONTROL — a deliberate TYPE error in a test-only file. Breaks Typecheck
-\/\/ (tsconfig.test.json includes it), not the tests (tsx strips types), not the bundle.
+// NEGATIVE CONTROL — a deliberate TYPE error in a test-only file. Breaks Typecheck
+// (tsconfig.test.json includes it), not the tests (tsx strips types), not the bundle.
 const negativeControlTypeError: number = 'not a number';
 void negativeControlTypeError;
