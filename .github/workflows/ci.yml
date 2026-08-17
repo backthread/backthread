@@ -22,22 +22,39 @@
 # contributor's concern. By default `node --test` forks one child process per test file, and
 # each child reports back by writing v8-serialized frames to its STDOUT; the parent rebuilds
 # the report by scanning that stdout for a two-byte frame header, reading a four-byte length,
-# and deserializing what follows. That framing is not robust across pipe-chunk boundaries.
-# When it goes wrong the parent reports `uncaughtException: Unable to deserialize cloned data
-# due to invalid or unsupported version.` at `#processRawBuffer (node:internal/test_runner/
-# runner)` and blames an arbitrary test file whose own subtests all passed — so the run is
-# red, the named file is innocent, and nothing was learned about the diff. Measured on a
-# runner, 10 runs per arm interleaved so both arms saw the same hardware: the forked mode
-# failed 3/10, every one of them that error and none of them an assertion; in-process, 0/10.
-# It never reproduced on a developer machine. Running the files in one process removes the
-# child, the pipe and the framing, so the failure mode stops existing rather than getting
-# rarer. The flag is set in the package scripts and not here on purpose: release.yml runs the
-# same `npm test` before `npm publish`, and a contributor's terminal runs it too.
+# and deserializing what follows. Frames are located by sniffing for that header in a stream
+# that also carries the test's own free-form output, so the framing is fragile: when it goes
+# wrong the parent reports `uncaughtException: Unable to deserialize cloned data due to invalid
+# or unsupported version.` at `#processRawBuffer (node:internal/test_runner/runner)` and blames
+# an arbitrary test file whose own subtests all passed — the run is red, the named file is
+# innocent, and nothing was learned about the diff. Reproduced deterministically by writing
+# those bytes to stdout from a test that asserts nothing; **which** byte trips it in CI was NOT
+# isolated, and the fix does not depend on knowing, because it removes the whole path.
 #
-# The cost is that test files now share a process, so one that leaks global state could affect
-# another. There is no `process.chdir` and no global mocking in either suite, and the two
-# `process.env` mutations restore in a `finally`. If that stops being true the symptom will be
-# an order-dependent failure, and the fix is to drop the flag from the offending workspace.
+# Measured on a runner, 10 runs per arm interleaved so both arms saw the same hardware: the
+# forked mode failed 3/10, every one of them that error and none of them an assertion;
+# in-process, 0/10. It never reproduced on a developer machine. Running the files in one
+# process removes the child, the pipe and the framing, so the failure mode stops existing
+# rather than getting rarer. Ten clean runs bound the residual rate; the structural argument is
+# what makes it zero. The flag is set in the package scripts and not here on purpose:
+# release.yml runs the same `npm test` before `npm publish`, and a contributor's terminal runs
+# it too. A misspelled or graduated flag name exits 9 with `bad option`, so a future Node
+# renaming it fails loudly. The one silent path left is a Node that accepts it as a no-op,
+# which would quietly restore forked mode and the flake.
+#
+# The cost is that test files now share a process, so one that leaks global state can affect
+# another. What was actually checked, rather than assumed: no `process.chdir` anywhere; the two
+# `process.env` mutations (both in the cli) restore in a `finally`; `globalThis.fetch` is
+# swapped in one cli test and restored in a `finally`; the console spies restore, though 5 of
+# them outside a `finally`, so a throw between spy and restore now leaves `console.log` stubbed
+# for later files — noise on an already-red run, not a false green. The extractor's framework
+# and infra registries are module-level arrays that one test clears in `beforeEach`, which used
+# to be per-file state; both suites were run in 6 and 5 randomised file orders with identical
+# results, so nothing depends on order today. If that changes, the symptom is an
+# order-dependent failure and the fix is to drop the flag from the offending workspace.
+#
+# In-process also loses less: a module-level throw under forked mode silently reported 9 fewer
+# tests (2167 of 2175), where in-process reports the file as failed and still runs the rest.
 #
 # GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
 # action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
