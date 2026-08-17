@@ -262,6 +262,27 @@ jobs:
           set -o pipefail
           npm test --workspace ${{ matrix.workspace }} 2>&1 | tee /tmp/test-output.txt
           node scripts/check-test-floor.mjs "${{ matrix.workspace }}" /tmp/test-output.txt
+      # PROVE THE FLOOR CAN FAIL, on this runner, on this commit — both of its paths, not
+      # just the obvious one. Borrowed from the sibling app repo, which learned it the hard
+      # way: a floor that has quietly stopped being able to fail is a slower version of the
+      # bug it was added for, and this repo found four unrunnable or unfailable guards in a
+      # week. The count path is the one people picture; the FAIL-CLOSED path matters more,
+      # because if a runner ever renames its `# pass N` summary the only thing between that
+      # and a green tick is this script choosing to exit 1 on a log it could not parse.
+      - name: Self-test — the floor can fail
+        if: success()
+        run: |
+          if node scripts/check-test-floor.mjs "${{ matrix.workspace }}" /dev/null; then
+            echo "::error::the floor passed on an EMPTY log, so it is vacuous — it would go green over a suite that never ran"
+            exit 1
+          fi
+          echo "ok — a log with no summary is a failure, not a pass"
+          printf '# pass 0\n' > /tmp/floor-probe.txt
+          if node scripts/check-test-floor.mjs "${{ matrix.workspace }}" /tmp/floor-probe.txt; then
+            echo "::error::the floor passed on a reported count of 0, so it cannot detect a shrinking suite"
+            exit 1
+          fi
+          echo "ok — the floor rejects a count below its minimum"
 
   # The Claude Code marketplace plugin is cloned from git with NO build step on install, so
   # the COMMITTED bundle must equal a fresh build (esbuild is deterministic for the

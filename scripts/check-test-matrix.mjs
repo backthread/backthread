@@ -125,13 +125,24 @@ function assertMatrixJobActuallyGates(job) {
   if (/continue-on-error:\s*true/.test(job.text)) {
     fail(`job "${job.name}" sets \`continue-on-error: true\`, so a failing test would report green`);
   }
-  if (/^\s*if:/m.test(job.text)) {
-    fail(
-      `job "${job.name}" or one of its steps carries an \`if:\`. Refused on principle rather than ` +
-        'diagnosed: this guard cannot evaluate a GitHub expression, so it cannot tell `always()` ' +
-        'from `false`, and a job or step that skips does not fail a run. If the condition is ' +
-        'deliberate, teach scripts/check-test-matrix.mjs to allow that specific one.',
-    );
+  // An `if:` is refused unless it is one this guard has been taught is incapable of hiding a
+  // failure. `success()` is the only member: it runs a step ONLY when everything before it
+  // passed, so it can never turn a red into a green — it is how a self-test that exists to catch
+  // a wrongly-GREEN run avoids adding noise to an already-red one. Everything else stays
+  // refused, `always()` included, because this cannot evaluate an expression and `if: false`
+  // silently skips: a skipped step or job does not fail a run.
+  const SAFE_CONDITIONS = new Set(['success()']);
+  for (const match of job.text.matchAll(/^\s*if:\s*(.+?)\s*$/gm)) {
+    const condition = match[1].replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim();
+    if (!SAFE_CONDITIONS.has(condition)) {
+      fail(
+        `job "${job.name}" or one of its steps carries \`if: ${match[1].trim()}\`. Refused rather ` +
+          'than diagnosed: this guard cannot evaluate a GitHub expression, and a step or job ' +
+          'that skips does not fail a run. Only `success()` is allowed, because it cannot turn ' +
+          'a red into a green. If this condition is deliberate, add it to SAFE_CONDITIONS in ' +
+          'scripts/check-test-matrix.mjs with the reason it cannot hide a failure.',
+      );
+    }
   }
   if (/^\s*needs:/m.test(job.text)) {
     fail(
