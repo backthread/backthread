@@ -10,21 +10,24 @@ Releases (`v0.5.1` and prior).
 **One question about your codebase, and ignoring it costs you nothing — provably.**
 `/backthread:ask-me` turns the usual direction around: instead of you asking Backthread
 how something works, Backthread asks you one question built from what was actually
-recorded in this repo. The plugin also offers one unprompted, at the only moment you have
-nothing to do — *after* a long `Bash` / `Task` / `WebFetch` / `WebSearch` call your agent
-was running while you watched it — at most once per session.
+recorded in this repo. The plugin also offers one unprompted, at a moment your agent is
+mid-errand rather than mid-edit — *after* a `Bash` / `Task` / `WebFetch` / `WebSearch`
+call, never before one — at most once per session.
 
 The reason to trust it is that there is nowhere to keep a gradebook:
 
 - **Nothing is written down when you are asked.** The endpoint that serves the question
-  performs no writes at all; the question exists only inside a signed, half-hour token
-  that lives in your terminal scrollback. Ignore it and there is no row anywhere to find
-  later — no queue, no nag, no badge, no re-ask.
-- **Nothing is stored on your machine either.** The token never touches disk. The one file
-  this writes is a session id, and its bytes are *identical* whether a question came back,
-  none did, or the request failed — so "asked and ignored" and "never asked" cannot be
-  told apart locally any more than they can on the server. There is a test that diffs the
-  three.
+  performs no writes at all; the question exists only inside a signed, half-hour token,
+  which nothing here keeps. Ignore it and there is no row anywhere to find later — no
+  queue, no nag, no badge, no re-ask.
+- **Backthread stores nothing on your machine either.** The one file it writes is a
+  session id, and its bytes are *identical* whether a question came back, none did, or
+  the request failed — and identical again whether you answered or ignored it. So "asked
+  and ignored" and "never asked" cannot be told apart locally any more than they can on
+  the server. There are tests that diff all four. (The question reaches you as hook
+  context, and your coding agent keeps its own session transcript on disk like it does
+  for everything else it is told — that file is the agent's, and Backthread's capture
+  never uploads it, but we are not going to claim the bytes are nowhere.)
 - **Nothing counts** how often you are asked or how often you answer — not for you, not
   for your team, not in aggregate.
 - **It is never a pre-edit trigger.** It fires *after* a tool you were waiting on, never
@@ -34,7 +37,9 @@ The reason to trust it is that there is nowhere to keep a gradebook:
 `backthread ask-me --promise` prints that statement in full, straight from the server that
 enforces it — the client holds no copy of the sentences, so they cannot drift away from
 the behaviour they describe. The client is `cli/src/inflow.ts` and `cli/src/inflowHook.ts`,
-open like the rest of it, for the same reason the redactor is.
+open like the rest of it, for the same reason the redactor is. Read there and you can
+check exactly what leaves your machine; the server half you are taking on trust, and the
+statement is written as things you could go and check rather than as reassurance.
 
 - A quiet repo is a finished answer, not an empty one: "nothing on record here", never a
   zero, never a percentage, never "you're caught up".

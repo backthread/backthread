@@ -36035,6 +36035,13 @@ function formatAskAnswer(outcome) {
 
 ${outcome.upgrade}` : text;
 }
+var PROMISE_EPILOGUE = [
+  "Those sentences come from the server that enforces them, not from this client, so",
+  "they cannot drift from the behaviour they describe. What this client sends is",
+  "readable in this open-source repo; what the server does with an answer you are",
+  "taking on trust \u2014 which is why the statement is written as things you could go and",
+  "check rather than as reassurance."
+];
 function formatPromise(outcome) {
   if (outcome.status !== "ok") {
     const lines = [`backthread ask-me: ${outcome.detail}`];
@@ -36049,8 +36056,7 @@ function formatPromise(outcome) {
   if (promise2.title) out.push(promise2.title, "");
   for (const point of promise2.points) out.push(`  - ${point}`);
   out.push("");
-  out.push("These are properties of the code, not a policy \u2014 the client that asks you is in");
-  out.push("this open-source repo and the endpoint it calls writes nothing when it asks.");
+  out.push(...PROMISE_EPILOGUE);
   return out.join("\n");
 }
 

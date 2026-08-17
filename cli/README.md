@@ -99,8 +99,9 @@ a failed one.
 
 The other direction. `/backthread:ask-me` has Backthread ask **you** one question
 about this codebase, from what was actually recorded here. The plugin also offers
-one, unprompted, at the only moment you have nothing to do — **after** a long tool
-call your agent was running while you watched it. At most **once per session**.
+one, unprompted, when your agent is mid-errand rather than mid-edit — **after** a
+`Bash`, `Task`, `WebFetch` or `WebSearch` call, the kind of step you sit and watch.
+At most **once per session**.
 
 **Ignore it and nothing happens, and that is a property of the code rather than a
 policy.** `backthread ask-me --promise` prints the exact statement, and it is worth
@@ -110,12 +111,17 @@ nothing is written down when you are asked, nothing counts how often you are ask
 answer, and your lead sees what the team understands rather than who replied.
 
 What that rests on, mechanically: the endpoint that hands your agent a question
-performs no writes at all — the question exists only inside a signed, half-hour token
-that lives in your terminal scrollback and nowhere else. Nothing is stored on your
-machine either; you can diff the config directory across an ask you answered and one
-you ignored and get the same bytes, which is what the tests do. The whole client is
+performs no writes at all — the question exists only inside a signed, half-hour token,
+and Backthread keeps no copy of it. Backthread stores nothing on your machine either;
+diff its config directory across an ask you answered and one you ignored and you get
+the same bytes, which is exactly what the tests do. The whole client is
 `cli/src/inflow.ts` and `cli/src/inflowHook.ts` if you would rather check than take
-our word for it — same reason the redactor is open source.
+our word for it — same reason the redactor is open source. Two boundaries worth
+stating rather than glossing: the question is handed to you as hook context, so your
+coding agent writes it into its own session transcript the way it does everything else
+it is told (that file is the agent's, and Backthread's capture never uploads it); and
+what the server does with an answer is not checkable from this repo, which is why the
+statement is written as things you could go and check rather than as reassurance.
 
 One honest caveat about "once per session": the machine remembers the last few dozen
 session ids, so a session resumed long afterwards can be offered a second question.
