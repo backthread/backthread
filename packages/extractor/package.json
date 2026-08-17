@@ -47,11 +47,12 @@
   "publishConfig": {
     "access": "public"
   },
+  "comment_test_isolation": "`--experimental-test-isolation=none` runs every test file in ONE process instead of forking one child per file. Not a speed tweak: the forked mode makes the runner parse the child's STDOUT looking for v8-serialized report frames, and that framing is not robust — a chunk boundary landing on a frame's leading 0xFF byte makes the parent misread the stream and report `uncaughtException: Unable to deserialize cloned data due to invalid or unsupported version.` against an arbitrary test file whose own assertions all passed. It reddened roughly half of all CI runs (and `release.yml` with them) while never reproducing on a developer machine, because the failure is a pipe-chunking race and CI runners have fewer cores. In-process there is no child, no pipe and no framing, so the failure mode does not exist rather than being made less likely. Costs: test files share one process, so a file that leaks global state can now affect another (nothing does today — no process.chdir, no global mocks, and the two env-var mutations restore in `finally`), and the flag is still `--experimental-`, so a rename would fail loudly with `bad option` rather than silently passing.",
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "node --import tsx --test --test-force-exit \"src/**/*.test.ts\" && npm run build",
+    "test": "node --import tsx --test --experimental-test-isolation=none --test-force-exit \"src/**/*.test.ts\" && npm run build",
     "prepack": "npm run build"
   },
   "dependencies": {

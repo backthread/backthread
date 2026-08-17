@@ -3,6 +3,17 @@
 # floor for a widely-`npx`'d package: a vulnerability gate, a lockfile-integrity gate, and
 # a guard that the release keeps npm provenance on.
 #
+# EVERY GATE IS ITS OWN JOB, ON PURPOSE. These used to be sequential steps in one job, so
+# the FIRST failure skipped every later step: a dev-only advisory in the vulnerability gate
+# meant typecheck, the tests and the bundle-sync check never ran at all, and a PR's red
+# badge said nothing about the PR. A red audit must not be able to hide a broken test, and a
+# broken test must not be able to hide a stale committed bundle — so they are independent
+# jobs that report independently and can be re-run independently. Anything that needs no
+# `npm install` is grouped into one job that runs whatever the dependency tree looks like.
+#
+# Each job carries `timeout-minutes` because a hung gate is the one failure mode that costs
+# more than a red one: GitHub's default is 6 hours of runner time with no report at the end.
+#
 # GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
 # action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
 name: CI
@@ -13,58 +24,125 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  # Everything that needs no dependency install, so no advisory and no drifted lockfile can
+  # stop it from running. It reads the COMMITTED bundle, which the `bundle-sync` job below
+  # ties to a fresh build.
+  guards:
+    name: Distribution + release guards
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # Nothing we distribute may carry an internal reference (issue ids, tracker URLs,
+      # private repo names, company email domains) — in the npm tarball or in the bundles
+      # installed straight from git.
+      - name: No internal references in anything we distribute
+        run: npm run check:no-internal-refs
+      # Lockfile integrity: it must be present, and `npm ci` (in every other job) hard-fails
+      # if it's out of sync with package.json — so an un-committed dependency change can't
+      # slip through.
+      - name: Lockfile present
+        run: test -f package-lock.json || { echo "::error::package-lock.json is missing — commit it (npm install)."; exit 1; }
+      # Regression guard: every release workflow must keep npm build provenance on, so each
+      # published package always carries a verifiable, tamper-evident build attestation.
+      # Anchor to the `npm publish … --provenance` line (not just any occurrence), so a
+      # flag left behind in a comment can't mask a publish step that dropped it. Globs
+      # every release workflow (release.yml = the CLI, release-extractor.yml = the
+      # extractor lib, and any future release-*.yml) so a new publish path can't escape
+      # the guard by simply not being listed here.
+      - name: Releases keep npm provenance on
+        run: |
+          for wf in .github/workflows/release*.yml; do
+            grep -Eq 'npm publish[^#]*--provenance' "$wf" \
+              || { echo "::error::$wf's npm publish must keep --provenance"; exit 1; }
+          done
+
+  # Vulnerability gate: fail the build on a HIGH+ advisory anywhere in the tree. The
+  # published `npx backthread` bundle INLINES the one runtime dep (@modelcontextprotocol/sdk)
+  # via esbuild, so a vuln in a "devDependency" can still ship — we audit the FULL tree,
+  # not just prod. Keep the tree clean; if a future dev-only advisory genuinely can't ship
+  # and can't be fixed, add a reviewed exception here (don't silently lower the level).
+  # Its own job: an advisory is a fact about the dependency tree, not about the diff, and it
+  # must never be the reason the diff went unchecked.
+  audit:
+    name: Vulnerability gate (npm audit, high+)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      # Nothing we distribute may carry an internal reference (issue ids, tracker URLs,
-      # private repo names, company email domains) — in the npm tarball or in the bundles
-      # installed straight from git. Deliberately FIRST: it is a plain node script needing
-      # no install, and putting it behind the dependency gates below would mean an
-      # unrelated advisory silently stops it from ever running. It reads the COMMITTED
-      # bundle, which the sync step further down ties to a fresh build.
-      - name: No internal references in anything we distribute
-        run: npm run check:no-internal-refs
-      # Lockfile integrity: it must be present, and `npm ci` (below) hard-fails if it's out
-      # of sync with package.json — so an un-committed dependency change can't slip through.
-      - name: Lockfile present
-        run: test -f package-lock.json || { echo "::error::package-lock.json is missing — commit it (npm install)."; exit 1; }
+      - run: npm audit --audit-level=high
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
       - name: Install (npm ci — fails on a drifted lockfile)
         run: npm ci
-      # Vulnerability gate: fail the build on a HIGH+ advisory anywhere in the tree. The
-      # published `npx backthread` bundle INLINES the one runtime dep (@modelcontextprotocol/sdk)
-      # via esbuild, so a vuln in a "devDependency" can still ship — we audit the FULL tree,
-      # not just prod. Keep the tree clean; if a future dev-only advisory genuinely can't ship
-      # and can't be fixed, add a reviewed exception here (don't silently lower the level).
-      - name: Vulnerability gate (npm audit, high+)
-        run: npm audit --audit-level=high
-      - name: Typecheck
-        run: npm run typecheck
-      # `npm test` runs the cli test suite + `npm run build` + `npm run bundle` (smoke),
-      # so it ALSO enforces the version-lockstep guards (plugin.json / gemini-extension.json
-      # / codex plugin.json all == cli/package.json) and regenerates dist-bundle/backthread.js.
-      - name: Test
-        run: npm test
-      # The Claude Code marketplace plugin is cloned from git with NO build step on
-      # install, so the COMMITTED bundle must equal a fresh build. `npm test`
-      # just rebuilt it; fail if it differs from what's committed (esbuild is
-      # deterministic for the lockfile-pinned version).
-      - name: Committed bundle is in sync with src
-        run: git diff --exit-code cli/dist-bundle/backthread.js
-      # Regression guard: every release workflow must keep npm build provenance on, so each
-      # published package always carries a verifiable, tamper-evident build attestation.
-      - name: Releases keep npm provenance on
-        # Anchor to the `npm publish … --provenance` line (not just any occurrence), so a
-        # flag left behind in a comment can't mask a publish step that dropped it. Globs
-        # every release workflow (release.yml = the CLI, release-extractor.yml = the
-        # extractor lib, and any future release-*.yml) so a new publish path can't escape
-        # the guard by simply not being listed here.
-        run: |
-          for wf in .github/workflows/release*.yml; do
-            grep -Eq 'npm publish[^#]*--provenance' "$wf" \
-              || { echo "::error::$wf's npm publish must keep --provenance"; exit 1; }
-          done
+      - run: npm run typecheck
+
+  # One job per workspace, so a failure in the CLI suite can't hide the extractor's 2000+
+  # tests (and vice versa) — the root `npm test` fans out serially and stops at the first
+  # workspace that fails.
+  #
+  # `npm test -w backthread` also runs the cli build + bundle smoke, so it enforces the
+  # version-lockstep guards (plugin.json / gemini-extension.json / codex plugin.json all ==
+  # cli/package.json).
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Report every workspace's result on every run, even when one of them is red.
+      fail-fast: false
+      matrix:
+        workspace: [backthread, '@backthread/extractor']
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install (npm ci — fails on a drifted lockfile)
+        run: npm ci
+      # The cli imports TYPES from @backthread/extractor, whose package.json points
+      # types/main at dist/ — so the extractor must be built before either workspace's
+      # tests can resolve it. `npm ci` doesn't build workspaces.
+      - name: Build @backthread/extractor (the cli resolves its types from dist/)
+        run: npm run build --workspace @backthread/extractor
+      - run: npm test --workspace ${{ matrix.workspace }}
+
+  # The Claude Code marketplace plugin is cloned from git with NO build step on install, so
+  # the COMMITTED bundle must equal a fresh build (esbuild is deterministic for the
+  # lockfile-pinned version). This used to piggyback on `npm test` having rebuilt the
+  # bundle, which meant a single failing test also silenced it; it now builds the bundle
+  # itself and is answerable only for the sync question.
+  bundle-sync:
+    name: Committed bundle is in sync with src
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install (npm ci — fails on a drifted lockfile)
+        run: npm ci
+      - name: Build @backthread/extractor (the bundle inlines what the cli imports from it)
+        run: npm run build --workspace @backthread/extractor
+      - name: Rebuild the bundle from src
+        run: npm run bundle --workspace backthread
+      - run: git diff --exit-code cli/dist-bundle/backthread.js

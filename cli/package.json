@@ -40,6 +40,7 @@
     "README.md",
     "LICENSE"
   ],
+  "comment_test_isolation": "`--experimental-test-isolation=none` runs every test file in ONE process instead of forking one child per file — see the matching note in packages/extractor/package.json for why. Short version: the forked runner reconstructs its report by scanning each child's stdout for v8 frame headers, and a pipe-chunk boundary in the wrong place makes it fail with `Unable to deserialize cloned data` against a test file that passed. In-process, there is no child and no framing to get wrong.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "bundle": "node esbuild.config.mjs",
@@ -47,7 +48,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "start": "tsx src/bin/backthread.ts",
     "smoke": "npm run bundle && node dist-bundle/backthread.js help > /dev/null",
-    "test": "node --import tsx --test --test-force-exit src/*.test.ts && npm run build && npm run smoke"
+    "test": "node --import tsx --test --experimental-test-isolation=none --test-force-exit src/*.test.ts && npm run build && npm run smoke"
   },
   "engines": {
     "node": ">=22.18"
