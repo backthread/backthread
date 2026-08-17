@@ -66,22 +66,27 @@ export function workspaceDirs() {
   return dirs;
 }
 
-/** Whether a workspace ships any test file at all, so "no test script" can be called out. */
+/**
+ * Whether a workspace ships any test file at all, so "has tests but no test script" can be
+ * called out. Walks the WHOLE workspace, not just `src/`: an earlier version looked only under
+ * `src/`, which made a perfectly ordinary `test/` or `tests/` layout invisible — and a workspace
+ * with tests there and no `test` script would then have passed the very check this feeds.
+ */
 export function hasTestFiles(dir) {
+  const IGNORED = new Set(['node_modules', 'dist', 'dist-bundle', 'coverage', 'build']);
   const walk = (d) => {
     for (const entry of readdirSync(d)) {
-      if (entry === 'node_modules' || entry === 'dist' || entry.startsWith('.')) continue;
+      if (IGNORED.has(entry) || entry.startsWith('.')) continue;
       const abs = join(d, entry);
       if (statSync(abs).isDirectory()) {
         if (walk(abs)) return true;
-      } else if (/\.test\.tsx?$/.test(entry)) {
+      } else if (/\.test\.[cm]?[jt]sx?$/.test(entry)) {
         return true;
       }
     }
     return false;
   };
-  const src = join(dir, 'src');
-  return existsSync(src) ? walk(src) : false;
+  return walk(dir);
 }
 
 /**

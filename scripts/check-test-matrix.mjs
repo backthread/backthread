@@ -120,11 +120,18 @@ function assertMatrixJobActuallyGates(job) {
     );
   }
   if (/fail-fast:\s*true/.test(job.text)) fail(`job "${job.name}" sets \`fail-fast: true\``);
-  if (/continue-on-error:/.test(job.text)) {
-    fail(`job "${job.name}" uses \`continue-on-error\`, so a failing test would report green`);
+  // Only `true`. An explicit `continue-on-error: false` documents the intent and is safe, and
+  // rejecting it would be a false red — which is how people learn to ignore a guard.
+  if (/continue-on-error:\s*true/.test(job.text)) {
+    fail(`job "${job.name}" sets \`continue-on-error: true\`, so a failing test would report green`);
   }
   if (/^\s*if:/m.test(job.text)) {
-    fail(`job "${job.name}" is conditional on an \`if:\` — a skipped job does not fail a run`);
+    fail(
+      `job "${job.name}" or one of its steps carries an \`if:\`. Refused on principle rather than ` +
+        'diagnosed: this guard cannot evaluate a GitHub expression, so it cannot tell `always()` ' +
+        'from `false`, and a job or step that skips does not fail a run. If the condition is ' +
+        'deliberate, teach scripts/check-test-matrix.mjs to allow that specific one.',
+    );
   }
   if (/^\s*needs:/m.test(job.text)) {
     fail(
@@ -163,11 +170,46 @@ function assertGuardIsStillInvoked(yaml) {
   }
 }
 
-/** The typecheck gate still exists and still runs `tsc` per workspace. */
+/**
+ * The typecheck gate still exists and still runs per workspace. Scoped to the job that owns it,
+ * the same way the matrix check is scoped, so the string cannot satisfy this from some other job.
+ */
 function assertTypecheckJobRuns(yaml) {
-  if (!/npm run typecheck --workspace/.test(yaml)) {
+  const lines = yaml.split('\n');
+  const jobsAt = lines.findIndex((line) => /^jobs:\s*$/.test(line));
+  const headers = [];
+  for (let i = jobsAt + 1; i < lines.length; i++) {
+    if (/^ {2}[A-Za-z0-9_.-]+:\s*$/.test(lines[i])) headers.push(i);
+  }
+  const runsAt = lines.findIndex((line) => /npm run typecheck --workspace/.test(line));
+  if (runsAt === -1) {
     fail('no job runs `npm run typecheck --workspace`, so nothing is typechecked');
   }
+  const start = [...headers].reverse().find((i) => i < runsAt);
+  if (start === undefined) fail('the per-workspace typecheck command is not inside any job');
+  const end = headers.find((i) => i > runsAt) ?? lines.length;
+  const block = lines.slice(start, end).join('\n');
+  const name = lines[start].trim().replace(/:$/, '');
+  if (/continue-on-error:\s*true/.test(block)) {
+    fail(`job "${name}" typechecks with \`continue-on-error: true\`, so a type error reports green`);
+  }
+  if (/^\s*if:/m.test(block)) fail(`job "${name}" typechecks under an \`if:\`, so it can be skipped`);
+  if (/^\s*needs:/m.test(block)) {
+    fail(`job "${name}" declares \`needs:\` — another gate's failure would skip the typecheck`);
+  }
+}
+
+/**
+ * Whether a `test` script actually INVOKES a runner rather than merely mentioning one. An earlier
+ * version tested `/(--test\b|vitest)/`, which `echo --test` satisfies — and `\b` matches before a
+ * hyphen, so `echo --test-force-exit` satisfied it too. That is the same "weaker than it reads"
+ * shape this whole guard exists to reject, so it is checked as a command plus its flag.
+ */
+function invokesATestRunner(script) {
+  const runsNode = /(^|[\s;&|])(node|npx)\s/.test(script);
+  const hasTestFlag = /(^|\s)--test(\s|$)/.test(script);
+  const runsVitest = /(^|[\s;&|])(npx\s+)?vitest(\s|$)/.test(script);
+  return (runsNode && hasTestFlag) || runsVitest;
 }
 
 /** A script that exists but runs nothing is the same as no script, and looks like coverage. */
@@ -183,7 +225,7 @@ function assertScriptsDoSomething() {
       );
       process.exit(1);
     }
-    if (test && !/(--test\b|vitest)/.test(test)) {
+    if (test && !invokesATestRunner(test)) {
       console.error(
         `::error::${rel}'s \`test\` script does not invoke a test runner (\`${test}\`) — it would ` +
           'pass without running anything',
