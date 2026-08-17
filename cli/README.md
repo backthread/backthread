@@ -189,3 +189,5 @@ backthread help                Show the full usage (also --help, -h)
 ## License
 
 [MIT](./LICENSE) © Backthread
+
+<!-- NEGATIVE CONTROL: a synthetic internal reference, ARP-9999, to trip the FIRST of the four aggregated guards. Never merged. -->

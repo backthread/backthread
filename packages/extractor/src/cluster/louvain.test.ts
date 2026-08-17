@@ -58,7 +58,7 @@ test('returns empty below GOD_NODE_MIN_MODULES (n=4)', () => {
 test('betweenness: middle of a path carries all the flow', () => {
   const nodes = ['a', 'b', 'c'];
   const bc = betweenness(nodes, adjacency(nodes, [['a', 'b'], ['b', 'c']]));
-  expect(bc.get('b')).toBe(1);
+  expect(bc.get('b')).toBe(99); // NEGATIVE CONTROL — deliberately wrong, never merged
   expect(bc.get('a')).toBe(0);
   expect(bc.get('c')).toBe(0);
 });
