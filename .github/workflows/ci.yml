@@ -53,8 +53,19 @@
 # results, so nothing depends on order today. If that changes, the symptom is an
 # order-dependent failure and the fix is to drop the flag from the offending workspace.
 #
-# In-process also loses less: a module-level throw under forked mode silently reported 9 fewer
-# tests (2167 of 2175), where in-process reports the file as failed and still runs the rest.
+# Both modes lose something, and the honest comparison is per case, because an earlier draft of
+# this comment claimed in-process "loses less" flatly and measurement disproved it:
+#   • a module-level throw BEFORE the last `test()` call — red in both modes. Forked additionally
+#     drops the file's remaining tests from the count (2167 reported of 2175); in-process reports
+#     the file as failed and still runs the rest.
+#   • a module-level throw AFTER the last `test()` call — red under forked, and **SILENTLY GREEN
+#     in-process** (`# fail 0`, exit 0). This is a real green-while-broken class that this flag
+#     introduces, and the only one found.
+#   • an async module-level throw, an unhandled rejection, or a throwing timer leaked by a test —
+#     swallowed identically by both, a pre-existing `--test-force-exit` property.
+# So the trade is: a ~30% chance per run of a phantom failure that says nothing about the diff,
+# against a lost exception in the tail of a test file. That is worth taking, but it is a cost, not
+# a free win, and it is written down here so the next person does not rediscover it.
 #
 # GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
 # action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
@@ -107,19 +118,25 @@ jobs:
           # and CI stays green about it. This closes the list against the workspaces that
           # actually have a `test` script, in both directions.
           echo "::group::CI's test matrix covers every workspace"
-          npm run check:test-matrix || rc=1
+          node scripts/check-test-matrix.mjs || rc=1
           echo "::endgroup::"
 
-          # Regression guard: every release workflow must keep npm build provenance on, so
-          # each published package always carries a verifiable, tamper-evident build
-          # attestation. Anchor to the `npm publish … --provenance` line (not just any
-          # occurrence), so a flag left behind in a comment can't mask a publish step that
-          # dropped it. Globs every release workflow (release.yml = the CLI,
-          # release-extractor.yml = the extractor lib, and any future release-*.yml) so a new
-          # publish path can't escape the guard by simply not being listed here.
+          # Regression guard: every release workflow must keep npm build provenance on, so each
+          # published package always carries a verifiable, tamper-evident build attestation.
+          # Globs every release workflow (release.yml = the CLI, release-extractor.yml = the
+          # extractor lib, and any future release-*.yml) so a new publish path can't escape by
+          # simply not being listed here.
+          #
+          # `^[^#]*` is the whole guard. It used to be `npm publish[^#]*--provenance`, which
+          # forbids a `#` BETWEEN the two tokens but not BEFORE them — and both release workflows
+          # contain a comment reading "`npm publish --provenance` with Cannot find module
+          # sigstore". That comment satisfied the pattern unconditionally, so the check could not
+          # fail: deleting --provenance from the real publish step left it green. Measured, and
+          # it had been true on main the whole time. Anchoring at line start means only a line
+          # with no `#` before `npm publish` can satisfy it — i.e. an actual step.
           echo "::group::Releases keep npm provenance on"
           for wf in .github/workflows/release*.yml; do
-            grep -Eq 'npm publish[^#]*--provenance' "$wf" \
+            grep -Eq '^[^#]*npm publish[^#]*--provenance' "$wf" \
               || { echo "::error::$wf's npm publish must keep --provenance"; rc=1; }
           done
           echo "::endgroup::"
@@ -172,23 +189,29 @@ jobs:
       # script.
       - name: Typecheck every workspace (all of them, even after one fails)
         run: |
-          # Resolve the list into a variable FIRST, and refuse an empty one. `for ws in
-          # $(cmd)` over an empty or failed substitution runs the body zero times and exits
-          # 0 — `bash -e` does not catch it — so the gate would go green having typechecked
-          # nothing. An assignment DOES trip `bash -e` when its substitution fails, and the
-          # emptiness check covers the case where it succeeds but finds nothing.
+          # Resolve the list into a variable FIRST. `for ws in $(cmd)` over an empty or failed
+          # substitution runs the body zero times and exits 0 — `bash -e` does not catch it — so
+          # the gate would go green having typechecked nothing. An assignment DOES trip `bash -e`
+          # when its substitution fails, which covers the resolver erroring or being deleted.
           workspaces="$(node scripts/workspaces.mjs typecheck)"
-          test -n "$workspaces" || {
-            echo "::error::no workspace reports a typecheck script — refusing to report a green typecheck that checked nothing"
-            exit 1
-          }
           echo "typechecking: $(echo "$workspaces" | tr '\n' ' ')"
           rc=0
+          checked=0
           for ws in $workspaces; do
             echo "::group::typecheck $ws"
             npm run typecheck --workspace "$ws" || rc=1
+            checked=$((checked + 1))
             echo "::endgroup::"
           done
+          # Count the iterations that actually happened rather than testing the string for
+          # emptiness: `test -n` passes on a whitespace-only value, which word-splitting then
+          # turns into zero iterations and a green gate. Counting is the only form that cannot
+          # be satisfied by something that looks like a list but iterates to nothing.
+          test "$checked" -gt 0 || {
+            echo "::error::typechecked 0 workspaces — refusing to report a green typecheck that checked nothing"
+            exit 1
+          }
+          echo "typechecked $checked workspace(s)"
           exit $rc
 
   # One job per workspace, so a failure in the CLI suite can't hide the extractor's 2000+
