@@ -19,6 +19,7 @@
     "test": "npm run build --workspace @backthread/extractor && npm test --workspaces --if-present",
     "typecheck": "npm run build --workspace @backthread/extractor && npm run typecheck --workspaces --if-present",
     "bump": "node scripts/bump-version.mjs",
-    "check:no-internal-refs": "node scripts/check-no-internal-refs.mjs"
+    "check:no-internal-refs": "node scripts/check-no-internal-refs.mjs",
+    "check:test-matrix": "node scripts/check-test-matrix.mjs"
   }
 }
