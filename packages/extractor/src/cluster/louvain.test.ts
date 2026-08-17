@@ -464,3 +464,9 @@ test('clusterGraph consults the cache: a clean stored partition is REUSED, a dir
   expect(cache.lookup('p', memberKey)).toEqual({ 'p/a.ts': 0, 'p/b.ts': 0, 'p/c.ts': 0 });
 });
 
+
+// NEGATIVE CONTROL — deliberately broken, never merged. Proves a failing assertion
+// reddens CI, and reddens ONLY the job that owns it.
+test('NEGATIVE CONTROL: an assertion that must fail', () => {
+  assert.equal(1, 2);
+});
