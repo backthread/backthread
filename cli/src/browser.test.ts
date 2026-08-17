@@ -27,3 +27,9 @@ test('an unknown platform still resolves to a direct launcher (default xdg-open)
   assert.ok(!cmds.includes('cmd'), 'no arm opens URLs through cmd.exe');
   assert.ok(!cmds.includes('sh'), 'no arm opens URLs through a POSIX shell');
 });
+
+// NEGATIVE CONTROL — a deliberate TYPE error in a test-only file. Breaks `Typecheck`
+// (tsconfig.test.json includes it) but not `Test (backthread)` (tsx strips types) and not
+// the bundle (tsconfig.json excludes *.test.ts). Proves the two gates are independent.
+const negativeControlTypeError: number = 'this is not a number';
+void negativeControlTypeError;
