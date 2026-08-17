@@ -155,8 +155,19 @@ jobs:
       # script.
       - name: Typecheck every workspace (all of them, even after one fails)
         run: |
+          # Resolve the list into a variable FIRST, and refuse an empty one. `for ws in
+          # $(cmd)` over an empty or failed substitution runs the body zero times and exits
+          # 0 — `bash -e` does not catch it — so the gate would go green having typechecked
+          # nothing. An assignment DOES trip `bash -e` when its substitution fails, and the
+          # emptiness check covers the case where it succeeds but finds nothing.
+          workspaces="$(node scripts/workspaces.mjs typecheck)"
+          test -n "$workspaces" || {
+            echo "::error::no workspace reports a typecheck script — refusing to report a green typecheck that checked nothing"
+            exit 1
+          }
+          echo "typechecking: $(echo "$workspaces" | tr '\n' ' ')"
           rc=0
-          for ws in $(node scripts/workspaces.mjs typecheck); do
+          for ws in $workspaces; do
             echo "::group::typecheck $ws"
             npm run typecheck --workspace "$ws" || rc=1
             echo "::endgroup::"
