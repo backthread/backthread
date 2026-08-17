@@ -3,7 +3,11 @@
 Releases are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml):
 pushing a `v*` tag runs the tests, publishes `backthread` to npm via **OIDC trusted
 publishing** (no token), and cuts a GitHub Release with auto-generated notes.
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same checks on every PR.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same checks on every PR, but as
+one job per gate rather than one job of sequential steps — so a red audit can't stop the tests
+from reporting, and each check can be re-run on its own. The release keeps its steps sequential
+on purpose: it gates an irreversible `npm publish`, where stopping at the first failure is the
+point.
 
 ## One-time setup (founder) — done
 
