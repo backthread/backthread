@@ -53,19 +53,32 @@
 # results, so nothing depends on order today. If that changes, the symptom is an
 # order-dependent failure and the fix is to drop the flag from the offending workspace.
 #
-# Both modes lose something, and the honest comparison is per case, because an earlier draft of
-# this comment claimed in-process "loses less" flatly and measurement disproved it:
-#   • a module-level throw BEFORE the last `test()` call — red in both modes. Forked additionally
-#     drops the file's remaining tests from the count (2167 reported of 2175); in-process reports
-#     the file as failed and still runs the rest.
-#   • a module-level throw AFTER the last `test()` call — red under forked, and **SILENTLY GREEN
-#     in-process** (`# fail 0`, exit 0). This is a real green-while-broken class that this flag
-#     introduces, and the only one found.
-#   • an async module-level throw, an unhandled rejection, or a throwing timer leaked by a test —
-#     swallowed identically by both, a pre-existing `--test-force-exit` property.
+# WHAT THIS FLAG COSTS. Two earlier drafts of this comment got this wrong — first claiming
+# in-process "loses less", then narrowing the exposure to one tail case — and both were disproved
+# by measurement. The rule, measured on both real suites at several throw positions:
+#
+#   • A module-level `throw` is red in BOTH modes only if it precedes the file's FIRST test
+#     registration. Once ANY test in that file has registered, in-process exits 0 with `# fail 0`
+#     and silently drops the remaining tests from the count (2172 of 2175 for a mid-file throw,
+#     2175 of 2175 for one after the last registration). Forked reports the file as
+#     `not ok - <file>` in every position. This is the flag's real cost, and it is wider than one
+#     tail case.
+#   • An async module-level throw or an unhandled rejection is NOT swallowed by either mode.
+#     In-process is the louder of the two: it hard-crashes in `node:internal/test_runner/harness`
+#     with exit 7 and no `# tests` line at all, destroying the report. Forked reports one bad file
+#     and everything else still reports.
+#   • A throwing timer leaked by a test: forked reports it as a failure; in-process exits 1 with a
+#     diagnostic but `# fail 0`.
+#
+# The MITIGATION is the pass-count floor in the test job (scripts/test-floors.json): the harmful
+# half of the first bullet — the case where tests actually stop running — drops the count, so the
+# floor turns it back into a red. Verified: a mid-file throw goes from "green, 2172 tests" to a
+# named failure. The remaining silent case is a throw after the last registration, which loses only
+# the exception, not any test.
+#
 # So the trade is: a ~30% chance per run of a phantom failure that says nothing about the diff,
-# against a lost exception in the tail of a test file. That is worth taking, but it is a cost, not
-# a free win, and it is written down here so the next person does not rediscover it.
+# against a lost exception at the tail of a test file with the test-losing variant guarded. Worth
+# taking, and written down so the next person does not have to rediscover it three times.
 #
 # GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
 # action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
@@ -121,24 +134,13 @@ jobs:
           node scripts/check-test-matrix.mjs || rc=1
           echo "::endgroup::"
 
-          # Regression guard: every release workflow must keep npm build provenance on, so each
-          # published package always carries a verifiable, tamper-evident build attestation.
-          # Globs every release workflow (release.yml = the CLI, release-extractor.yml = the
-          # extractor lib, and any future release-*.yml) so a new publish path can't escape by
-          # simply not being listed here.
-          #
-          # `^[^#]*` is the whole guard. It used to be `npm publish[^#]*--provenance`, which
-          # forbids a `#` BETWEEN the two tokens but not BEFORE them — and both release workflows
-          # contain a comment reading "`npm publish --provenance` with Cannot find module
-          # sigstore". That comment satisfied the pattern unconditionally, so the check could not
-          # fail: deleting --provenance from the real publish step left it green. Measured, and
-          # it had been true on main the whole time. Anchoring at line start means only a line
-          # with no `#` before `npm publish` can satisfy it — i.e. an actual step.
-          echo "::group::Releases keep npm provenance on"
-          for wf in .github/workflows/release*.yml; do
-            grep -Eq '^[^#]*npm publish[^#]*--provenance' "$wf" \
-              || { echo "::error::$wf's npm publish must keep --provenance"; rc=1; }
-          done
+          # Every `npm publish` this repo can perform must carry `--provenance`, so each published
+          # package ships a verifiable, tamper-evident build attestation. This was a one-line
+          # grep until it was measured and found INCAPABLE OF FAILING, then found fooled four more
+          # ways after the obvious fix; scripts/check-provenance.mjs carries that history and
+          # checks every workflow rather than the ones we remembered to glob.
+          echo "::group::Every npm publish keeps provenance on"
+          node scripts/check-provenance.mjs || rc=1
           echo "::endgroup::"
 
           exit $rc
@@ -250,7 +252,16 @@ jobs:
       # tests can resolve it. `npm ci` doesn't build workspaces.
       - name: Build @backthread/extractor (the cli resolves its types from dist/)
         run: npm run build --workspace @backthread/extractor
-      - run: npm test --workspace ${{ matrix.workspace }}
+      # `tee` + a pass-count FLOOR, not just the exit code. In-process isolation swallows a
+      # module-level throw once any test in that file has registered: `npm test` exits 0 with
+      # `# fail 0` and simply reports fewer tests. Measured — a mid-file throw gave 2172 of 2175,
+      # green. The floor is the only thing that turns "less of it ran" back into a red.
+      # `pipefail` so `tee` cannot mask npm's exit status.
+      - name: Test ${{ matrix.workspace }}, then hold it to its pass-count floor
+        run: |
+          set -o pipefail
+          npm test --workspace ${{ matrix.workspace }} 2>&1 | tee /tmp/test-output.txt
+          node scripts/check-test-floor.mjs "${{ matrix.workspace }}" /tmp/test-output.txt
 
   # The Claude Code marketplace plugin is cloned from git with NO build step on install, so
   # the COMMITTED bundle must equal a fresh build (esbuild is deterministic for the

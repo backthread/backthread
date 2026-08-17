@@ -277,6 +277,13 @@ if (declared.length === 0) fail('the test matrix is empty');
 const expected = workspacesWithScript('test');
 const typechecked = workspacesWithScript('typecheck');
 
+// Every matrix workspace needs a pass-count floor, or its suite could shrink to nothing unnoticed
+// — the floor is what catches the silent test-drop this repo's isolation flag makes possible, so a
+// workspace without one is not actually guarded.
+const { floors } = JSON.parse(readFileSync(join(ROOT, 'scripts/test-floors.json'), 'utf8'));
+const unfloored = declared.filter((name) => typeof floors[name] !== 'number');
+const staleFloors = Object.keys(floors).filter((name) => !declared.includes(name));
+
 const missing = expected.filter((name) => !declared.includes(name));
 const extra = declared.filter((name) => !expected.includes(name));
 // The typecheck job derives its list at runtime, so it can never miss a NEW workspace — but it
@@ -284,7 +291,13 @@ const extra = declared.filter((name) => !expected.includes(name));
 // catches zero rather than "one fewer". Nothing here should be worth testing and not typechecking.
 const untypechecked = expected.filter((name) => !typechecked.includes(name));
 
-if (missing.length > 0 || extra.length > 0 || untypechecked.length > 0) {
+if (
+  missing.length > 0 ||
+  extra.length > 0 ||
+  untypechecked.length > 0 ||
+  unfloored.length > 0 ||
+  staleFloors.length > 0
+) {
   for (const name of missing) {
     console.error(
       `::error::workspace "${name}" has a \`test\` script but is NOT in ci.yml's test matrix — ` +
@@ -301,6 +314,18 @@ if (missing.length > 0 || extra.length > 0 || untypechecked.length > 0) {
     console.error(
       `::error::workspace "${name}" has a \`test\` script but no \`typecheck\` script, so CI's ` +
         'typecheck job silently skips it. Give it one, or stop testing it.',
+    );
+  }
+  for (const name of unfloored) {
+    console.error(
+      `::error::workspace "${name}" is in the test matrix but has no floor in ` +
+        'scripts/test-floors.json, so its suite could silently shrink. Add its passing count.',
+    );
+  }
+  for (const name of staleFloors) {
+    console.error(
+      `::error::scripts/test-floors.json has a floor for "${name}", which is not in the test ` +
+        'matrix — a floor nothing checks is misleading. Remove it, or add the workspace back.',
     );
   }
   process.exit(1);
