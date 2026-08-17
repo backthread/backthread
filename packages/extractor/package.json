@@ -47,11 +47,12 @@
   "publishConfig": {
     "access": "public"
   },
+  "comment_test_isolation": "`--experimental-test-isolation=none` runs the test files in one process instead of forking one child per file. Not a speed tweak: the forked runner rebuilds its report by parsing each child's stdout, which misframes across pipe-chunk boundaries and fails with `Unable to deserialize cloned data` against a test file that passed (measured: 3 of 10 CI runs, 0 of 10 in-process). Full reasoning and the trade-off in .github/workflows/ci.yml.",
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "node --import tsx --test --test-force-exit \"src/**/*.test.ts\" && npm run build",
+    "test": "node --import tsx --test --experimental-test-isolation=none --test-force-exit \"src/**/*.test.ts\" && npm run build",
     "prepack": "npm run build"
   },
   "dependencies": {

@@ -40,6 +40,7 @@
     "README.md",
     "LICENSE"
   ],
+  "comment_test_isolation": "`--experimental-test-isolation=none` avoids a Node test-runner crash in the forked mode that reddened CI at random; reasoning in .github/workflows/ci.yml.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "bundle": "node esbuild.config.mjs",
@@ -47,7 +48,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "start": "tsx src/bin/backthread.ts",
     "smoke": "npm run bundle && node dist-bundle/backthread.js help > /dev/null",
-    "test": "node --import tsx --test --test-force-exit src/*.test.ts && npm run build && npm run smoke"
+    "test": "node --import tsx --test --experimental-test-isolation=none --test-force-exit src/*.test.ts && npm run build && npm run smoke"
   },
   "engines": {
     "node": ">=22.18"

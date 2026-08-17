@@ -3,6 +3,83 @@
 # floor for a widely-`npx`'d package: a vulnerability gate, a lockfile-integrity gate, and
 # a guard that the release keeps npm provenance on.
 #
+# EVERY GATE IS ITS OWN JOB, ON PURPOSE. These used to be sequential steps in one job, so
+# the FIRST failure skipped every later step: a dev-only advisory in the vulnerability gate
+# meant typecheck, the tests and the bundle-sync check never ran at all, and a PR's red
+# badge said nothing about the PR. A red audit must not be able to hide a broken test, and a
+# broken test must not be able to hide a stale committed bundle — so they are independent
+# jobs that report independently and can be re-run independently. Anything that needs no
+# `npm install` is grouped into one job that runs whatever the dependency tree looks like —
+# and inside that job the guards are one step that keeps going, not several that skip each
+# other, because steps in a job are sequential and would reproduce the same blackout in
+# miniature.
+#
+# Each job carries `timeout-minutes` because a hung gate is the one failure mode that costs
+# more than a red one: GitHub's default is 6 hours of runner time with no report at the end.
+#
+# WHY THE TEST SCRIPTS PASS `--experimental-test-isolation=none`. The full reasoning lives
+# here rather than in the package.json notes, because package.json ships to npm and this is a
+# contributor's concern. By default `node --test` forks one child process per test file, and
+# each child reports back by writing v8-serialized frames to its STDOUT; the parent rebuilds
+# the report by scanning that stdout for a two-byte frame header, reading a four-byte length,
+# and deserializing what follows. Frames are located by sniffing for that header in a stream
+# that also carries the test's own free-form output, so the framing is fragile: when it goes
+# wrong the parent reports `uncaughtException: Unable to deserialize cloned data due to invalid
+# or unsupported version.` at `#processRawBuffer (node:internal/test_runner/runner)` and blames
+# an arbitrary test file whose own subtests all passed — the run is red, the named file is
+# innocent, and nothing was learned about the diff. Reproduced deterministically by writing
+# those bytes to stdout from a test that asserts nothing; **which** byte trips it in CI was NOT
+# isolated, and the fix does not depend on knowing, because it removes the whole path.
+#
+# Measured on a runner, 10 runs per arm interleaved so both arms saw the same hardware: the
+# forked mode failed 3/10, every one of them that error and none of them an assertion;
+# in-process, 0/10. It never reproduced on a developer machine. Running the files in one
+# process removes the child, the pipe and the framing, so the failure mode stops existing
+# rather than getting rarer. Ten clean runs bound the residual rate; the structural argument is
+# what makes it zero. The flag is set in the package scripts and not here on purpose:
+# release.yml runs the same `npm test` before `npm publish`, and a contributor's terminal runs
+# it too. A misspelled or graduated flag name exits 9 with `bad option`, so a future Node
+# renaming it fails loudly. The one silent path left is a Node that accepts it as a no-op,
+# which would quietly restore forked mode and the flake.
+#
+# The cost is that test files now share a process, so one that leaks global state can affect
+# another. What was actually checked, rather than assumed: no `process.chdir` anywhere; the two
+# `process.env` mutations (both in the cli) restore in a `finally`; `globalThis.fetch` is
+# swapped in one cli test and restored in a `finally`; the console spies restore, though 5 of
+# them outside a `finally`, so a throw between spy and restore now leaves `console.log` stubbed
+# for later files — noise on an already-red run, not a false green. The extractor's framework
+# and infra registries are module-level arrays that one test clears in `beforeEach`, which used
+# to be per-file state; both suites were run in 6 and 5 randomised file orders with identical
+# results, so nothing depends on order today. If that changes, the symptom is an
+# order-dependent failure and the fix is to drop the flag from the offending workspace.
+#
+# WHAT THIS FLAG COSTS. Two earlier drafts of this comment got this wrong — first claiming
+# in-process "loses less", then narrowing the exposure to one tail case — and both were disproved
+# by measurement. The rule, measured on both real suites at several throw positions:
+#
+#   • A module-level `throw` is red in BOTH modes only if it precedes the file's FIRST test
+#     registration. Once ANY test in that file has registered, in-process exits 0 with `# fail 0`
+#     and silently drops the remaining tests from the count (2172 of 2175 for a mid-file throw,
+#     2175 of 2175 for one after the last registration). Forked reports the file as
+#     `not ok - <file>` in every position. This is the flag's real cost, and it is wider than one
+#     tail case.
+#   • An async module-level throw or an unhandled rejection is NOT swallowed by either mode.
+#     In-process is the louder of the two: it hard-crashes in `node:internal/test_runner/harness`
+#     with exit 7 and no `# tests` line at all, destroying the report. Forked reports one bad file
+#     and everything else still reports.
+#   • A throwing timer leaked by a test: forked reports it as a failure; in-process exits 1 with a
+#     diagnostic but `# fail 0`.
+#
+# The MITIGATION is the pass-count floor in the test job (scripts/test-floors.json): the harmful
+# half of the first bullet — the case where tests actually stop running — drops the count, so the
+# floor turns it back into a red. Verified: a mid-file throw goes from "green, 2172 tests" to a
+# named failure. The remaining silent case is a throw after the last registration, which loses only
+# the exception, not any test.
+#
+# So the trade is: a ~30% chance per run of a phantom failure that says nothing about the diff,
+# against a lost exception at the tail of a test file with the test-losing variant guarded. Worth
+# taking, and written down so the next person does not have to rediscover it three times.
+#
 # GitHub Actions are PINNED BY COMMIT SHA (not a floating tag) so a compromised/retagged
 # action can't silently run in CI; Dependabot (.github/dependabot.yml) proposes bumps.
 name: CI
@@ -13,58 +90,219 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  # Everything that needs no dependency install, so no advisory and no drifted lockfile can
+  # stop it from running. It reads the COMMITTED bundle, which the `bundle-sync` job below
+  # ties to a fresh build.
+  #
+  # All four guards are ONE step, each `|| rc=1` rather than exiting, so a hit in the first
+  # cannot skip the other three. They stay in one job because none of them needs an install —
+  # that is what makes them immune to the dependency gates — but they must not be able to hide
+  # each other either.
+  guards:
+    name: Distribution + release guards
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Every guard runs, then the job fails if any of them did
+        run: |
+          rc=0
+
+          # Nothing we distribute may carry an internal reference (issue ids, tracker URLs,
+          # private repo names, company email domains) — in the npm tarball or in the bundles
+          # installed straight from git.
+          echo "::group::No internal references in anything we distribute"
+          npm run check:no-internal-refs || rc=1
+          echo "::endgroup::"
+
+          # Lockfile integrity: it must be present, and `npm ci` (in every other job)
+          # hard-fails if it's out of sync with package.json — so an un-committed dependency
+          # change can't slip through.
+          echo "::group::Lockfile present"
+          test -f package-lock.json \
+            || { echo "::error::package-lock.json is missing — commit it (npm install)."; rc=1; }
+          echo "::endgroup::"
+
+          # The `test` job below runs one job per workspace off an explicit list, which is
+          # only safe if the list is complete: a workspace nobody added to it is never tested
+          # and CI stays green about it. This closes the list against the workspaces that
+          # actually have a `test` script, in both directions.
+          echo "::group::CI's test matrix covers every workspace"
+          node scripts/check-test-matrix.mjs || rc=1
+          echo "::endgroup::"
+
+          # Every `npm publish` this repo can perform must carry `--provenance`, so each published
+          # package ships a verifiable, tamper-evident build attestation. This was a one-line
+          # grep until it was measured and found INCAPABLE OF FAILING, then found fooled four more
+          # ways after the obvious fix; scripts/check-provenance.mjs carries that history and
+          # checks every workflow rather than the ones we remembered to glob.
+          echo "::group::Every npm publish keeps provenance on"
+          node scripts/check-provenance.mjs || rc=1
+          echo "::endgroup::"
+
+          exit $rc
+
+  # Vulnerability gate: fail the build on a HIGH+ advisory anywhere in the tree. The
+  # published `npx backthread` bundle INLINES the one runtime dep (@modelcontextprotocol/sdk)
+  # via esbuild, so a vuln in a "devDependency" can still ship — we audit the FULL tree,
+  # not just prod. Keep the tree clean; if a future dev-only advisory genuinely can't ship
+  # and can't be fixed, add a reviewed exception here (don't silently lower the level).
+  # Its own job: an advisory is a fact about the dependency tree, not about the diff, and it
+  # must never be the reason the diff went unchecked.
+  audit:
+    name: Vulnerability gate (npm audit, high+)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      # Nothing we distribute may carry an internal reference (issue ids, tracker URLs,
-      # private repo names, company email domains) — in the npm tarball or in the bundles
-      # installed straight from git. Deliberately FIRST: it is a plain node script needing
-      # no install, and putting it behind the dependency gates below would mean an
-      # unrelated advisory silently stops it from ever running. It reads the COMMITTED
-      # bundle, which the sync step further down ties to a fresh build.
-      - name: No internal references in anything we distribute
-        run: npm run check:no-internal-refs
-      # Lockfile integrity: it must be present, and `npm ci` (below) hard-fails if it's out
-      # of sync with package.json — so an un-committed dependency change can't slip through.
-      - name: Lockfile present
-        run: test -f package-lock.json || { echo "::error::package-lock.json is missing — commit it (npm install)."; exit 1; }
+      - run: npm audit --audit-level=high
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
       - name: Install (npm ci — fails on a drifted lockfile)
         run: npm ci
-      # Vulnerability gate: fail the build on a HIGH+ advisory anywhere in the tree. The
-      # published `npx backthread` bundle INLINES the one runtime dep (@modelcontextprotocol/sdk)
-      # via esbuild, so a vuln in a "devDependency" can still ship — we audit the FULL tree,
-      # not just prod. Keep the tree clean; if a future dev-only advisory genuinely can't ship
-      # and can't be fixed, add a reviewed exception here (don't silently lower the level).
-      - name: Vulnerability gate (npm audit, high+)
-        run: npm audit --audit-level=high
-      - name: Typecheck
-        run: npm run typecheck
-      # `npm test` runs the cli test suite + `npm run build` + `npm run bundle` (smoke),
-      # so it ALSO enforces the version-lockstep guards (plugin.json / gemini-extension.json
-      # / codex plugin.json all == cli/package.json) and regenerates dist-bundle/backthread.js.
-      - name: Test
-        run: npm test
-      # The Claude Code marketplace plugin is cloned from git with NO build step on
-      # install, so the COMMITTED bundle must equal a fresh build. `npm test`
-      # just rebuilt it; fail if it differs from what's committed (esbuild is
-      # deterministic for the lockfile-pinned version).
-      - name: Committed bundle is in sync with src
-        run: git diff --exit-code cli/dist-bundle/backthread.js
-      # Regression guard: every release workflow must keep npm build provenance on, so each
-      # published package always carries a verifiable, tamper-evident build attestation.
-      - name: Releases keep npm provenance on
-        # Anchor to the `npm publish … --provenance` line (not just any occurrence), so a
-        # flag left behind in a comment can't mask a publish step that dropped it. Globs
-        # every release workflow (release.yml = the CLI, release-extractor.yml = the
-        # extractor lib, and any future release-*.yml) so a new publish path can't escape
-        # the guard by simply not being listed here.
+      # A hard prerequisite, on its own step so the log says so: the cli resolves the
+      # extractor's types from `dist/`, and the extractor's `build` IS `tsc -p tsconfig.json`.
+      # So if this fails, the extractor has a type error — which this gate would have reported
+      # anyway — and the cli genuinely cannot be typechecked rather than merely being hidden;
+      # attempting it would bury the real error under "cannot find module".
+      - name: Build @backthread/extractor (prerequisite — the cli resolves its types from dist/)
+        run: npm run build --workspace @backthread/extractor
+      # NOT the root `npm run typecheck`: that fans out with `--workspaces`, which stops at
+      # the first workspace that fails, so a type error in one would hide every type error in
+      # the others — the same blackout this workflow was split up to end, one level down.
+      # Typecheck all of them, report all of them, fail if any failed. The workspace list is
+      # derived, not written down, so a new workspace is covered the day it gets a `typecheck`
+      # script.
+      - name: Typecheck every workspace (all of them, even after one fails)
         run: |
-          for wf in .github/workflows/release*.yml; do
-            grep -Eq 'npm publish[^#]*--provenance' "$wf" \
-              || { echo "::error::$wf's npm publish must keep --provenance"; exit 1; }
+          # Resolve the list into a variable FIRST. `for ws in $(cmd)` over an empty or failed
+          # substitution runs the body zero times and exits 0 — `bash -e` does not catch it — so
+          # the gate would go green having typechecked nothing. An assignment DOES trip `bash -e`
+          # when its substitution fails, which covers the resolver erroring or being deleted.
+          workspaces="$(node scripts/workspaces.mjs typecheck)"
+          echo "typechecking: $(echo "$workspaces" | tr '\n' ' ')"
+          rc=0
+          checked=0
+          for ws in $workspaces; do
+            echo "::group::typecheck $ws"
+            npm run typecheck --workspace "$ws" || rc=1
+            checked=$((checked + 1))
+            echo "::endgroup::"
           done
+          # Count the iterations that actually happened rather than testing the string for
+          # emptiness: `test -n` passes on a whitespace-only value, which word-splitting then
+          # turns into zero iterations and a green gate. Counting is the only form that cannot
+          # be satisfied by something that looks like a list but iterates to nothing.
+          test "$checked" -gt 0 || {
+            echo "::error::typechecked 0 workspaces — refusing to report a green typecheck that checked nothing"
+            exit 1
+          }
+          echo "typechecked $checked workspace(s)"
+          exit $rc
+
+  # One job per workspace, so a failure in the CLI suite can't hide the extractor's 2000+
+  # tests (and vice versa) — the root `npm test` fans out serially and stops at the first
+  # workspace that fails.
+  #
+  # The list is explicit so the check names on a PR are stable and readable, which means it
+  # can drift: the `guards` job's `check:test-matrix` closes it against the workspaces that
+  # actually have a `test` script, in both directions, so forgetting one is loud rather than
+  # invisible. (A `needs:`-chained job emitting a derived matrix would remove the drift, but
+  # it would also give this workflow its first way for one job to skip another, which is the
+  # thing being fixed.)
+  #
+  # `npm test -w backthread` also runs the cli build + bundle smoke, so it enforces the
+  # version-lockstep guards (plugin.json / gemini-extension.json / codex plugin.json all ==
+  # cli/package.json).
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Report every workspace's result on every run, even when one of them is red.
+      fail-fast: false
+      matrix:
+        workspace: [backthread, '@backthread/extractor']
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install (npm ci — fails on a drifted lockfile)
+        run: npm ci
+      # The cli imports TYPES from @backthread/extractor, whose package.json points
+      # types/main at dist/ — so the extractor must be built before either workspace's
+      # tests can resolve it. `npm ci` doesn't build workspaces.
+      - name: Build @backthread/extractor (the cli resolves its types from dist/)
+        run: npm run build --workspace @backthread/extractor
+      # `tee` + a pass-count FLOOR, not just the exit code. In-process isolation swallows a
+      # module-level throw once any test in that file has registered: `npm test` exits 0 with
+      # `# fail 0` and simply reports fewer tests. Measured — a mid-file throw gave 2172 of 2175,
+      # green. The floor is the only thing that turns "less of it ran" back into a red.
+      # `pipefail` so `tee` cannot mask npm's exit status.
+      - name: Test ${{ matrix.workspace }}, then hold it to its pass-count floor
+        run: |
+          set -o pipefail
+          npm test --workspace ${{ matrix.workspace }} 2>&1 | tee /tmp/test-output.txt
+          node scripts/check-test-floor.mjs "${{ matrix.workspace }}" /tmp/test-output.txt
+      # PROVE THE FLOOR CAN FAIL, on this runner, on this commit — both of its paths, not
+      # just the obvious one. Borrowed from the sibling app repo, which learned it the hard
+      # way: a floor that has quietly stopped being able to fail is a slower version of the
+      # bug it was added for, and this repo found four unrunnable or unfailable guards in a
+      # week. The count path is the one people picture; the FAIL-CLOSED path matters more,
+      # because if a runner ever renames its `# pass N` summary the only thing between that
+      # and a green tick is this script choosing to exit 1 on a log it could not parse.
+      - name: Self-test — the floor can fail
+        if: success()
+        run: |
+          if node scripts/check-test-floor.mjs "${{ matrix.workspace }}" /dev/null; then
+            echo "::error::the floor passed on an EMPTY log, so it is vacuous — it would go green over a suite that never ran"
+            exit 1
+          fi
+          echo "ok — a log with no summary is a failure, not a pass"
+          printf '# pass 0\n' > /tmp/floor-probe.txt
+          if node scripts/check-test-floor.mjs "${{ matrix.workspace }}" /tmp/floor-probe.txt; then
+            echo "::error::the floor passed on a reported count of 0, so it cannot detect a shrinking suite"
+            exit 1
+          fi
+          echo "ok — the floor rejects a count below its minimum"
+
+  # The Claude Code marketplace plugin is cloned from git with NO build step on install, so
+  # the COMMITTED bundle must equal a fresh build (esbuild is deterministic for the
+  # lockfile-pinned version). This used to piggyback on `npm test` having rebuilt the
+  # bundle, which meant a single failing test also silenced it; it now builds the bundle
+  # itself and is answerable only for the sync question.
+  bundle-sync:
+    name: Committed bundle is in sync with src
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install (npm ci — fails on a drifted lockfile)
+        run: npm ci
+      - name: Build @backthread/extractor (the bundle inlines what the cli imports from it)
+        run: npm run build --workspace @backthread/extractor
+      - name: Rebuild the bundle from src
+        run: npm run bundle --workspace backthread
+      - run: git diff --exit-code cli/dist-bundle/backthread.js
