@@ -534,12 +534,31 @@ export function formatAskAnswer(outcome: InflowAnswerOutcome): string {
 }
 
 /**
+ * The ONE piece of framing this client adds under the server's statement — and the
+ * whole of it, pinned by a guard so it cannot grow quietly.
+ *
+ * ⚠️ IT MAY ONLY SAY THINGS THIS CLIENT CAN BACK. An earlier wording ended
+ * "...and the endpoint it calls writes nothing when it asks" — a claim about SERVER
+ * behaviour, appended to the server's own statement by the one half of the system
+ * that cannot check it, and outside the drift guard that watches the sentences
+ * above. Provenance ("these words came from the server") is checkable here.
+ * Server behaviour is not, so it is named as trust rather than smuggled in as fact.
+ */
+export const PROMISE_EPILOGUE: readonly string[] = [
+  'Those sentences come from the server that enforces them, not from this client, so',
+  'they cannot drift from the behaviour they describe. What this client sends is',
+  'readable in this open-source repo; what the server does with an answer you are',
+  'taking on trust — which is why the statement is written as things you could go and',
+  'check rather than as reassurance.',
+];
+
+/**
  * The full in-product statement, behind an explicit command.
  *
- * ⚠️ EVERY SENTENCE HERE COMES FROM THE SERVER. This client deliberately holds no
- * copy of the promise: a copy is a thing that drifts, and a promise that drifts from
- * what the code does is worse than no promise at all. If the server sent none, say
- * so plainly rather than inventing a reassuring one.
+ * ⚠️ EVERY PROMISE SENTENCE HERE COMES FROM THE SERVER. This client deliberately
+ * holds no copy of the promise: a copy is a thing that drifts, and a promise that
+ * drifts from what the code does is worse than no promise at all. If the server sent
+ * none, say so plainly rather than inventing a reassuring one.
  */
 export function formatPromise(outcome: InflowAskOutcome): string {
   if (outcome.status !== 'ok') {
@@ -555,7 +574,6 @@ export function formatPromise(outcome: InflowAskOutcome): string {
   if (promise.title) out.push(promise.title, '');
   for (const point of promise.points) out.push(`  - ${point}`);
   out.push('');
-  out.push('These are properties of the code, not a policy — the client that asks you is in');
-  out.push('this open-source repo and the endpoint it calls writes nothing when it asks.');
+  out.push(...PROMISE_EPILOGUE);
   return out.join('\n');
 }

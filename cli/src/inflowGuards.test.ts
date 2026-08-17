@@ -51,6 +51,7 @@ import {
   formatAskAnswer,
   formatPromise,
   INFLOW_TRIGGERS,
+  PROMISE_EPILOGUE,
 } from './inflow.js';
 import { inflowHookContext } from './inflowHook.js';
 import { throttleStatePath } from './sessionThrottle.js';
@@ -297,6 +298,47 @@ test('GUARD: the disk is byte-identical whether a question came back, none did, 
   assert.deepEqual(snapshots.served, [`config/${INFLOW_SESSION_FILE} {"nudged":["sess-1"]}\n`]);
 });
 
+test('GUARD: the disk is byte-identical whether the ask was answered or ignored', async () => {
+  // THE EXPERIMENT THE README INVITES PEOPLE TO RUN. The test above stops before
+  // anybody replies, so it proves "served == empty == failed" and NOT the sentence
+  // the docs actually print — "diff the config directory across an ask you answered
+  // and one you ignored". Answering is the one moment on this path that legitimately
+  // creates data, so it is also the most plausible place for a local crumb (a cached
+  // verdict, a "last answered" stamp, a spent-token note) to appear later without
+  // anybody noticing. Held here rather than argued in a comment.
+  const snapshots: Record<string, string[]> = {};
+  for (const label of ['ignored', 'answered'] as const) {
+    await withTempHome(async (env, dir) => {
+      await runInflowDeadTime(payload(), {
+        env,
+        fetchImpl: SERVED().fetchImpl,
+        readConfigImpl: SIGNED_IN,
+        readRemoteImpl: REMOTE,
+      });
+      if (label === 'answered') {
+        const graded = stubFetch(200, {
+          outcome: 'got-it',
+          reveal: { since: [] },
+          effect: {},
+          lesson: {},
+        });
+        const result = await answerAsk({ token: TOKEN, answer: 'because it merged' }, {
+          env,
+          fetchImpl: graded.fetchImpl,
+          readConfigImpl: SIGNED_IN,
+        });
+        assert.equal(result.status, 'ok', 'precondition: this run really did grade an answer');
+      }
+      snapshots[label] = await snapshotDir(dir);
+    });
+  }
+  assert.deepEqual(
+    snapshots.answered,
+    snapshots.ignored,
+    'answering must leave no more on this machine than ignoring did',
+  );
+});
+
 test('GUARD: an aged ring is still a spent ring — nothing may re-ask on the clock', async () => {
   // A re-ask does not have to write anything new to exist. Backdate the ring an hour
   // and fire again: a suppression that quietly expires leaves the bytes identical and
@@ -367,7 +409,14 @@ test('GUARD: the hook returns exactly one channel — the same question twice is
   });
 });
 
-test('GUARD: the token is never written anywhere on the machine', async () => {
+test('GUARD: this client never writes the token anywhere on the machine', async () => {
+  // ⚠️ SCOPE, precisely. What is held here is that BACKTHREAD writes no token, no
+  // question body and no material key. It is NOT "the token never touches disk":
+  // the ask is delivered as `additionalContext`, and the host agent persists its
+  // hooks' output verbatim into its own session transcript on disk. That transcript
+  // is the host's, is never uploaded by capture (the redactor keeps only user and
+  // assistant turns), and is outside this package's reach — but the honest claim is
+  // about our writes, not about the machine, and the docs say it that way.
   await withTempHome(async (env, dir) => {
     const { fetchImpl } = SERVED();
     const out = await runInflowDeadTime(payload(), {
@@ -378,7 +427,7 @@ test('GUARD: the token is never written anywhere on the machine', async () => {
     });
     assert.ok(out.hookSpecificOutput, 'precondition: this run really did serve a question');
     const onDisk = (await snapshotDir(dir)).join('\n');
-    assert.ok(!onDisk.includes(TOKEN), 'the token must live in the scrollback and nowhere else');
+    assert.ok(!onDisk.includes(TOKEN), 'this client must not write the token down');
     // Nor any of the question it carries — a spool of bodies is the same queue by
     // another name.
     assert.ok(!onDisk.includes(ASK.body), 'the question body must not be written down');
@@ -607,6 +656,50 @@ test('GUARD: the client holds no promise sentences of its own', () => {
   const full = formatPromise({ status: 'ok', detail: 'served', promise: PROMISE });
   for (const point of PROMISE.points) assert.ok(full.includes(point), `dropped: ${point}`);
   assert.ok(full.includes(PROMISE.title));
+});
+
+test('GUARD: the only client-held framing is the pinned epilogue, and it claims nothing about the server', () => {
+  // The bare-render guard above renders with an EMPTY promise, so the epilogue is
+  // never in what it inspects — which is how an earlier wording ("...and the endpoint
+  // it calls writes nothing when it asks") sat outside every drift check while making
+  // a claim about server behaviour this client cannot verify. Two closed checks now:
+  //
+  //   (a) subtract the server's strings from the real render; whatever is left must be
+  //       EXACTLY the pinned epilogue, so a new client-held sentence cannot appear
+  //       without editing this test;
+  //   (b) the epilogue itself may not assert what the server does.
+  //
+  // The expected text is written out HERE rather than imported, deliberately. Comparing
+  // the render against `PROMISE_EPILOGUE` would pass for any edit that changed both at
+  // once — which is every edit. Pinned literally, a reworded epilogue turns this test
+  // red and somebody has to look at the new sentence.
+  const PINNED = [
+    'Those sentences come from the server that enforces them, not from this client, so',
+    'they cannot drift from the behaviour they describe. What this client sends is',
+    'readable in this open-source repo; what the server does with an answer you are',
+    'taking on trust — which is why the statement is written as things you could go and',
+    'check rather than as reassurance.',
+  ];
+  assert.deepEqual([...PROMISE_EPILOGUE], PINNED, 'the epilogue changed — read it, then update this pin');
+  const full = formatPromise({ status: 'ok', detail: 'served', promise: PROMISE });
+  const leftover = full
+    .split('\n')
+    .map((l) => l.replace(/^ {2}- /, ''))
+    .filter((l) => l.trim() !== '')
+    .filter((l) => l !== PROMISE.title && !PROMISE.points.includes(l));
+  assert.deepEqual(
+    leftover,
+    PINNED,
+    'the client rendered a sentence of its own that this guard has not been shown',
+  );
+  // A closed blocklist of server-behaviour verbs. The epilogue may say where the words
+  // came from; it may not say what the other side of the wire does with them.
+  const epilogue = PROMISE_EPILOGUE.join(' ');
+  assert.doesNotMatch(
+    epilogue,
+    /\b(writes? nothing|stores? nothing|records? nothing|is not (recorded|stored|counted)|never (writes|stores|records|counts)|no row)\b/i,
+    'the epilogue is claiming server behaviour this client cannot check — say it is trust, or delete it',
+  );
 });
 
 test('GUARD: the permission to ignore rides with the question itself, not only behind a command', () => {
