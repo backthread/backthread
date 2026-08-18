@@ -304,11 +304,13 @@ export const ENV_SERVICE_JSON_OVERHEAD_BYTES = 4;
  * the other would be a number nobody could reach. This one cannot disagree with the
  * count cap, because it is computed from it.
  */
-// ⚠ ONE LINE ON PURPOSE, exactly like `PAYLOAD_ENVELOPE_BUDGET_BYTES` below.
-// `src/lib/ingestModeCaps.lockstep.test.ts` resolves an operand with
-// `export const NAME = ([^;]+);` and requires a space after the `=`; wrapping this
-// declaration makes the app-side lockstep guard THROW instead of comparing — which
-// is a guard failing open, discovered here by running it.
+// ⚠ THIS USED TO HAVE TO BE ONE LINE, AND THE REASON IS WORTH KEEPING EVEN THOUGH
+// THE RULE IS GONE. A consumer held its own hand-written copy of these ceilings honest
+// by extracting each with `export const NAME = ([^;]+);`, so wrapping this declaration
+// made that guard THROW rather than compare — a guard failing open, found by running
+// it rather than by reading it. The copy no longer exists: this file is published, and
+// consumers import the value instead of mirroring it, which removes the question rather
+// than testing it. Left on one line because nothing gains by rewrapping it.
 export const MAX_TOTAL_ENV_BYTES = MAX_ENV_SERVICES * (MAX_ENV_SERVICE_BYTES + ENV_SERVICE_JSON_OVERHEAD_BYTES);
 
 /**
@@ -413,7 +415,7 @@ export const MAX_FRAMEWORK_ADAPTERS = 1000;
  * drops **24 100 → 24 045**. (An earlier draft said 33 500 / 24 046 — the `+ 3`
  * figures, never re-derived when the overhead constant moved to 4. A frozen number
  * in a comment goes stale the moment the constant beside it changes, which is why
- * `ingestModeCaps.lockstep.test.ts` resolves the operands rather than the answer.) It
+ * that guard resolved the operands rather than the answer.) It
  * is in the sum anyway, because the whole point of writing the reservation as a sum
  * is that a field admitted into the envelope has a term in it — a small field
  * omitted "because it is small" is how the next one gets omitted too.
@@ -438,10 +440,10 @@ export const MAX_FRAMEWORK_ADAPTERS = 1000;
  * largest connected repo is 967 files, so the new ceiling is still 25× anything
  * real — and a stated ceiling that holds beats a larger one that does not.
  */
-// ⚠ ONE LINE ON PURPOSE. `src/lib/ingestModeCaps.lockstep.test.ts` extracts this
-// with `export const NAME = ([^;]+);` and then requires the substituted expression
-// to match `^[\d_ *+/()]+$` — a class that does NOT admit a newline. Wrapping this
-// declaration makes the app-side lockstep guard throw instead of comparing.
+// ⚠ SAME RETIRED CONSTRAINT AS `MAX_TOTAL_ENV_BYTES` ABOVE. The consumer-side guard
+// that required this on one line — it substituted operands and then demanded the result
+// match `^[\d_ *+/()]+$`, a class admitting no newline — is gone, because the copy it
+// guarded is gone.
 export const PAYLOAD_ENVELOPE_BUDGET_BYTES = 256 * 1024 + MAX_TOTAL_MANIFEST_BYTES + MAX_TOTAL_INFRA_BYTES + MAX_TOTAL_ENV_BYTES + MAX_TOTAL_FRAMEWORK_BYTES;
 
 /**
