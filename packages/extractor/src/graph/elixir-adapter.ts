@@ -19,7 +19,7 @@
 // qualified calls (`X.fn(...)`, `MyApp.X.fn(...)`, `arg |> X.fn(...)`) are resolved
 // through the file's `alias` scope + the module registry to internal `call` edges,
 // but ONLY when the callee module resolves UNAMBIGUOUSLY to an in-repo file —
-// accuracy over recall (a wrong call edge teaches a false mental model, ARP-325).
+// accuracy over recall (a wrong call edge teaches a false mental model).
 // Anything dynamic (`apply/3`, `Kernel.apply`, `Module.concat`, a behaviour callback)
 // or unresolvable is dropped: dynamic dispatch never yields a literal `Module.fn`
 // callee that resolves in the registry, so the accuracy bar falls out for free. A

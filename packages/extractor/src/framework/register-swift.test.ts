@@ -27,7 +27,7 @@ async function repo(files: Record<string, string>): Promise<string> {
 
 // NOTE: register.ts keeps a module-level `swiftRegistered` once-flag that
 // clearFrameworkAdapters() does NOT reset, so only ONE test per process may drive the
-// gate to registration. That test uses a NESTED-only manifest — the case ARP-1344 adds
+// gate to registration. That test uses a NESTED-only manifest — the case this adapter adds
 // (the deep gate). The root short-circuit is covered by language.test.ts's
 // hasSwiftManifestDeep predicate test. (node --test isolates each file in its own
 // process, so the flag starts fresh here.)

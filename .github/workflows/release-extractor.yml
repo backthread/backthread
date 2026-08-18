@@ -66,6 +66,15 @@ jobs:
         run: npm run typecheck -w @backthread/extractor
       - name: Test
         run: npm test -w @backthread/extractor
+      # ⚠ NOTHING PUBLISHED MAY CARRY AN INTERNAL REFERENCE, AND THIS RELEASE USED TO
+      # SHIP WITHOUT THE CHECK. PR CI runs it, but with NO build — so this package's
+      # shipped surface (`files: ["dist"]`) did not exist there and the guard fell back
+      # to reading `src`. That is a superset and catches the same text, but it had a
+      # hole while it scanned only `cli/`: an issue id shipped inside this package's
+      # published tarball in six places, under a green gate. Here `dist` has just been
+      # built by the test step, so this run reads the actual bytes.
+      - name: No internal references in the tarball
+        run: node scripts/check-no-internal-refs.mjs
       # Guard: the tag must match packages/extractor/package.json — never publish a
       # version that doesn't match the tag.
       - name: Tag matches extractor version

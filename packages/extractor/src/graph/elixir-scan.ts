@@ -17,8 +17,8 @@
 // resolve them to `call` edges. Two helpers back this: `scanAliasScope` (the file's
 // `alias` bindings, local-name → fully-qualified module, AMBIGUOUS names dropped) and
 // `scanCallSites` (every `Module.function` callee token, strings/comments stripped).
-// Resolution stays ACCURACY-FIRST (a wrong call edge teaches a false mental model,
-// ARP-325): the adapter emits an edge ONLY when the callee module resolves
+// Resolution stays ACCURACY-FIRST (a wrong call edge teaches a false mental
+// model): the adapter emits an edge ONLY when the callee module resolves
 // unambiguously — via the alias scope or a literal registry hit — to an in-repo file.
 //
 // KNOWN degrades (documented, accepted): an UNqualified call (`get_user(id)`, whether
@@ -191,7 +191,7 @@ function lastSegment(mod: string): string {
  *
  * A local name that would bind to TWO DIFFERENT modules in the same file (a genuine
  * ambiguity for a whole-file scanner — e.g. `alias A.User` + `alias B.User`) is
- * DROPPED, not last-wins: accuracy over recall (ARP-325). Deterministic; never throws.
+ * DROPPED, not last-wins: accuracy over recall. Deterministic; never throws.
  */
 export function scanAliasScope(text: string): ReadonlyMap<string, string> {
   const lines = preprocessLines(text);

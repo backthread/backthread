@@ -115,7 +115,10 @@ jobs:
           # private repo names, company email domains) — in the npm tarball or in the bundles
           # installed straight from git.
           echo "::group::No internal references in anything we distribute"
-          npm run check:no-internal-refs || rc=1
+          # Invoked DIRECTLY, not through `npm run`: the convenience script can be
+          # rewritten to `echo ok` in a diff that never touches this workflow, which is
+          # the same disarming `check-test-matrix.mjs` refuses for itself.
+          node scripts/check-no-internal-refs.mjs || rc=1
           echo "::endgroup::"
 
           # Lockfile integrity: it must be present, and `npm ci` (in every other job)
@@ -238,7 +241,7 @@ jobs:
       # Report every workspace's result on every run, even when one of them is red.
       fail-fast: false
       matrix:
-        workspace: [backthread, '@backthread/extractor']
+        workspace: [backthread, '@backthread/extractor', '@backthread/ci']
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

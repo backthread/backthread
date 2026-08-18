@@ -1,0 +1,79 @@
+{
+  "name": "@backthread/ci",
+  "version": "0.1.0",
+  "description": "The Backthread CI-extraction client and its wire contract — extract a repository's structural graph on your own runner and post it, without ever sending source. Includes the ingress's own acceptance gate, so what is accepted is readable rather than asserted.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Backthread",
+  "homepage": "https://github.com/backthread/backthread/tree/main/packages/ci#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backthread/backthread.git",
+    "directory": "packages/ci"
+  },
+  "bugs": "https://github.com/backthread/backthread/issues",
+  "keywords": [
+    "backthread",
+    "ci",
+    "github-actions",
+    "oidc",
+    "code-graph",
+    "static-analysis",
+    "architecture"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "backthread-ci": "./dist/action.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./env": {
+      "types": "./dist/envVars.d.ts",
+      "import": "./dist/envVars.js"
+    },
+    "./untrusted": {
+      "types": "./dist/untrusted.d.ts",
+      "import": "./dist/untrusted.js"
+    },
+    "./sanitize": {
+      "types": "./dist/sanitize.d.ts",
+      "import": "./dist/sanitize.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "comment_files": "`src` ships alongside `dist` ON PURPOSE. The whole argument for publishing the acceptance gate is that what we accept becomes readable; a reader who has to de-compile `dist` to check it has been given the letter of that and not the substance. The tests ship for the same reason — a gate whose tests are invisible is a claim, not evidence.",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "comment_test_isolation": "`--experimental-test-isolation=none` runs the test files in one process instead of forking one child per file. Not a speed tweak: the forked runner rebuilds its report by parsing each child's stdout, which misframes across pipe-chunk boundaries and fails with `Unable to deserialize cloned data` against a test file that passed. Full reasoning and the trade-off in .github/workflows/ci.yml.",
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "node --import tsx --test --experimental-test-isolation=none --test-force-exit \"src/**/*.test.ts\" && npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@backthread/extractor": "^0.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "expect": "^29.7.0",
+    "jest-mock": "^29.7.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.6.0"
+  }
+}
