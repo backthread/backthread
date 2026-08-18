@@ -110,7 +110,6 @@ const AUDIENCE = 'https://api.backthread.dev';
  * `__filename` lowering that forced `ciValidate.ts` to keep local copies does not
  * apply. There is no reason for a copy.
  */
-import { narrowEnvForWire, narrowInfraForWire } from './narrow.js';
 // The SAME scan the clone path runs, imported rather than reimplemented.
 // A second heuristic here would be a second definition of "which service does this
 // repo talk to", and the two paths' node sets would drift for a reason no hash
@@ -128,12 +127,17 @@ import {
 // rather than merely unlikely. A runner cap looser than the ingress's produces the
 // late refusal these imports exist to prevent; a tighter one refuses payloads we
 // would have accepted. Both drifts are silent, and both are one function away.
+// The ingress's OWN checks, run here so the runner fails FIRST — and living in their
+// own module because `main()` runs on import, so nothing in THIS file can be executed
+// by a test. A verifier proved what that costs: a payload gate rewritten to compute its
+// refusal and upload anyway passed every test, because the only guard on it was a
+// search of this file's source text.
 import {
-  validateCiPayload,
-  validateEnvServices,
-  validateFrameworkContributions,
-  validateInfraGraph,
-} from './validate.js';
+  assertPayloadIsAcceptable,
+  preparedEnvServices,
+  preparedFramework,
+  preparedInfra,
+} from './preflight.js';
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).trim();
@@ -217,27 +221,15 @@ function collectManifests(files: string[]): WorkspaceManifest[] {
  */
 async function collectInfra(): Promise<CiInfraGraph> {
   const result = await extractInfra({ repoDir: process.cwd() });
-  // ⚠ NARROWED, NOT SHIPPED WHOLE — the correction a verifier forced. The first cut
-  // sent `MergedInfraGraph`'s nodes and edges verbatim, so the DERIVED graph carried
-  // the very things the boundary argument says must not cross: `metadata.image` on
-  // our own repo is `registry.cloudflare.com/a1b2c3d4e5f6…/…`, the Cloudflare ACCOUNT
-  // ID lifted straight out of `wrangler.jsonc`. All of it was discarded server-side.
-  // `narrowInfraForWire` is shared with `ci-replay --compare` and the convergence
-  // test, so what those two measure is what this sends.
-  const infra: CiInfraGraph = narrowInfraForWire(result.graph);
-  const rejection = validateInfraGraph(infra);
-  if (rejection) {
-    // ⚠ THROW, DO NOT SHIP A SUBSET. "Reject, don't truncate" is the ingress's rule
-    // and it has to be the runner's too: dropping the offending node would render a
-    // deployment topology that is wrong in a way nothing downstream can detect,
-    // which is the exact failure this whole ticket closed.
-    throw new Error(
-      `[backthread] the derived infra graph was refused by the shared ingress check: ` +
-        `${rejection.error}${rejection.detail ? ` (${rejection.detail})` : ''}. ` +
-        `Shipping a partial one would render a false deployment topology.`,
-    );
-  }
-  return infra;
+  // ⚠ NARROWED AND CHECKED IN ONE CALL, IN A MODULE A TEST CAN IMPORT. The first cut
+  // sent `MergedInfraGraph`'s nodes and edges verbatim, so the DERIVED graph carried the
+  // very things the boundary argument says must not cross: `metadata.image` on our own
+  // repo was the Cloudflare ACCOUNT ID lifted straight out of the deployment config. All
+  // of it was discarded server-side. The reduction and the refusal live together in
+  // `preparedInfra` so that no future caller can do one without the other, and so that
+  // both are reachable from a test — this function is not, because `main()` runs on
+  // import.
+  return preparedInfra(result.graph);
 }
 
 /**
@@ -282,19 +274,7 @@ function collectEnvServices(files: string[]): string[] {
       console.warn(`[backthread] skipping unreadable env file ${path}`);
     }
   }
-  const services = narrowEnvForWire(mergeEnvServiceCandidates(contents));
-  const rejection = validateEnvServices(services);
-  if (rejection) {
-    // ⚠ THROW, DO NOT SHIP A SUBSET. Dropping the offending name would render a
-    // service list that is wrong in a way nothing downstream can detect — the same
-    // "reject, don't truncate" rule the manifest and infra collectors follow.
-    throw new Error(
-      `[backthread] the derived env-service list was refused by the shared ingress check: ` +
-        `${rejection.error}${rejection.detail ? ` (${rejection.detail})` : ''}. ` +
-        `Shipping a partial one would render a false set of external services.`,
-    );
-  }
-  return services;
+  return preparedEnvServices(mergeEnvServiceCandidates(contents));
 }
 
 /**
@@ -322,20 +302,7 @@ function collectEnvServices(files: string[]): string[] {
  * verifier found an account id in it.
  */
 async function collectFramework(graph: NormalizedGraph): Promise<RawFrameworkContributions> {
-  const raw = await collectFrameworkContributions({ repoDir: process.cwd(), graph });
-  const rejection = validateFrameworkContributions(raw);
-  if (rejection) {
-    // ⚠ THROW, DO NOT SHIP A SUBSET. Dropping the offending contribution would render
-    // a framework topology that is wrong in a way nothing downstream can detect —
-    // the same "reject, don't truncate" rule the manifest, infra and env collectors
-    // follow.
-    throw new Error(
-      `[backthread] the framework contributions were refused by the shared ingress check: ` +
-        `${rejection.error}${rejection.detail ? ` (${rejection.detail})` : ''}. ` +
-        `Shipping a partial set would render a false framework topology.`,
-    );
-  }
-  return raw;
+  return preparedFramework(await collectFrameworkContributions({ repoDir: process.cwd(), graph }));
 }
 
 /** Mint a GitHub Actions OIDC ID token for our audience. */
@@ -484,20 +451,7 @@ async function main(): Promise<void> {
   // — the runner has no history and inventing one would be worse than omitting it.
   // Everything else is the identical function over the identical object, so this is a
   // strict SUBSET of the ingress's answer and can never admit something it refuses.
-  const rejection = validateCiPayload({
-    value: payload,
-    identity: { owner, name, sha },
-    now: Date.now(),
-    prior: null,
-  }).rejection;
-  if (rejection) {
-    throw new Error(
-      `[backthread] this payload would be refused by the ingress: ${rejection.error}` +
-        `${rejection.detail ? ` (${rejection.detail})` : ''}. ` +
-        'Refusing here rather than spending the upload, so the reason arrives with the ' +
-        'extract that produced it.',
-    );
-  }
+  assertPayloadIsAcceptable(payload, { owner, name, sha }, Date.now());
 
   const body = gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'));
   console.log(

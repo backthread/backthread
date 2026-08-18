@@ -85,149 +85,80 @@ test('codeOnly strips TRAILING comments too — the negative control for every s
   assert.doesNotMatch(codeOnly('/* multi\n line envServicesFromPayload( */'), /envServicesFromPayload/);
 });
 
-test('the runner NARROWS the infra graph and refuses rather than truncating', () => {
-  // ⚠ A SOURCE-STRUCTURE GUARD, AND THE REASON IS STATED RATHER THAN ASSUMED.
-  // `extract-and-post.ts` calls `main()` on import, exactly like `container.ts`, so
-  // importing it from a test would run a GitHub Actions job. A verifier measured what
-  // that costs: deleting the `validateInfraGraph` refusal, AND shipping the raw graph
-  // including `root`, both survived the full 4 747-test vitest suite and the 2 488-test
-  // worker suite. Nothing anywhere executed this file.
-  //
-  // The two facts checked here are the two the verifier defeated. The narrowing itself
-  // (`narrowInfraForWire`) is pure and tested properly in `ci-graph-boot.test.ts`;
-  // what could not be tested is that the runner USES it. `codeOnly` strips comments,
-  // so prose cannot satisfy either assertion.
-  const src = codeOnly(
-    readFileSync(new URL('./action.ts', import.meta.url), 'utf8'),
-  );
-  const fnAt = src.indexOf('async function collectInfra(');
-  assert.ok(fnAt > 0, 'the runner must still collect infra in its own function');
-  const body = src.slice(fnAt, src.indexOf('\n}', fnAt));
+// ---------------------------------------------------------------------------
+// WHAT A SOURCE GUARD IS FOR, AND WHAT IT IS NOT
+// ---------------------------------------------------------------------------
+//
+// ⚠ THESE USED TO CHECK THE REFUSALS THEMSELVES, AND A VERIFIER PROVED THEY COULD NOT.
+// Each of the four preflight checks sat inline in `action.ts`, and because `main()` runs
+// on import, the only thing standing over them was a search of this file's source for
+// the shape they were expected to have. Measured: rewriting the payload gate to
+// `if (rejection && rejection.error === '__never_matches__')` — compute the refusal,
+// then upload anyway — passed `tsc` and passed every test. So did `if (false &&
+// rejection)`. The text said the throw was there. It was there. It never ran.
+//
+// The deciding now lives in `preflight.ts`, where `preflight.test.ts` CALLS it. What is
+// left here is the one question text can actually answer: does `action.ts` still route
+// through those functions, in the right order, on the way to the upload? A call site is
+// a fact about this file's text; a refusal is a fact about behaviour, and the two need
+// different instruments.
+//
+// `codeOnly` strips comments first, so this prose cannot satisfy anything below.
 
-  assert.match(body, /narrowInfraForWire\(/, 'the graph must be narrowed, not shipped whole');
-  assert.doesNotMatch(
-    body,
-    /nodes:\s*(result\.)?graph\.nodes/,
-    'shipping the adapters\' nodes verbatim is what put a Cloudflare account id on the wire',
-  );
-  assert.match(body, /validateInfraGraph\(/, 'the runner must run the ingress own check first');
-  assert.match(
-    body,
-    /throw new Error\(/,
-    'a refused graph must fail the build — shipping a subset renders a false topology',
-  );
+test('every collector routes through the shared preflight rather than deciding for itself', () => {
+  const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
+  for (const [fn, call, why] of [
+    ['async function collectInfra(', 'preparedInfra(', 'the derived infra graph'],
+    ['function collectEnvServices(', 'preparedEnvServices(', 'the env-derived service list'],
+    ['async function collectFramework(', 'preparedFramework(', 'the framework contributions'],
+  ] as const) {
+    const at = src.indexOf(fn);
+    assert.ok(at > 0, `the runner must still collect ${why} in its own function`);
+    const body = src.slice(at, src.indexOf('\n}', at));
+    assert.match(body, new RegExp(call.replace('(', '\\(')), `${why} must go through the shared preflight`);
+    // ...and it must NOT have grown a second, local opinion about the same question.
+    assert.doesNotMatch(body, /throw new Error\(/, `${why} decides in preflight.ts, not here`);
+  }
 });
 
-test('the runner scans only TRACKED env files, and refuses rather than truncating', () => {
-  // ⚠ THE SAME SOURCE-STRUCTURE GUARD, FOR THE SAME REASON: `extract-and-post.ts`
-  // runs `main()` on import, so nothing executes it and a verifier already proved two
-  // separate deletions in this file invisible to 4 747 vitest + 2 488 worker tests.
-  //
-  // ⚠ AND THE TRACKED-FILES PROPERTY IS NOT DECORATION. The clone path scans a git
-  // clone, so it can only ever see TRACKED files; a runner's working directory can
-  // hold an untracked or gitignored `.env.example` (a repo that gitignores `.env*`
-  // with no `!.env.example` negation, or a workflow step that writes one). Reading it
-  // would produce env-derived service nodes the clone path can never produce, and
-  // those land in `assemble`'s `nodes` — so the two front doors would diverge again,
-  // by a file we should not have been reading. Found in review, not by a test.
-  const src = codeOnly(
-    readFileSync(new URL('./action.ts', import.meta.url), 'utf8'),
-  );
-  const fnAt = src.indexOf('function collectEnvServices(');
-  assert.ok(fnAt > 0, 'the runner must still collect env services in its own function');
-  const body = src.slice(fnAt, src.indexOf('\n}', fnAt));
-
-  assert.doesNotMatch(
-    body,
-    /extractEnvServiceCandidates\(/,
-    'that helper stats the working directory — on a runner that is not a git clone',
-  );
+test('the env scan reads the TRACKED file list, never the working directory', () => {
+  // ⚠ A REVIEWER HAD TO FIND THIS. The clone path scans a git clone, so it can only ever
+  // see TRACKED files; a runner's working directory can hold an untracked or ignored
+  // `.env.example` — a repo that ignores `.env*` with no negation, or a workflow step
+  // that writes one. Reading it would produce service nodes the clone path can never
+  // produce: the two paths diverging again, through a file we should not have been
+  // reading at all. This is a source guard because the alternative is executing `main()`.
+  const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
+  const at = src.indexOf('function collectEnvServices(');
+  const body = src.slice(at, src.indexOf('\n}', at));
+  assert.doesNotMatch(body, /readdirSync|extractEnvServiceCandidates\(/, 'it must not read a directory');
   assert.match(body, /mergeEnvServiceCandidates\(/, 'it must merge the SHIPPED contents instead');
-  assert.match(body, /ENV_FILES/, 'the filenames must come from the scan own list, not a copy');
-  assert.match(body, /narrowEnvForWire\(/, 'only the derived NAMES may cross, never `vars`');
-  assert.match(body, /validateEnvServices\(/, 'the runner must run the ingress own check first');
-  assert.match(
-    body,
-    /throw new Error\(/,
-    'a refused list must fail the build — shipping a subset renders a false service set',
-  );
-
-  // ...and the tracked-file list is what reaches it. Checked at the CALL SITE,
-  // because a perfect `collectEnvServices` handed `readdirSync()` would satisfy every
-  // assertion above.
-  assert.match(
-    src,
-    /const tracked = trackedFiles\(\);/,
-    'the runner must take one tracked-file list',
-  );
-  assert.match(
-    src,
-    /collectEnvServices\(tracked\)/,
-    'and hand it to the env scan, not a directory',
-  );
+  assert.match(body, /ENV_FILES/, "the filenames must come from the scan's own list, not a copy");
+  // ...and the caller must hand it the tracked list rather than letting it find files.
+  assert.match(src, /collectEnvServices\(tracked\)/, 'the tracked list is read once and passed in');
 });
 
-test('the runner runs the framework TREE phase and refuses rather than truncating', () => {
-  // ⚠ THE SAME SOURCE-STRUCTURE GUARD, THIRD FIELD, SAME REASON: `extract-and-post.ts`
-  // runs `main()` on import, so nothing executes it and a verifier already proved two
-  // separate deletions in this file invisible to 4 747 vitest + 2 488 worker tests.
-  //
-  // What matters here is WHICH function it calls. `collectFrameworkContributions` is
-  // the TREE half of the published step; `contributeFrameworkGraph` is the whole
-  // thing and needs a cluster the runner does not have. Calling the composition would
-  // fail at runtime on a customer's build, and calling a hand-rolled loop would be a
-  // second definition of what a framework contributes.
-  const src = codeOnly(
-    readFileSync(new URL('./action.ts', import.meta.url), 'utf8'),
-  );
-  const fnAt = src.indexOf('async function collectFramework(');
-  assert.ok(fnAt > 0, 'the runner must still collect framework contributions in its own function');
-  const body = src.slice(fnAt, src.indexOf('\n}', fnAt));
-
-  assert.match(body, /collectFrameworkContributions\(/, 'it must run the published TREE phase');
-  assert.doesNotMatch(
-    body,
-    /applyFrameworkContributions\(/,
-    'the cluster phase is ours — the runner has no cluster and must not invent one',
-  );
-  assert.match(body, /validateFrameworkContributions\(/, 'the runner must run the ingress own check first');
-  assert.match(
-    body,
-    /throw new Error\(/,
-    'a refused set must fail the build — shipping a subset renders a false framework topology',
-  );
-  // ...and it is handed the NOISE-FILTERED graph, the same one the server clusters.
+test('the framework phase is handed the NOISE-FILTERED graph, the same one the server clusters', () => {
+  // Passing the unfiltered graph would give the adapters a different file set to resolve
+  // against than the server clusters, and the divergence would read as an adapter bug.
+  const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
+  assert.match(src, /collectFrameworkContributions\(\{ repoDir: process\.cwd\(\), graph \}\)/);
   assert.match(src, /collectFramework\(graph\)/, 'the tree phase takes the seedFull graph');
 });
 
-
-test('the client runs the WHOLE ingress gate before it uploads, not three of its sub-checks', () => {
-  // ⚠ THE GAP A REVIEWER FOUND, AND WHY A SOURCE GUARD IS THE ONLY WAY TO HOLD IT.
-  // Three collectors each ran their own ingress check and each said, correctly, that it
-  // is the SAME function so the two cannot disagree. None of them said that those three
-  // are a fraction of what the ingress applies — the file ceiling, the edge caps, every
-  // string bound, path safety, the unknown-field rule and the manifest count were all
-  // server-side only. So the majority of refusals still arrived AFTER a full extract,
-  // which is precisely the late refusal the pattern exists to prevent.
-  //
-  // `main()` cannot be executed from a test, so this checks that the call is present and
-  // that it precedes the upload. `codeOnly` strips comments, so this prose cannot satisfy
-  // it.
+test('the whole-payload gate runs BEFORE the upload is built', () => {
+  // Ordering is the half that text can prove and `preflight.test.ts` cannot: the gate
+  // being correct is worth nothing if it runs after the bytes are already assembled,
+  // and the entire reason it exists is to fail before the extract is paid for.
   const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
-  const at = src.indexOf('validateCiPayload(');
-  assert.ok(at > 0, 'the client must run the full gate, not only the three narrow checks');
-
-  const gzipAt = src.indexOf('gzipSync(');
-  assert.ok(gzipAt > 0, 'NEGATIVE CONTROL: the upload must still be built here, or the order below is vacuous');
-  assert.ok(
-    at < gzipAt,
-    'the gate must run BEFORE the body is built — after it, the extract has already been paid for',
-  );
-
-  // ...and it must ACT on the answer. A call whose result is discarded is the same as no
-  // call, and reads like a check.
-  const after = src.slice(at, at + 900);
-  assert.match(after, /throw new Error\(/, 'a refused payload must fail the build');
+  const gate = src.indexOf('assertPayloadIsAcceptable(');
+  const gzip = src.indexOf('gzipSync(');
+  const post = src.indexOf('fetch(`${endpoint}/ci/snapshot`');
+  assert.ok(gate > 0, 'the client must run the full gate, not only the three narrow checks');
+  assert.ok(gzip > 0, 'NEGATIVE CONTROL: the body must still be built here, or the order is vacuous');
+  assert.ok(post > 0, 'NEGATIVE CONTROL: the upload must still happen here');
+  assert.ok(gate < gzip, 'the gate must precede the body — after it, the extract is already paid for');
+  assert.ok(gzip < post, 'and the body must precede the upload, or this file has been reordered');
 });
 
 test('the client reports a thrown value without assuming it is an Error', () => {
