@@ -611,7 +611,7 @@ export interface CiWorkspaceManifest {
  * cut then shipped `InfraNode.metadata` whole — and the DERIVED graph carried those
  * identifiers anyway. Measured on our own repo:
  *
- *   metadata.image = registry.cloudflare.com/183986778ae…/clew-ingest-worker-sandbox:sha-…
+ *   metadata.image = registry.cloudflare.com/a1b2c3d4e5f6…/ingest-container:sha-…
  *
  * — the Cloudflare account id, copied verbatim out of `worker/wrangler.jsonc`. The
  * same field carries a GCP project id (`gcr.io/<project>/…`), an AWS account id via
@@ -994,7 +994,14 @@ async function inflateBounded(
         controller.close();
       },
     });
-    stream = src.pipeThrough(new DecompressionStream('gzip')) as unknown as ReadableStream<Uint8Array>;
+    // ⚠ NO CAST HERE, AND ITS ABSENCE IS DELIBERATE. There used to be an
+    // `as unknown as ReadableStream<Uint8Array>` on this line, load-bearing under a
+    // different set of ambient stream types. It compiles clean without one now, and a
+    // double cast that turns out to do nothing is the worst kind to leave in a file
+    // whose whole argument is that a reader can check it rather than trust it — it
+    // reads as a known incompatibility being papered over, and it would silently
+    // absorb a real one if the types ever did diverge.
+    stream = src.pipeThrough(new DecompressionStream('gzip'));
   } catch (e) {
     return { ok: false, reason: 'malformed_gzip', detail: errorMessage(e).slice(0, 120) };
   }

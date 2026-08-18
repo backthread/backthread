@@ -169,13 +169,21 @@ export const MAX_CHECKPOINT_SKEW_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * The languages the extractor can emit. `FileRecord.language` is the file's
  * EXTENSION (verified against production: `ts`/`tsx`/`jsx`/`js`/`mjs` are what
- * real rows carry), so the allowlist is DERIVED from the package's own exported
- * extension lists rather than hand-copied. A new language in the extractor
- * widens this set automatically; a hand-written list would have to be
- * remembered, and would silently reject the new language's repos until it was.
+ * real rows carry).
  *
- * `php` is the one hardcode: the package exports every other language's
- * `*_SOURCE_EXTENSIONS` from its root but not `PHP_SOURCE_EXTENSIONS`.
+ * ⚠ THIS IS A LITERAL, NOT A DERIVATION, AND THE COMMENT USED TO SAY OTHERWISE.
+ * It claimed the set was built from the extractor's own exported extension lists
+ * and therefore widened automatically when a language was added. It does not: this
+ * file may not import the extractor at runtime — that import is what the whole
+ * lockstep arrangement exists to avoid — so the list is written out here and
+ * `extractorLockstep.test.ts` holds it to the originals under a runtime that CAN
+ * import them. A reviewer caught the claim, which matters more than it sounds:
+ * a reader who believed "widens automatically" would add a language upstream and
+ * expect this to follow, and it would silently reject that language's repos until
+ * the lockstep test failed and someone read it.
+ *
+ * The guarantee is therefore "a list a test proves equal", not "the same list" —
+ * weaker, and saying so is better than a claim the arrangement disproves.
  */
 export const KNOWN_LANGUAGES: ReadonlySet<string> = new Set<string>([
   // ts
@@ -810,7 +818,7 @@ function isMember(map: Readonly<Record<string, true>>, key: string): boolean {
  * A reference inside the infra graph — a node id, or an infra edge endpoint.
  *
  * ⚠ ONE PREDICATE FOR TWO SHAPES, BECAUSE THE WIRE CARRIES BOTH. A node id is
- * adapter-namespaced (`cloudflare:worker:clew-ingest-worker`); an edge endpoint may
+ * adapter-namespaced (`cloudflare:worker:api`); an edge endpoint may
  * instead be a repo-relative FILE PATH, because a source-grepping adapter cannot
  * bind its endpoint on its own and `assemble` resolves it through
  * `cluster.fileModuleMap`. Two predicates would mean deciding which one an
@@ -882,7 +890,7 @@ const ALLOWED_CLASSIFICATION_KEYS: ReadonlySet<string> = new Set([
  * WHOLE POINT (found in review). The first cut admitted the shape the adapters
  * measurably emit — strings, finite numbers, booleans, string arrays — a correct
  * description of a field that should not have been crossing at all. It carried a
- * Cloudflare ACCOUNT ID (`metadata.image` = `registry.cloudflare.com/183986778ae…/…`,
+ * Cloudflare ACCOUNT ID (`metadata.image` = `registry.cloudflare.com/a1b2c3d4e5f6…/…`,
  * lifted out of our own `wrangler.jsonc`), a GCP project id, an ECR host containing an
  * AWS account id, Railway's literal `${{Postgres.DATABASE_URL}}` credential reference,
  * and 50 table names read out of migration SQL — every one of which the server then

@@ -51,11 +51,20 @@
  * else's infrastructure, and the absence of one is the mechanical guard against this
  * becoming an on-prem product. The tracked branch comes from your connected repo's
  * settings, and the ingress refuses any ref that is not it.
+ *
+ * ⚠ WITH ONE EXCEPTION, NAMED HERE RATHER THAN LEFT FOR SOMEONE TO FIND.
+ * `BACKTHREAD_ENDPOINT` redirects where this posts, and it exists so the client can be
+ * run against a non-production ingress. It is a knob, and the paragraph above would be
+ * an overclaim if it went unmentioned. What it cannot do is turn the OIDC token into a
+ * credential somewhere else: the token is minted for a fixed AUDIENCE, so a copy sent
+ * to another host is an assertion nothing else will accept. Anyone able to set this
+ * variable can already run arbitrary steps in the same job.
  */
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { errorMessage } from './errors.js';
 import { gzipSync } from 'node:zlib';
 import {
   EXTRACTOR_PACKAGE_VERSION,
@@ -120,6 +129,7 @@ import {
 // late refusal these imports exist to prevent; a tighter one refuses payloads we
 // would have accepted. Both drifts are silent, and both are one function away.
 import {
+  validateCiPayload,
   validateEnvServices,
   validateFrameworkContributions,
   validateInfraGraph,
@@ -210,7 +220,7 @@ async function collectInfra(): Promise<CiInfraGraph> {
   // ⚠ NARROWED, NOT SHIPPED WHOLE — the correction a verifier forced. The first cut
   // sent `MergedInfraGraph`'s nodes and edges verbatim, so the DERIVED graph carried
   // the very things the boundary argument says must not cross: `metadata.image` on
-  // our own repo is `registry.cloudflare.com/183986778ae…/…`, the Cloudflare ACCOUNT
+  // our own repo is `registry.cloudflare.com/a1b2c3d4e5f6…/…`, the Cloudflare ACCOUNT
   // ID lifted straight out of `wrangler.jsonc`. All of it was discarded server-side.
   // `narrowInfraForWire` is shared with `ci-replay --compare` and the convergence
   // test, so what those two measure is what this sends.
@@ -384,6 +394,13 @@ async function main(): Promise<void> {
   const sha = git('rev-parse', 'HEAD');
   const date = git('show', '-s', '--format=%cI', sha);
   const subject = git('show', '-s', '--format=%s', sha);
+  // ⚠ THIS IS THE REF THIS RUN IS ON, WHICH IS NOT THE SAME THING AS THE REPO'S DEFAULT
+  // BRANCH, AND THE WIRE FIELD IS NAMED FOR THE LATTER. Saying so rather than renaming
+  // it: the field crosses a version-gated contract, and the ingress does not trust it
+  // either way — it compares this against the tracked branch on the repo row and
+  // refuses a mismatch with `ref_not_tracked_branch`. So the misnomer costs a reader a
+  // moment and cannot cost a snapshot anything, and the authority stays on our side
+  // where a customer's runner cannot move it.
   const defaultBranch = (process.env.GITHUB_REF_NAME ?? 'main').trim();
 
   console.log(`[backthread] extracting ${repository} @ ${sha.slice(0, 7)} …`);
@@ -452,6 +469,36 @@ async function main(): Promise<void> {
     },
   };
 
+  // ⚠ THE WHOLE GATE, NOT THREE OF ITS SUB-CHECKS — the correction a reviewer forced.
+  // `collectInfra`, `collectEnvServices` and `collectFramework` each ran their own
+  // ingress check and each said, correctly, that it is the SAME function so the two
+  // cannot disagree. What none of them said is that those three are a fraction of what
+  // the ingress applies: the file ceiling, the edge caps, every string bound, path
+  // safety, the unknown-field rule and the manifest count all lived server-side only.
+  // So a payload one file over the ceiling was refused AFTER a full extract, which is
+  // exactly the late refusal this whole pattern exists to prevent, for the majority of
+  // the reasons a payload gets refused.
+  //
+  // ⚠ `prior: null` IS NOT A WEAKENING. The one tier this cannot reproduce is the
+  // collapse check against the repo's own recorded history, which is database-resident
+  // — the runner has no history and inventing one would be worse than omitting it.
+  // Everything else is the identical function over the identical object, so this is a
+  // strict SUBSET of the ingress's answer and can never admit something it refuses.
+  const rejection = validateCiPayload({
+    value: payload,
+    identity: { owner, name, sha },
+    now: Date.now(),
+    prior: null,
+  }).rejection;
+  if (rejection) {
+    throw new Error(
+      `[backthread] this payload would be refused by the ingress: ${rejection.error}` +
+        `${rejection.detail ? ` (${rejection.detail})` : ''}. ` +
+        'Refusing here rather than spending the upload, so the reason arrives with the ' +
+        'extract that produced it.',
+    );
+  }
+
   const body = gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'));
   console.log(
     // ⚠ THE LOCAL VALUE, NOT `payload.counts?.files`. Typing the literal as
@@ -490,6 +537,12 @@ async function main(): Promise<void> {
 }
 
 main().catch((e: unknown) => {
-  console.error((e as Error).message);
+  // ⚠ `errorMessage`, NOT `(e as Error).message`. This is the last line that runs on
+  // every failed build, so it is the worst possible place for a read that assumes what
+  // was thrown: a producer that throws a non-Error makes this line throw a TypeError of
+  // its own, and the workflow author gets a stack trace about `undefined` instead of the
+  // refusal that actually happened. Shipping the fix for that in this package and not
+  // using it here would be the joke telling itself.
+  console.error(errorMessage(e));
   process.exit(1);
 });

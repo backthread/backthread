@@ -644,7 +644,7 @@ test('isSafeInfraRef accepts the real shapes and refuses the hostile ones', () =
   // The predicate under test directly, so a mutation inside it is visible even if a
   // caller stops calling it.
   for (const good of [
-    'cloudflare:worker:clew-ingest-worker',
+    'cloudflare:worker:api',
     'supabase:function:mint-claim',
     'terraform:aws_s3_bucket.assets',
     'src/queries/orders.ts',
@@ -710,7 +710,7 @@ test('too many sourceRoots on one node is refused', () => {
 //
 // ⚠ THIS SECTION USED TO VALIDATE A MEASURED SHAPE, AND VALIDATING IT CAREFULLY WAS
 // NOT THE SAME AS NEEDING IT. A verifier measured what the derived graph actually
-// carried: `metadata.image` = `registry.cloudflare.com/183986778ae…/…` — the
+// carried: `metadata.image` = `registry.cloudflare.com/a1b2c3d4e5f6…/…` — the
 // Cloudflare ACCOUNT ID, out of our own `wrangler.jsonc` — plus GCP project ids, ECR
 // hosts containing AWS account ids, Railway's literal `${{Postgres.DATABASE_URL}}`
 // credential reference, and 50 table names read from migration SQL. Every one of them

@@ -47,7 +47,7 @@ export interface CiInfraPayload {
  * FALSIFIED ITS OWN SECURITY ARGUMENT WITH IT. The boundary is justified by
  * "`wrangler.toml` carries account identifiers and credential references" — and the
  * derived graph carried them too. Measured on this repo: `metadata.image` is
- * `registry.cloudflare.com/183986778ae…/…`, the Cloudflare ACCOUNT ID. Elsewhere the
+ * `registry.cloudflare.com/a1b2c3d4e5f6…/…`, the Cloudflare ACCOUNT ID. Elsewhere the
  * same key holds a GCP project id and an ECR host containing an AWS account id, and
  * Railway's adapter puts the literal `${{Postgres.DATABASE_URL}}` credential
  * reference in `metadata.ref`. `metadata.tables` held 50 table names read out of

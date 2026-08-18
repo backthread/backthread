@@ -199,3 +199,43 @@ test('the runner runs the framework TREE phase and refuses rather than truncatin
   // ...and it is handed the NOISE-FILTERED graph, the same one the server clusters.
   assert.match(src, /collectFramework\(graph\)/, 'the tree phase takes the seedFull graph');
 });
+
+
+test('the client runs the WHOLE ingress gate before it uploads, not three of its sub-checks', () => {
+  // ⚠ THE GAP A REVIEWER FOUND, AND WHY A SOURCE GUARD IS THE ONLY WAY TO HOLD IT.
+  // Three collectors each ran their own ingress check and each said, correctly, that it
+  // is the SAME function so the two cannot disagree. None of them said that those three
+  // are a fraction of what the ingress applies — the file ceiling, the edge caps, every
+  // string bound, path safety, the unknown-field rule and the manifest count were all
+  // server-side only. So the majority of refusals still arrived AFTER a full extract,
+  // which is precisely the late refusal the pattern exists to prevent.
+  //
+  // `main()` cannot be executed from a test, so this checks that the call is present and
+  // that it precedes the upload. `codeOnly` strips comments, so this prose cannot satisfy
+  // it.
+  const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
+  const at = src.indexOf('validateCiPayload(');
+  assert.ok(at > 0, 'the client must run the full gate, not only the three narrow checks');
+
+  const gzipAt = src.indexOf('gzipSync(');
+  assert.ok(gzipAt > 0, 'NEGATIVE CONTROL: the upload must still be built here, or the order below is vacuous');
+  assert.ok(
+    at < gzipAt,
+    'the gate must run BEFORE the body is built — after it, the extract has already been paid for',
+  );
+
+  // ...and it must ACT on the answer. A call whose result is discarded is the same as no
+  // call, and reads like a check.
+  const after = src.slice(at, at + 900);
+  assert.match(after, /throw new Error\(/, 'a refused payload must fail the build');
+});
+
+test('the client reports a thrown value without assuming it is an Error', () => {
+  // This package ships `errorMessage` precisely because `(e as Error).message` is a lie
+  // the compiler accepts, and the top-level catch is the worst place to make it: a
+  // producer throwing a non-Error turns the LAST line of a failed build into a TypeError
+  // about `undefined`, and the workflow author never sees the refusal that happened.
+  const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
+  assert.doesNotMatch(src, /\(e as Error\)\.message/);
+  assert.match(src, /main\(\)\.catch\([\s\S]{0,200}errorMessage\(/);
+});

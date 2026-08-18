@@ -42,6 +42,21 @@ const FORBIDDEN = [
   { name: 'retired private domain', re: /useclew/gi },
   { name: 'company email domain', re: /katanamrp/gi },
   { name: 'internal account handle', re: /jevgenibogatyrjov/gi },
+  // ⚠ AN INFRASTRUCTURE IDENTIFIER, ADDED AFTER A REVIEWER FOUND IT SHIPPING. A public
+  // package carried our Cloudflare ACCOUNT ID in eight places — inside prose explaining
+  // that an account id is exactly what must never cross the wire, and once as a literal
+  // in a test fixture. None of the six rules above matched it, because every one of them
+  // is about a NAME and this is a number.
+  //
+  // ⚠ AND THE OBVIOUS SIBLING RULE IS DELIBERATELY ABSENT. A Supabase project ref was
+  // added here at the same time and immediately failed the build on
+  // `cli/dist-bundle/backthread.js` — because it is the host part of
+  // `DEFAULT_FUNCTIONS_URL`, the endpoint the published CLI has to call. A service
+  // address that every user's traffic reaches is not a leak, and a guard that refuses
+  // one teaches people to disable the guard. The distinction this list draws is
+  // between an ADDRESS a client must know and an IDENTIFIER that only names us: the
+  // account id below appears in prose and nowhere in any request.
+  { name: 'cloudflare account id', re: /183986778ae[0-9a-f]*/gi },
 ];
 
 /** Files whose bytes we do not read (no text to inspect, and huge). */
@@ -73,7 +88,20 @@ function walk(dir, out = []) {
  */
 function shippedFiles(pkgDir) {
   const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
-  const names = [...new Set([...(manifest.files ?? []), 'package.json', 'README.md', 'LICENSE'])];
+  // ⚠ NO `files` FIELD MEANS npm SHIPS THE WHOLE DIRECTORY, NOT THREE FILES. Without
+  // this branch the loop below saw an empty declared set, scanned only package.json,
+  // README and LICENSE, and reported OK — measured: a planted issue id in `src/` was
+  // missed entirely. That is the same silent-skip this guard was widened to close,
+  // reachable by deleting one line from a package manifest.
+  if (manifest.files === undefined) {
+    const out = new Set(walk(pkgDir).filter((f) => !f.split(sep).includes('node_modules')));
+    console.log(
+      `  ${relative(ROOT, pkgDir)}: declares no "files" — npm would publish the whole ` +
+        `directory, so the whole directory is scanned (${out.size} file(s))`,
+    );
+    return [...out].sort();
+  }
+  const names = [...new Set([...manifest.files, 'package.json', 'README.md', 'LICENSE'])];
   const out = new Set();
   const absent = [];
   for (const name of names) {
@@ -81,7 +109,7 @@ function shippedFiles(pkgDir) {
     if (!existsSync(abs)) {
       // Only the DECLARED set is worth reporting: npm always ships README/LICENSE if
       // present, so their absence is ordinary rather than a gap in what we scanned.
-      if ((manifest.files ?? []).includes(name)) absent.push(name);
+      if (manifest.files.includes(name)) absent.push(name);
       continue;
     }
     if (statSync(abs).isDirectory()) walk(abs).forEach((f) => out.add(f));

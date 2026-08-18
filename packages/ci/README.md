@@ -21,8 +21,6 @@ jobs:
       id-token: write  # the OIDC token that identifies this repository
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # the extractor reads commit metadata
       - run: npx --yes @backthread/ci
 ```
 
@@ -69,7 +67,7 @@ The tracked branch comes from your connected repository's settings; the ingress 
 
 - **Node 22.18+** (GitHub's `ubuntu-latest` runner satisfies this).
 - The repository must already be **connected to Backthread and set to CI mode.** A payload from a repository that is not is refused; connecting is done in the app, not here.
-- `fetch-depth: 0` on the checkout. A shallow clone has no commit metadata to read.
+- **No special checkout depth.** The default shallow checkout is enough: the client reads only `HEAD`'s sha, date and subject, and the tracked-file list. It never walks history, and the extractor never shells out to git at all.
 
 ## Library use
 

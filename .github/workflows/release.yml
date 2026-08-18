@@ -65,7 +65,7 @@ jobs:
       # A publish is irreversible on npm, so re-run the internal-reference guard here and
       # not only on the PR — the tarball is the artifact strangers read.
       - name: No internal references in the published package
-        run: npm run check:no-internal-refs
+        run: node scripts/check-no-internal-refs.mjs
       # Guard: the tag must match cli/package.json (and the manifests, via the lockstep
       # tests above) — never publish a version that doesn't match the tag.
       - name: Tag matches cli/package.json version
