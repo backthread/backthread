@@ -238,7 +238,7 @@ jobs:
       # Report every workspace's result on every run, even when one of them is red.
       fail-fast: false
       matrix:
-        workspace: [backthread, '@backthread/extractor']
+        workspace: [backthread, '@backthread/extractor', '@backthread/ci']
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

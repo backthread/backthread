@@ -34,7 +34,7 @@
 // an initializer `Foo(…)` or a static call `Foo.member(…)` whose UpperCamelCase head
 // resolves UNAMBIGUOUSLY to an in-repo declaration becomes a `call` edge — the same
 // registry the reference backbone keys on, so accuracy is inherited (an ambiguous /
-// external / dynamic / self callee is dropped, never guessed; ARP-325). Instance
+// external / dynamic / self callee is dropped, never guessed). Instance
 // dispatch (`foo.bar()`) has no resolvable head and is dropped for free. A per-file
 // call-site cap degrades a god-file to import-only (logged, never a silent cap).
 // `Package.swift` matches the `.swift` extension but is a MANIFEST (targets/deps, not
@@ -119,7 +119,7 @@ export interface SwiftResolution {
  * resolves to an in-repo file (other than `fromId`) becomes a weighted edge.
  * Unresolvable / external / ambiguous (dropped-from-registry) / self heads are dropped
  * — the same registry the reference backbone keys on, so its accuracy is inherited
- * (ARP-325: no guessed edge). A file whose call-site count exceeds the cap degrades to
+ * (no guessed edge). A file whose call-site count exceeds the cap degrades to
  * import-only (logged, never a silent cap). Sorted by target for a stable record.
  */
 export function extractFileCalls(
