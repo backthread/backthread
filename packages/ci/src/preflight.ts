@@ -105,11 +105,20 @@ export function preparedFramework(raw: RawFrameworkContributions): RawFrameworkC
  * unknown-field rule and the manifest count were all server-side only, so most refusals
  * still arrived after a full extract — the exact late refusal this whole pattern is for.
  *
- * ⚠ `prior: null` IS NOT A WEAKENING. The one tier this cannot reproduce is the collapse
- * check against the repo's own recorded history, which is database-resident; the runner
- * has no history and inventing one would be worse than omitting it. Everything else is
- * the identical function over the identical object, so this is a strict SUBSET of the
- * ingress's answer and can never refuse something the server would admit.
+ * ⚠ `prior: null` IS NOT A WEAKENING. It is consumed by exactly one tier — the
+ * plausibility pass — which produces WARNINGS and never a rejection, so passing `null`
+ * removes commentary and no refusal. The collapse check against the repo's own recorded
+ * history is database-resident; the runner has no history, and inventing one would be
+ * worse than omitting it.
+ *
+ * ⚠ `now` IS THE ONE PLACE THE CLIENT CAN BE STRICTER THAN THE INGRESS, AND AN EARLIER
+ * DRAFT OF THIS COMMENT CLAIMED OTHERWISE. It said this "can never refuse something the
+ * server would admit" — true of `prior`, and not quite true of `now`. The checkpoint's
+ * date is compared against the clock passed in, with a seven-day window; this passes the
+ * RUNNER's clock and the ingress passes the server's. A runner more than seven days out
+ * would refuse locally what the server would take. The window makes that practically
+ * unreachable, and the failure is a loud local error rather than a wrong topology — but
+ * an absolute claim that is only nearly true is the kind this file exists to catch.
  */
 export function assertPayloadIsAcceptable(
   payload: CiSnapshotPayload,

@@ -138,3 +138,44 @@ test('assertPayloadIsAcceptable refuses a payload whose sha is not the identity 
     /refused by the shared ingress check/,
   );
 });
+
+test('assertPayloadIsAcceptable USES the clock it is handed — a stale checkpoint is refused', () => {
+  // ⚠ THIS TEST EXISTS BECAUSE ITS ABSENCE WAS MEASURED. A verifier changed this
+  // function to ignore its `now` argument and read `payload.checkpoint.date` instead —
+  // which makes the freshness comparison compare a value with itself, so every stale
+  // checkpoint passes — and all 333 tests stayed green. `now` feeds exactly one tier
+  // (`checkpoint_date_out_of_window`), and nothing exercised it, so the whole tier could
+  // be defeated in the preflight without a single assertion noticing.
+  //
+  // That is the same shape this module was extracted to close, one ARGUMENT along
+  // rather than one file along: the call was present, correctly ordered, and its answer
+  // was not acted on. The lesson generalises past this fix — a parameter no test varies
+  // is a parameter no test is checking.
+  const stale = okPayload({
+    checkpoint: {
+      sha: SHA,
+      date: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(),
+      subject: 'a commit from long ago',
+      trigger: 'push',
+    },
+  });
+  assert.throws(
+    () => assertPayloadIsAcceptable(stale, IDENTITY, Date.now()),
+    /checkpoint_date_out_of_window/,
+  );
+  // NEGATIVE CONTROL — the same payload with a fresh date passes, so the refusal above
+  // is about the DATE and not about anything else the fixture happens to carry.
+  assert.doesNotThrow(() =>
+    assertPayloadIsAcceptable(
+      okPayload({ checkpoint: { sha: SHA, date: new Date().toISOString(), subject: 'now', trigger: 'push' } }),
+      IDENTITY,
+      Date.now(),
+    ),
+  );
+  // ...and the window is read from the CLOCK ARGUMENT, not from wall time: a stale
+  // payload judged by a clock contemporary with it is fine. This is the assertion the
+  // surviving mutant could not satisfy, because it derived `now` from the payload.
+  assert.doesNotThrow(() =>
+    assertPayloadIsAcceptable(stale, IDENTITY, Date.parse(stale.checkpoint.date) + 1000),
+  );
+});
