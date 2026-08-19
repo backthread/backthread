@@ -1,5 +1,5 @@
 ---
-description: Have Backthread ask YOU one question about this codebase, built from what was actually recorded here — a decision, a trade-off, an option someone rejected. Answer it in your own words and you get the recorded reasoning back. Ignore it and nothing happens: nothing is written down unless you answer, nothing counts how often you are asked, and your lead sees what the team understands, never who replied.
+description: Have Backthread ask YOU one question about this codebase, built from what was actually recorded here — a decision, a trade-off, an option someone rejected. Answer it in your own words and you get the recorded reasoning back. Ignore it and nothing happens: nothing is written down unless you answer, nothing counts how often you are asked, and your lead sees what each person understands, never how much anyone took part.
 disable-model-invocation: true
 ---
 

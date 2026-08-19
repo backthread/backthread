@@ -26,7 +26,15 @@ export const PROMISE: InflowPromise = {
   points: [
     'Nothing was written down when this was asked.',
     'Nothing counts how often you are asked or how often you answer.',
-    'Your lead sees what the team understands, never who replied.',
+    // The third point is quoted from the server, which is the only place this statement
+    // is authoritative. It used to read "sees what the team understands, never who
+    // replied", and both halves were false: a lead sees each NAMED person's coverage,
+    // and "who replied" is inferable from a graded answer's own row. What is genuinely
+    // not measured anywhere is how much anyone TAKES PART, so that is what the sentence
+    // now promises. `promiseWording.test.ts` keeps the docs from drifting off it.
+    'Your lead sees what each person understands, never how much anyone took part. ' +
+      '"Did not answer" and "was not asked" are the same thing here, because neither one was ' +
+      'recorded.',
   ],
 };
 

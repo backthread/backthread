@@ -108,7 +108,8 @@ policy.** `backthread ask-me --promise` prints the exact statement, and it is wo
 reading there rather than here: **it comes from the server that enforces it**, so it
 cannot drift from the behaviour it describes the way a README can. In outline —
 nothing is written down when you are asked, nothing counts how often you are asked or
-answer, and your lead sees what the team understands rather than who replied.
+answer, and your lead sees what each person understands rather than how much anyone
+took part.
 
 What that rests on, mechanically: the endpoint that hands your agent a question
 performs no writes at all — the question exists only inside a signed, half-hour token,

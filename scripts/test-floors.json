@@ -1,7 +1,7 @@
 {
   "comment": "Minimum PASSING test count per workspace, checked by scripts/check-test-floor.mjs. This is a RATCHET against a suite that silently shrinks, not a coverage target. It exists because `--experimental-test-isolation=none` (see .github/workflows/ci.yml) swallows a module-level throw once any test in that file has registered: the run goes green, exits 0, and simply reports fewer tests. Measured: 2174 instead of 2175, with `# fail 0`. A count floor is the only thing that turns that back into a red. Raise these when tests are added; lowering one is a deliberate act that should be explained in the commit.",
   "floors": {
-    "backthread": 723,
+    "backthread": 729,
     "@backthread/extractor": 2175,
     "@backthread/ci": 363
   }
