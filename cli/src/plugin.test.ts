@@ -102,16 +102,58 @@ test('the PreToolUse grep hook runs the bundled bin SYNCHRONOUSLY, matches Grep|
   assert.ok(!cmd.includes('--detach'), 'PreToolUse must NOT detach — CC reads stdout for the additionalContext');
 });
 
-test('the PreToolUse pre-edit hook matches Edit|MultiEdit|Write, runs the bundled bin, and never detaches', () => {
+test('GUARD: nothing fires before an edit — the pre-edit trigger was removed and must not return', () => {
+  // INVERTED on 2026-08-19. This test used to PIN the existence of a PreToolUse hook
+  // on `Edit|MultiEdit|Write` — the pre-edit coverage line shipped in 0.17.0. It was
+  // removed because it fires at exactly the moment we ruled we would not interrupt
+  // anyone, four companies named the interruption as the objection, and ~28 preflight
+  // calls produced no observed action. The shipped version was mild — never blocked,
+  // short timeout, once per session, silent on everything but a clean `uncovered` —
+  // and was rejected anyway: "it never blocks" answers the letter of the ruling and
+  // leaves its intent untouched. A test that merely DELETED this case would let the
+  // hook come back unnoticed, so the assertion is inverted rather than dropped.
+  //
+  // The hosted POST /coverage-preflight route deliberately stays live: installed
+  // plugin versions keep calling it and fail toward silence.
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
-  const entry = hooks.hooks.PreToolUse.find((e: any) => e.matcher === 'Edit|MultiEdit|Write');
-  assert.ok(entry, 'the pre-edit PreToolUse entry is registered');
-  const cmd: string = entry.hooks[0].command;
-  assert.ok(cmd.includes(BUNDLE_REF), 'hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
-  assert.ok(!/\bnpx\b/.test(cmd), 'hook must NOT use npx (a sync edit hook would block every edit on the resolve)');
-  assert.ok(cmd.includes('edit-context'), 'hook routes through the edit-context command');
-  assert.ok(cmd.includes('--agent claude-code'), 'hook stamps the claude-code provider');
-  assert.ok(!cmd.includes('--detach'), 'PreToolUse must NOT detach — CC reads stdout for the hook JSON');
+
+  // 1. No hook of ANY event may match a tool that edits the codebase. Every event, not
+  //    just PreToolUse, because the property is "we do not put ourselves around
+  //    somebody's edit", and a matcher naming an editing tool breaks it wherever it is
+  //    registered (inflowHook.ts re-checks the same closed allowlist for its own hook).
+  const EDITING_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
+  for (const [event, entries] of Object.entries(hooks.hooks) as [string, any[]][]) {
+    for (const entry of entries) {
+      const matcher: string = entry.matcher ?? '';
+      for (const tool of EDITING_TOOLS) {
+        assert.ok(
+          !new RegExp(`\\b${tool}\\b`).test(matcher),
+          `${event} registers a hook matching the editing tool ${tool}: ${matcher}`,
+        );
+      }
+    }
+  }
+
+  // 2. And the entrypoint it routed to is gone, so a re-registration under some other
+  //    matcher cannot reach it either.
+  const allCommands = (Object.values(hooks.hooks) as any[][])
+    .flat()
+    .flatMap((entry: any) => (entry.hooks as any[]).map((h: any) => h.command as string));
+  for (const cmd of allCommands) {
+    assert.ok(
+      !cmd.includes('edit-context'),
+      `a hook still routes to the retired edit-context command: ${cmd}`,
+    );
+  }
+
+  // 3. The Grep|Glob entry on the same array is a DIFFERENT hook and must survive the
+  //    removal — it injects context at search time, not at edit time.
+  const pre = hooks.hooks.PreToolUse as any[];
+  assert.deepEqual(
+    pre.map((e) => e.matcher),
+    ['Grep|Glob'],
+    'PreToolUse carries exactly the grep-context entry — nothing added, nothing lost',
+  );
 });
 
 test('the Stop hook runs the bundled bin, detaches, and matches the SessionEnd capture command', () => {

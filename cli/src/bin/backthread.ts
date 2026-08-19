@@ -61,7 +61,6 @@ import { runSessionStart } from '../sessionStart.js';
 import { refreshStructure } from '../localGraph.js';
 import { syncDecisions } from '../localDecisions.js';
 import { runGrepContext } from '../grepContext.js';
-import { runEditNudge } from '../editNudge.js';
 import { runInflowDeadTime } from '../inflowHook.js';
 import {
   requestAsk,
@@ -409,19 +408,6 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       // it must never block or delay the grep.
       const raw = await readRawHookInput().catch(() => '');
       const output = await runGrepContext(raw);
-      console.log(JSON.stringify(output));
-      return 0;
-    }
-    case 'edit-context': {
-      // The PreToolUse PRE-EDIT hook. CC is about to Edit/MultiEdit/Write a file;
-      // we ask the server once whether this person has coverage of that file's
-      // area and, at most ONCE per session and only on a clean `uncovered`
-      // verdict, return a single `systemMessage` line offering the recorded
-      // context. SYNCHRONOUS (CC reads this stdout), short-timeout, and SILENT on
-      // every other outcome — including any error. It NEVER blocks the edit: no
-      // permission decision, no exit 2, always exit 0.
-      const raw = await readRawHookInput().catch(() => '');
-      const output = await runEditNudge(raw);
       console.log(JSON.stringify(output));
       return 0;
     }

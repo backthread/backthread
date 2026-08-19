@@ -5,6 +5,32 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.20.0
+
+**Nothing fires before you edit any more.** The pre-edit hook that shipped in `0.17.0` —
+one line, at most once per session, when you were about to change a part of the codebase
+you had no coverage of — is **removed**. `Edit`, `MultiEdit` and `Write` no longer trigger
+anything at all.
+
+It was mild by construction: it never blocked, never asked for a decision, timed out in
+two seconds, and stayed silent on every outcome but a clean *"you have no coverage here"*.
+That is exactly why it went — *"it never blocks"* answers the letter of the rule we set
+ourselves and leaves its intent alone. A line at edit time telling you what you do not
+know is an interruption at the one moment nobody wants one, and four teams told us
+independently that the interruption is the objection. Coverage is derived from what has
+already happened; it is not something to stop you and ask about.
+
+Nothing is lost. The question that used to arrive here now arrives only in dead time —
+*after* a `Bash` / `Task` / `WebFetch` / `WebSearch` call, never before one — and
+`/backthread:how` answers on demand, as it always did. The `Grep` / `Glob` context hook is
+untouched.
+
+The hosted `/coverage-preflight` endpoint stays live on purpose: every already-installed
+plugin keeps calling it and fails toward silence when it cannot answer, so switching it
+off would be invisible feature loss for anyone who has not updated. **This release stops
+new installs and updaters only** — preflight traffic does not go to zero, and that is not
+a failure to remove.
+
 ## 0.19.0
 
 **One question about your codebase, and ignoring it costs you nothing — provably.**

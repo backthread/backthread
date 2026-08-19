@@ -382,12 +382,13 @@ test('a dangling `--answer` fails fast instead of starting a lesson', async () =
   assert.match(err, /needs a question id/);
 });
 
-// --- `edit-context` dispatch (the pre-edit hook) ------------------------------
+// --- shared hook-dispatch helper ---------------------------------------------
 //
-// Both payloads below stop inside runEditNudge BEFORE any config read, git read or
-// request — that is what makes them safe to run here, and it is also the contract
-// worth pinning: whatever happens, this command prints valid JSON and exits 0, so
-// it can never stall or deny an edit.
+// Feeds a hook payload in via BACKTHREAD_HOOK_INPUT so a hook subcommand can be
+// driven end-to-end without a real stdin. The payloads below all stop BEFORE any
+// config read, git read or request — that is what makes them safe to run here,
+// and it is also the contract worth pinning: whatever happens, a hook command
+// prints valid JSON and exits 0, so it can never stall or deny the tool call.
 
 async function withHookInput(
   payload: string,
@@ -403,27 +404,6 @@ async function withHookInput(
     else process.env.BACKTHREAD_HOOK_INPUT = prev;
   }
 }
-
-test('`backthread edit-context` prints valid JSON and exits 0 on a payload it cannot use', async () => {
-  // No session id → nothing to throttle against → silence, before any I/O.
-  const { out, result } = await withHookInput(
-    JSON.stringify({ cwd: '/repo', tool_input: { file_path: '/repo/a.ts' } }),
-    () => main(['edit-context', '--agent', 'claude-code']),
-  );
-  assert.equal(result, 0);
-  assert.deepEqual(JSON.parse(out), {}, 'an empty object = say nothing, the edit proceeds');
-});
-
-test('`backthread edit-context` exits 0 on a malformed payload — it can never block an edit', async () => {
-  const { out, result } = await withHookInput('not json at all {{{', () => main(['edit-context']));
-  assert.equal(result, 0);
-  const parsed = JSON.parse(out);
-  assert.deepEqual(parsed, {});
-  // Never a permission verdict, never a stop — the only key it may ever emit is
-  // systemMessage, and here there is none.
-  assert.equal('permissionDecision' in parsed, false);
-  assert.equal('continue' in parsed, false);
-});
 
 // --- `inflow-context` dispatch (the dead-time hook) ---------------------------
 //

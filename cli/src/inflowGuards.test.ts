@@ -252,7 +252,7 @@ test('GUARD: every hook in the manifest routes to a known subcommand', async () 
   // So the manifest's whole command vocabulary is closed. A new entrypoint has to be
   // named here, deliberately, before any hook may call it, and only `inflow-context`
   // may reach the in-flow ask.
-  const KNOWN_HOOK_COMMANDS = ['grep-context', 'edit-context', 'session-start', 'capture', 'inflow-context'];
+  const KNOWN_HOOK_COMMANDS = ['grep-context', 'session-start', 'capture', 'inflow-context'];
   const manifest = JSON.parse(await readFile(join(HERE, '..', 'hooks', 'hooks.json'), 'utf8')) as {
     hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
   };

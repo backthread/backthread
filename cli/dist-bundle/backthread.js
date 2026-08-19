@@ -2984,7 +2984,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve3.call(this, root, ref);
+      let _sch = resolve2.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3011,7 +3011,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve3(root, ref) {
+    function resolve2(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3642,7 +3642,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve3(baseURI, relativeURI, options) {
+    function resolve2(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
       const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
@@ -3653,49 +3653,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative2, options, skipNormalization) {
+    function resolveComponent(base, relative, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse3(serialize(base, options), options);
-        relative2 = parse3(serialize(relative2, options), options);
+        relative = parse3(serialize(relative, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative2.scheme) {
-        target.scheme = relative2.scheme;
-        target.userinfo = relative2.userinfo;
-        target.host = relative2.host;
-        target.port = relative2.port;
-        target.path = removeDotSegments(relative2.path || "");
-        target.query = relative2.query;
+      if (!options.tolerant && relative.scheme) {
+        target.scheme = relative.scheme;
+        target.userinfo = relative.userinfo;
+        target.host = relative.host;
+        target.port = relative.port;
+        target.path = removeDotSegments(relative.path || "");
+        target.query = relative.query;
       } else {
-        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
-          target.userinfo = relative2.userinfo;
-          target.host = relative2.host;
-          target.port = relative2.port;
-          target.path = removeDotSegments(relative2.path || "");
-          target.query = relative2.query;
+        if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
+          target.userinfo = relative.userinfo;
+          target.host = relative.host;
+          target.port = relative.port;
+          target.path = removeDotSegments(relative.path || "");
+          target.query = relative.query;
         } else {
-          if (!relative2.path) {
+          if (!relative.path) {
             target.path = base.path;
-            if (relative2.query !== void 0) {
-              target.query = relative2.query;
+            if (relative.query !== void 0) {
+              target.query = relative.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative2.path[0] === "/") {
-              target.path = removeDotSegments(relative2.path);
+            if (relative.path[0] === "/") {
+              target.path = removeDotSegments(relative.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative2.path;
+                target.path = "/" + relative.path;
               } else if (!base.path) {
-                target.path = relative2.path;
+                target.path = relative.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative2.query;
+            target.query = relative.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -3703,7 +3703,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative2.fragment;
+      target.fragment = relative.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -3926,7 +3926,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve3,
+      resolve: resolve2,
       resolveComponent,
       equal,
       serialize,
@@ -6966,9 +6966,6 @@ function buildInflowAskUrl(env = process.env) {
 function buildInflowAnswerUrl(env = process.env) {
   return new URL("/inflow/answer", workerBaseUrl(env)).toString();
 }
-function buildCoveragePreflightUrl(env = process.env) {
-  return new URL("/coverage-preflight", workerBaseUrl(env)).toString();
-}
 var DEFAULT_FUNCTIONS_URL = "https://yempemohevgpctkpstuf.supabase.co/functions/v1";
 function functionsBaseUrl(env = process.env) {
   const override = env.BACKTHREAD_FUNCTIONS_URL;
@@ -7005,10 +7002,10 @@ function browserCommand(platform) {
   }
 }
 function openBrowser(url2, platform = process.platform) {
-  return new Promise((resolve3) => {
+  return new Promise((resolve2) => {
     const launcher = browserCommand(platform);
     if (!launcher) {
-      resolve3(false);
+      resolve2(false);
       return;
     }
     try {
@@ -7016,11 +7013,11 @@ function openBrowser(url2, platform = process.platform) {
         stdio: "ignore",
         detached: true
       });
-      child.on("error", () => resolve3(false));
+      child.on("error", () => resolve2(false));
       child.unref();
-      setTimeout(() => resolve3(true), 0);
+      setTimeout(() => resolve2(true), 0);
     } catch {
-      resolve3(false);
+      resolve2(false);
     }
   });
 }
@@ -7500,14 +7497,14 @@ import { execFile } from "node:child_process";
 function runNpm(args) {
   const isWin = process.platform === "win32";
   const npm = isWin ? "npm.cmd" : "npm";
-  return new Promise((resolve3) => {
+  return new Promise((resolve2) => {
     try {
       execFile(
         npm,
         args,
         { timeout: 12e4, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
         (err, stdout, stderr) => {
-          resolve3({
+          resolve2({
             ok: !err,
             stdout: (stdout ?? "").toString().trim(),
             stderr: (stderr ?? "").toString().trim()
@@ -7515,7 +7512,7 @@ function runNpm(args) {
         }
       );
     } catch (e) {
-      resolve3({ ok: false, stdout: "", stderr: e.message ?? String(e) });
+      resolve2({ ok: false, stdout: "", stderr: e.message ?? String(e) });
     }
   });
 }
@@ -8962,11 +8959,11 @@ async function installCodex(home, deps) {
 command = "${MCP_COMMAND}"
 args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
 `;
-    const sep2 = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
+    const sep = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
     const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
     const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
     await doMkdir(dirname3(tomlPath));
-    await doWrite(tomlPath, toml + sep2 + block);
+    await doWrite(tomlPath, toml + sep + block);
     writes.push({ path: tomlPath, wrote: true });
   }
   const hooksPath = join9(home, ".codex", "hooks.json");
@@ -9730,11 +9727,11 @@ function parseHookInput(raw) {
   return {};
 }
 function readStream(stream) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve2, reject) => {
     let data = "";
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => data += chunk);
-    stream.on("end", () => resolve3(data));
+    stream.on("end", () => resolve2(data));
     stream.on("error", reject);
   });
 }
@@ -32167,7 +32164,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error51) {
@@ -32184,7 +32181,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve2, reject) => {
       const earlyReject = (error51) => {
         reject(error51);
       };
@@ -32262,7 +32259,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve3(parseResult.data);
+            resolve2(parseResult.data);
           }
         } catch (error51) {
           reject(error51);
@@ -32523,12 +32520,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve2, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve3, interval);
+      const timeoutId = setTimeout(resolve2, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -33628,7 +33625,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -34277,12 +34274,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve2) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve3();
+        resolve2();
       } else {
-        this._stdout.once("drain", resolve3);
+        this._stdout.once("drain", resolve2);
       }
     });
   }
@@ -35298,119 +35295,6 @@ async function runGrepContext(rawStdin, deps = {}) {
   }
 }
 
-// src/editNudge.ts
-import { relative, resolve as resolve2, isAbsolute as isAbsolute3, sep } from "node:path";
-var EDIT_NUDGE_FILE = "edit-nudge.json";
-var MAX_PREFLIGHTS_PER_SESSION = 3;
-var COVERAGE_PREFLIGHT_TIMEOUT_MS = 2e3;
-function interpretCoverageResponse(ok, status, payload) {
-  if (!ok || status !== 200) return { speak: false, signal: "unresolved", subsystem: null };
-  const rec = payload && typeof payload === "object" ? payload : {};
-  if (rec.signal !== "uncovered") {
-    const known = rec.signal === "covered" || rec.signal === "unresolved" ? rec.signal : "unresolved";
-    return { speak: false, signal: known, subsystem: null };
-  }
-  const subsystem = typeof rec.subsystem === "string" && rec.subsystem.trim().length > 0 ? rec.subsystem.trim() : null;
-  return { speak: true, signal: "uncovered", subsystem };
-}
-function editNudgeMessage(subsystem) {
-  const area = subsystem ? `"${subsystem}"` : "this part of the codebase";
-  const topic = subsystem ?? "this area";
-  return `Backthread: you haven't been through anything on ${area} yet \u2014 \`/backthread:how ${topic}\` shows what's already on record before you change it.`;
-}
-function extractEditPath(toolInput) {
-  if (!toolInput || typeof toolInput !== "object") return "";
-  const ti = toolInput;
-  for (const key of ["file_path", "path"]) {
-    const v = ti[key];
-    if (typeof v === "string" && v.trim().length > 0) return v.trim();
-  }
-  return "";
-}
-function toRepoRelativePath(repoRoot, cwd, filePath) {
-  try {
-    const abs = isAbsolute3(filePath) ? filePath : resolve2(cwd, filePath);
-    const rel = relative(resolve2(repoRoot), abs);
-    if (!rel || rel.startsWith("..") || isAbsolute3(rel)) return null;
-    return sep === "/" ? rel : rel.split(sep).join("/");
-  } catch {
-    return null;
-  }
-}
-async function checkCoverage(repo, path, token, deps = {}) {
-  const env = deps.env ?? process.env;
-  const doFetch = deps.fetchImpl ?? fetch;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), COVERAGE_PREFLIGHT_TIMEOUT_MS);
-  try {
-    const res = await doFetch(buildCoveragePreflightUrl(env), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        // device token — never logged
-        "Content-Type": "application/json",
-        ...versionHeaders()
-      },
-      body: JSON.stringify({ repo: { owner: repo.owner, name: repo.name }, path }),
-      signal: controller.signal
-    });
-    let payload = null;
-    try {
-      payload = await res.json();
-    } catch {
-      payload = null;
-    }
-    return interpretCoverageResponse(true, res.status, payload);
-  } catch {
-    return interpretCoverageResponse(false, 0, null);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function runEditNudge(rawStdin, deps = {}) {
-  const env = deps.env ?? process.env;
-  const doReadConfig = deps.readConfigImpl ?? readConfig;
-  const resolveRoot = deps.resolveRepoRootImpl ?? resolveRepoRoot;
-  try {
-    let payload;
-    try {
-      payload = JSON.parse(rawStdin);
-    } catch {
-      return {};
-    }
-    const rec = payload && typeof payload === "object" ? payload : {};
-    const sessionId = typeof rec.session_id === "string" ? rec.session_id.trim() : "";
-    if (!sessionId) return {};
-    const filePath = extractEditPath(rec.tool_input);
-    if (!filePath) return {};
-    if (await wasSessionClaimed(EDIT_NUDGE_FILE, sessionId, env)) return {};
-    const cwd = typeof rec.cwd === "string" && rec.cwd ? rec.cwd : deps.cwd ?? process.cwd();
-    const repo = resolveRepo(cwd, deps.readRemoteImpl);
-    if (!repo) return {};
-    const repoRoot = resolveRoot(cwd);
-    const relPath = toRepoRelativePath(repoRoot, cwd, filePath);
-    if (!relPath) return {};
-    const config2 = await Promise.resolve().then(() => doReadConfig(env)).catch(() => ({}));
-    if (!config2.device_token) return {};
-    if (!await claimPreflightSlot(sessionId, env)) {
-      await claimSessionOnce(EDIT_NUDGE_FILE, sessionId, env);
-      return {};
-    }
-    const verdict = await checkCoverage(repo, relPath, config2.device_token, deps);
-    if (!verdict.speak) return {};
-    if (!await claimSessionOnce(EDIT_NUDGE_FILE, sessionId, env)) return {};
-    return { systemMessage: editNudgeMessage(verdict.subsystem) };
-  } catch {
-    return {};
-  }
-}
-async function claimPreflightSlot(sessionId, env) {
-  for (let n = 1; n <= MAX_PREFLIGHTS_PER_SESSION; n++) {
-    if (await claimSessionOnce(EDIT_NUDGE_FILE, `${sessionId}#${n}`, env)) return true;
-  }
-  return false;
-}
-
 // src/lesson.ts
 var LESSON_START_TIMEOUT_MS = 9e4;
 var LESSON_ANSWER_TIMEOUT_MS = 6e4;
@@ -36332,12 +36216,6 @@ async function main(argv, deps = {}) {
       console.log(JSON.stringify(output));
       return 0;
     }
-    case "edit-context": {
-      const raw = await readRawHookInput().catch(() => "");
-      const output = await runEditNudge(raw);
-      console.log(JSON.stringify(output));
-      return 0;
-    }
     case "inflow-context": {
       const raw = await readRawHookInput().catch(() => "");
       const output = await (deps.runInflowDeadTimeImpl ?? runInflowDeadTime)(raw);
@@ -36479,14 +36357,14 @@ function isEntryPoint() {
     const entry = process.argv[1];
     if (!entry) return false;
     const self = fileURLToPath2(import.meta.url);
-    const resolve3 = (p) => {
+    const resolve2 = (p) => {
       try {
         return realpathSync2(p);
       } catch {
         return p;
       }
     };
-    return resolve3(self) === resolve3(entry);
+    return resolve2(self) === resolve2(entry);
   } catch {
     return true;
   }

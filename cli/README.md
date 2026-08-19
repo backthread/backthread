@@ -132,14 +132,6 @@ Rare, bounded, and written down rather than glossed.
 `WebFetch` or `WebSearch` call, never before one and never around `Edit` / `Write`
 / `MultiEdit`. Nobody should be stopped before they want to touch anything.
 
-The plugin also registers one small **pre-edit** hook. At most **once per
-session**, when you're about to edit a part of the codebase you haven't been
-through, it prints a single line pointing at `/backthread:how`. It sends one
-repo-relative path and nothing else — the file is never opened, let alone read —
-and it **never blocks the edit**: anything other than a clean answer (offline,
-slow, signed out, not a connected repo) is simply silent. Same as the rest of the
-CLI, you can read exactly what it does in `cli/src/editNudge.ts`.
-
 ### Codex / Cursor / Gemini CLI
 
 Use another coding agent? One command wires up its **MCP server** (the `query`
