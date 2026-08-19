@@ -97,7 +97,7 @@ No branch input, no path filter, no include/exclude, no config file. Every knob 
 
 The tracked branch comes from your connected repository's settings; the ingress refuses any ref that is not it. Two environment variables are read beyond GitHub's own:
 
-- **`BACKTHREAD_CLAIM`** — the one-time code that connects a repository that has never been added to the Backthread GitHub App. See below.
+- **`BACKTHREAD_CLAIM`** — the one-time code that connects a repository that has never been added to the Backthread GitHub App. See the section above.
 - **`BACKTHREAD_ENDPOINT`** — for testing against a non-production ingress.
 
 ## Requirements
