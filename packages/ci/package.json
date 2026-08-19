@@ -1,6 +1,6 @@
 {
   "name": "@backthread/ci",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The Backthread CI-extraction client and its wire contract — extract a repository's structural graph on your own runner and post it, without ever sending source. Includes the ingress's own acceptance gate, so what is accepted is readable rather than asserted.",
   "type": "module",
   "license": "MIT",

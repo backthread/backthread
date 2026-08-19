@@ -61,10 +61,22 @@ jobs:
       - name: Extract and post
         env:
           BACKTHREAD_ENDPOINT: ${{ inputs.endpoint || 'https://clew-ingest-worker.arpy-183.workers.dev' }}
-        # ⚠ UNPINNED, ON PURPOSE, AND ONLY BECAUSE THIS IS THE DOGFOOD. It is the exact
-        # line the package README gives a customer, so this runs what a customer would
-        # get today rather than what was current when this file was written. A pin here
-        # would quietly stop testing every release after it — which is the one thing this
-        # workflow exists to catch. A customer wanting reproducible builds should pin;
-        # the dogfood wanting to break when the published client breaks should not.
-        run: npx --yes @backthread/ci
+        # ⚠ `npm install -g`, NOT `npx`, AND THIS WORKFLOW IS WHY. The first version ran
+        # `npx --yes @backthread/ci` — the line the README gave a customer — and it
+        # failed on the runner with `sh: backthread-ci: command not found`, exit 127,
+        # having installed nothing. npx derives the command name from the package spec
+        # and needs a local `package.json` to anchor its temporary install; without one
+        # it resolves the name and never fetches. This repository trips it a second way,
+        # since `packages/ci` IS `@backthread/ci` and shadows the published package.
+        #
+        # A customer with a Python or Go repo has no `package.json` either, which is
+        # exactly the customer this client is for. The instruction was wrong for them
+        # and nothing had executed it until this run did.
+        #
+        # ⚠ UNPINNED, ON PURPOSE, AND ONLY BECAUSE THIS IS THE DOGFOOD. It runs what a
+        # customer would get today rather than what was current when this file was
+        # written. A pin here would quietly stop testing every release after it, which is
+        # the one thing this workflow exists to catch.
+        run: |
+          npm install -g @backthread/ci
+          backthread-ci

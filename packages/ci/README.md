@@ -21,10 +21,26 @@ jobs:
       id-token: write  # the OIDC token that identifies this repository
     steps:
       - uses: actions/checkout@v4
-      - run: npx --yes @backthread/ci
+      - run: npm install -g @backthread/ci
+      - run: backthread-ci
 ```
 
 That is the whole setup.
+
+<details>
+<summary>Why <code>npm install -g</code> rather than <code>npx</code></summary>
+
+`npx @backthread/ci` looks like the obvious line and **does not work reliably**. Measured on npm 10.9.8, which is what `actions/setup-node` installs alongside Node 22:
+
+| working directory | `npx --yes @backthread/ci` |
+|---|---|
+| has a `package.json` | works |
+| has none — a Python, Ruby, Go or Rust repo | `sh: backthread-ci: command not found` |
+
+npx derives the command name from the package spec, and with no local manifest to anchor its temp install it resolves the name without ever fetching the package. `--package=` and `-p … -c …` fail the same way. Since this client is explicitly for repositories that need not be Node projects at all, the form that only works for half of them is the wrong one to document.
+
+`npm install -g` puts the binary on `PATH` and behaves identically everywhere. On a throwaway CI runner a global install costs nothing.
+</details>
 
 ## There is no key to give it
 
