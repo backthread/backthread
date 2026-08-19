@@ -99,3 +99,24 @@ export function defaultBranchFrom(input: {
   const trimmed = branch.trim();
   return trimmed === '' ? fallback : trimmed;
 }
+
+/**
+ * The extra sentence a failed upload needs when a claim was thrown away.
+ *
+ * ⚠ REVIEW FINDING, AND THE GAP IS PURELY ONE OF DISTANCE. A typo'd
+ * `BACKTHREAD_CLAIM` warns near the TOP of the log, then the extract runs, and
+ * hundreds of lines later the build dies on `repo_not_connected` — which is the line
+ * a reader actually looks at, and it names the wrong cause. It says the repository is
+ * not connected; the truth is that the code meant to connect it was discarded.
+ *
+ * Returns `''` when there is nothing to add, so the caller can concatenate
+ * unconditionally rather than branch.
+ */
+export function connectFailureHint(input: { claimWarning?: string; status: number }): string {
+  if (!input.claimWarning) return '';
+  if (input.status !== 404 && input.status !== 403) return '';
+  return (
+    ' — note: BACKTHREAD_CLAIM was set but ignored because it is not a well-formed' +
+    ' claim code, which is very likely why this repository is still not connected.'
+  );
+}

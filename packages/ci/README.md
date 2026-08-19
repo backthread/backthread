@@ -73,15 +73,6 @@ Publishing changes what is *readable*, not what is *enforced* — the gate still
 
 Running it before the POST is not belt-and-braces either. It is the same function, so the two cannot disagree, and a payload refused for shape *after* a full extract has already cost you CI minutes and told you nothing you could have learned earlier. When it refuses, the message names the ceiling you hit.
 
-## There are no options
-
-No branch input, no path filter, no include/exclude, no config file. Every knob here would be a knob to support, version and reason about on infrastructure we cannot see, and the absence of one is a deliberate guard against this turning into something you have to operate.
-
-The tracked branch comes from your connected repository's settings; the ingress refuses any ref that is not it. Two environment variables are read beyond GitHub's own:
-
-- **`BACKTHREAD_CLAIM`** — the one-time code that connects a repository that has never been added to the Backthread GitHub App. See below.
-- **`BACKTHREAD_ENDPOINT`** — for testing against a non-production ingress.
-
 ## `BACKTHREAD_CLAIM` — connecting without the GitHub App
 
 CI mode exists so nobody has to grant `contents: read`. Connecting through the GitHub App would grant it, so a repository can instead be connected by a code you paste into this workflow:
@@ -99,6 +90,15 @@ It is consumed by the first successful run. Leave it in place afterwards if you 
 Through `env:`, never interpolated into `run:`. A `${{ }}` expression is substituted as text before the shell parses the line, in a job that holds `id-token: write`.
 
 **A repository connected this way has no GitHub App installation, so it gets no pull-request narration** — that needs `pull_requests: read`. The architecture and its history are complete; the recorded *why* behind each change is not. A thinner artefact, not a false one.
+
+## There are no options
+
+No branch input, no path filter, no include/exclude, no config file. Every knob here would be a knob to support, version and reason about on infrastructure we cannot see, and the absence of one is a deliberate guard against this turning into something you have to operate.
+
+The tracked branch comes from your connected repository's settings; the ingress refuses any ref that is not it. Two environment variables are read beyond GitHub's own:
+
+- **`BACKTHREAD_CLAIM`** — the one-time code that connects a repository that has never been added to the Backthread GitHub App. See below.
+- **`BACKTHREAD_ENDPOINT`** — for testing against a non-production ingress.
 
 ## Requirements
 

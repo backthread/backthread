@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { claimFromEnv, defaultBranchFrom } from './connect.js';
+import { claimFromEnv, connectFailureHint, defaultBranchFrom } from './connect.js';
 import { assertPayloadIsAcceptable } from './preflight.js';
 import { CI_PAYLOAD_VERSION, type CiSnapshotPayload } from './payload.js';
 import type { RawFrameworkContributions } from '@backthread/extractor';
@@ -132,4 +132,22 @@ test('every unusable event shape falls back rather than throwing', () => {
 test('with neither an event file nor a ref name it is "main", not undefined', () => {
   assert.equal(defaultBranchFrom({ eventJson: null, refName: undefined }), 'main');
   assert.equal(defaultBranchFrom({ eventJson: null, refName: '  ' }), 'main');
+});
+
+// ===========================================================================
+// connectFailureHint — the review finding: the last line named the wrong cause
+// ===========================================================================
+
+test('a discarded claim is re-surfaced on the refusal that it caused', () => {
+  const { warning } = claimFromEnv({ BACKTHREAD_CLAIM: 'has space' });
+  const hint = connectFailureHint({ claimWarning: warning, status: 404 });
+  assert.match(hint, /BACKTHREAD_CLAIM/);
+  assert.match(hint, /not connected/);
+});
+
+test('NEGATIVE CONTROL: nothing is added when the claim was fine, or when it is unrelated', () => {
+  // Without this the hint would ride along on every failure and stop meaning anything.
+  assert.equal(connectFailureHint({ claimWarning: undefined, status: 404 }), '');
+  assert.equal(connectFailureHint({ claimWarning: 'w', status: 413 }), '', 'a size refusal is not this');
+  assert.equal(connectFailureHint({ claimWarning: 'w', status: 402 }), '', 'nor is an expired trial');
 });

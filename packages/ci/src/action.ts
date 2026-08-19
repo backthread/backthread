@@ -115,7 +115,7 @@ const AUDIENCE = 'https://api.backthread.dev';
 // repo talk to", and the two paths' node sets would drift for a reason no hash
 // diff could explain.
 import { ENV_FILES, mergeEnvServiceCandidates } from './envVars.js';
-import { claimFromEnv, defaultBranchFrom } from './connect.js';
+import { claimFromEnv, connectFailureHint, defaultBranchFrom } from './connect.js';
 import {
   CI_PAYLOAD_VERSION,
   MAX_MANIFEST_CONTENT_BYTES,
@@ -503,7 +503,13 @@ async function main(): Promise<void> {
     // The refusal detail is the product here: a size refusal names a ceiling the
     // workflow author can act on, and printing the status alone would throw that
     // away at the one moment it is needed.
-    throw new Error(`[backthread] /ci/snapshot ${res.status}: ${text}`);
+    // The refusal detail plus, when it applies, the reason the refusal is misleading
+    // — see `connectFailureHint`. The warning about a discarded claim is emitted
+    // hundreds of lines earlier, and this is the line anyone actually reads.
+    throw new Error(
+      `[backthread] /ci/snapshot ${res.status}: ${text}` +
+        connectFailureHint({ claimWarning, status: res.status }),
+    );
   }
   console.log(`[backthread] accepted: ${text}`);
 }
