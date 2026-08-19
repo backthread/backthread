@@ -121,13 +121,32 @@ test('GUARD: nothing fires before an edit — the pre-edit trigger was removed a
   //    just PreToolUse, because the property is "we do not put ourselves around
   //    somebody's edit", and a matcher naming an editing tool breaks it wherever it is
   //    registered (inflowHook.ts re-checks the same closed allowlist for its own hook).
+  //
+  //    ⚠️ A NAME-MATCH ALONE IS NOT ENOUGH, and independent verification proved it: a
+  //    matcher of `.*`, or an entry with NO matcher at all, fires on `Edit` at runtime
+  //    while naming no editing tool for a `\bEdit\b` test to find. So a tool-scoped
+  //    event must carry a matcher, that matcher may not be a wildcard, and only then is
+  //    it checked for the names. (`SessionStart` / `SessionEnd` / `Stop` are not scoped
+  //    to a tool and correctly carry no matcher — they cannot fire around an edit.)
+  const TOOL_SCOPED_EVENTS = ['PreToolUse', 'PostToolUse'];
   const EDITING_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
+  const WILDCARD = /^[\s*.|()\[\]?+^$]*$/; // `*`, `.*`, `.*|.*`, '' — anything matching everything
   for (const [event, entries] of Object.entries(hooks.hooks) as [string, any[]][]) {
     for (const entry of entries) {
-      const matcher: string = entry.matcher ?? '';
+      const matcher: string | undefined = entry.matcher;
+      if (TOOL_SCOPED_EVENTS.includes(event)) {
+        assert.ok(
+          typeof matcher === 'string' && matcher.length > 0,
+          `${event} registers a hook with no matcher — that fires on every tool, editing tools included`,
+        );
+        assert.ok(
+          !WILDCARD.test(matcher as string),
+          `${event} registers a wildcard matcher (${matcher}) — that fires on every tool, editing tools included`,
+        );
+      }
       for (const tool of EDITING_TOOLS) {
         assert.ok(
-          !new RegExp(`\\b${tool}\\b`).test(matcher),
+          !new RegExp(`\\b${tool}\\b`).test(matcher ?? ''),
           `${event} registers a hook matching the editing tool ${tool}: ${matcher}`,
         );
       }

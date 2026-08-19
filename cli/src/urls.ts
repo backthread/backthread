@@ -106,13 +106,11 @@ export function buildInflowAnswerUrl(env: NodeJS.ProcessEnv = process.env): stri
   return new URL('/inflow/answer', workerBaseUrl(env)).toString();
 }
 
-// Build the /coverage-preflight URL the pre-edit hook POSTs `{ repo, path }` to.
-// Same worker origin + device-token auth. It answers ONE question — does this
-// person have coverage of the area that file belongs to — and the hook stays
-// silent on anything but a clean, confident "no".
-export function buildCoveragePreflightUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return new URL('/coverage-preflight', workerBaseUrl(env)).toString();
-}
+// There is deliberately NO builder for /coverage-preflight here any more. The pre-edit
+// hook that POSTed `{ repo, path }` to it was removed in 0.20.0 (see hooks.json's
+// $comment_no_pretooluse_edit), leaving this its only caller. The SERVER route stays
+// live — every already-installed plugin keeps calling it — but nothing in this package
+// calls it, and an exported builder with no caller reads as a feature that still exists.
 
 // Production Supabase Functions origin — the host of the `ingest-decisions` Edge
 // Function the capture hook POSTs DERIVED decisions to (the persist leg, when
