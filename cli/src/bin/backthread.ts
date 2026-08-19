@@ -411,6 +411,22 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       console.log(JSON.stringify(output));
       return 0;
     }
+    case 'edit-context': {
+      // RETIRED IN 0.20.0, AND DELIBERATELY STILL ANSWERED. The pre-edit hook is gone from
+      // hooks.json (see its $comment_no_pretooluse_edit), but a session that was ALREADY
+      // running when the plugin updated still holds the old registration and keeps invoking
+      // this name against the NEW bundle. Falling through to the unknown-command branch
+      // would print a "did you mean" to stderr and exit 1 before every single edit — an
+      // interruption at exactly the moment this removal exists to protect, delivered to the
+      // people who did nothing but update. So it answers the way the hook itself always
+      // answered when it had nothing to say: an empty object, exit 0, not a word.
+      //
+      // It reads no config, opens no file and makes no request. Nothing may be added here —
+      // if this ever needs to DO something, the feature has come back, and plugin.test.ts's
+      // guard is what should stop that.
+      console.log('{}');
+      return 0;
+    }
     case 'inflow-context': {
       // The PostToolUse DEAD-TIME hook. A tool the person was waiting on has just
       // finished, so this is the one moment they have nothing to do; at most ONCE

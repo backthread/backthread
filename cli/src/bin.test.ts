@@ -405,6 +405,37 @@ async function withHookInput(
   }
 }
 
+// --- the RETIRED `edit-context` name --------------------------------------------
+//
+// A session already running when the plugin updates keeps the 0.19.x registration and calls
+// this name against the new bundle. It must stay silent rather than fall through to the
+// unknown-command branch, which would interrupt every edit with a stderr line and exit 1.
+
+test('`backthread edit-context` is retired, and answers with silence rather than an error', async () => {
+  const { out, err, result } = await captureConsole(() => main(['edit-context', '--agent', 'claude-code']));
+  assert.equal(result, 0, 'exit 0 — a non-zero code in front of an edit is the interruption we removed');
+  assert.deepEqual(JSON.parse(out), {}, 'an empty object = say nothing, the edit proceeds');
+  assert.equal(err, '', 'not one word on stderr');
+});
+
+test('the retired `edit-context` name reads nothing and asks nobody anything', async () => {
+  // A stale registration must not become a live lookup. If this ever needs a payload, a
+  // config read or a request, the feature has come back.
+  let fetched = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    fetched += 1;
+    throw new Error('the retired edit-context command must never make a request');
+  }) as typeof fetch;
+  try {
+    const { result } = await captureConsole(() => main(['edit-context']));
+    assert.equal(result, 0);
+    assert.equal(fetched, 0, 'no request');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 // --- `inflow-context` dispatch (the dead-time hook) ---------------------------
 //
 // Both payloads stop inside runInflowDeadTime BEFORE any config read, git read or

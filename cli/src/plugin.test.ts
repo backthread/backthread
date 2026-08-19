@@ -122,32 +122,54 @@ test('GUARD: nothing fires before an edit — the pre-edit trigger was removed a
   //    somebody's edit", and a matcher naming an editing tool breaks it wherever it is
   //    registered (inflowHook.ts re-checks the same closed allowlist for its own hook).
   //
-  //    ⚠️ A NAME-MATCH ALONE IS NOT ENOUGH, and independent verification proved it: a
-  //    matcher of `.*`, or an entry with NO matcher at all, fires on `Edit` at runtime
-  //    while naming no editing tool for a `\bEdit\b` test to find. So a tool-scoped
-  //    event must carry a matcher, that matcher may not be a wildcard, and only then is
-  //    it checked for the names. (`SessionStart` / `SessionEnd` / `Stop` are not scoped
-  //    to a tool and correctly carry no matcher — they cannot fire around an edit.)
-  const TOOL_SCOPED_EVENTS = ['PreToolUse', 'PostToolUse'];
+  //    ⚠️ THE MATCHER IS EXECUTED, NOT INSPECTED, and two rounds of review are why. The first
+  //    version tested the matcher TEXT for `\bEdit\b`, so `.*` walked past it. The second
+  //    added a "is it made only of metacharacters" check, and review walked past THAT with
+  //    `Bash|.*`, `[A-Za-z]+` and `Edi[t]` — every one of which fires on `Edit` at runtime
+  //    while naming no editing tool. A matcher is a regex, so the only reading that cannot be
+  //    out-spelled is to RUN it against the tool names and ask whether it matches. An
+  //    unparseable matcher counts as firing: we cannot tell what the host would do with it,
+  //    and "I could not tell" must not share a verdict with "it is safe".
+  //
+  //    ⚠️ AND THE EVENT LIST IS CLOSED THE OTHER WAY ROUND. Naming the tool-scoped events
+  //    positively means an event nobody listed skips the check entirely — the guard fails
+  //    OPEN on a name it has not seen. So the events that are NOT scoped to a tool are the
+  //    enumerated ones (they carry no matcher because they cannot fire around an edit), and
+  //    everything else is treated as tool-scoped and must survive the match.
+  const NOT_TOOL_SCOPED = [
+    'SessionStart',
+    'SessionEnd',
+    'Stop',
+    'SubagentStop',
+    'Notification',
+    'PreCompact',
+    'UserPromptSubmit',
+  ];
   const EDITING_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
-  const WILDCARD = /^[\s*.|()\[\]?+^$]*$/; // `*`, `.*`, `.*|.*`, '' — anything matching everything
+  /** Would this matcher fire on this tool? An unreadable matcher is assumed to fire. */
+  const firesOn = (matcher: string | undefined, tool: string): boolean => {
+    if (typeof matcher !== 'string' || matcher.length === 0) return true; // no matcher = every tool
+    try {
+      return new RegExp(matcher).test(tool);
+    } catch {
+      return true;
+    }
+  };
   for (const [event, entries] of Object.entries(hooks.hooks) as [string, any[]][]) {
-    for (const entry of entries) {
-      const matcher: string | undefined = entry.matcher;
-      if (TOOL_SCOPED_EVENTS.includes(event)) {
+    if (NOT_TOOL_SCOPED.includes(event)) {
+      for (const entry of entries) {
         assert.ok(
-          typeof matcher === 'string' && matcher.length > 0,
-          `${event} registers a hook with no matcher — that fires on every tool, editing tools included`,
-        );
-        assert.ok(
-          !WILDCARD.test(matcher as string),
-          `${event} registers a wildcard matcher (${matcher}) — that fires on every tool, editing tools included`,
+          entry.matcher === undefined,
+          `${event} is not scoped to a tool but carries a matcher (${entry.matcher}) — say which it is`,
         );
       }
+      continue;
+    }
+    for (const entry of entries) {
       for (const tool of EDITING_TOOLS) {
         assert.ok(
-          !new RegExp(`\\b${tool}\\b`).test(matcher ?? ''),
-          `${event} registers a hook matching the editing tool ${tool}: ${matcher}`,
+          !firesOn(entry.matcher, tool),
+          `${event} registers a hook whose matcher (${entry.matcher}) fires on the editing tool ${tool}`,
         );
       }
     }

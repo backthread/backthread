@@ -38,6 +38,17 @@ import { configDir, CONFIG_MODE, DIR_MODE } from './config.js';
  */
 export const MAX_REMEMBERED_SESSIONS = 50;
 
+/**
+ * ⚠️ ONE ORPHAN IS LEFT BEHIND ON PURPOSE. The retired pre-edit line owned `edit-nudge.json`
+ * in this same directory, and every machine that ran 0.17.x–0.19.x still has it. Nothing
+ * prunes it, and nothing should: deleting a file in somebody's home directory on the way
+ * past is a surprising thing for a courtesy hook to do, the whole point of removing that
+ * feature was to stop it touching anything around an edit, and the cost of leaving it is a
+ * few hundred bytes of dead JSON that no code reads. `backthread uninstall` removes the
+ * config directory wholesale, which is the honest place for it to go.
+ */
+
+
 export interface SessionRing {
   /** Session ids already seen (most-recent last). */
   nudged: string[];

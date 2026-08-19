@@ -36216,6 +36216,10 @@ async function main(argv, deps = {}) {
       console.log(JSON.stringify(output));
       return 0;
     }
+    case "edit-context": {
+      console.log("{}");
+      return 0;
+    }
     case "inflow-context": {
       const raw = await readRawHookInput().catch(() => "");
       const output = await (deps.runInflowDeadTimeImpl ?? runInflowDeadTime)(raw);
