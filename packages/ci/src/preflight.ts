@@ -136,5 +136,39 @@ export function assertPayloadIsAcceptable(
   }
 }
 
+/**
+ * The producer's own claim about what it is sending, computed from the SERIALISED
+ * STATE — which is what the ingress recomputes it against.
+ *
+ * ⚠ EVERY FIELD HERE HAS BEEN THE WRONG QUANTITY AT SOME POINT, AND IN THE SAME WAY.
+ * The obvious source is the graph `seedFull` returns, and that graph is NOISE-FILTERED
+ * while `state` is not. `edges` was written that way, measured (graph 1 658 vs state
+ * 2 435 — a 47% gap) and corrected. `externals` was left computing the filtered figure
+ * beside the corrected one, and the first run that ever reached body validation was
+ * refused: `count_mismatch (externals 14 != 15)`.
+ *
+ * ⚠ SO IT LIVES HERE RATHER THAN IN `action.ts`, WHERE NOTHING COULD RUN IT. That file
+ * calls `main()` on import. The counts were computed inline, three lines from the
+ * payload literal, and no test could reach them — which is why a cross-check written
+ * specifically to catch a producer disagreeing with itself sat unexercised through
+ * every suite while the producer disagreed with itself.
+ */
+export function payloadCounts(state: {
+  files: Record<string, unknown>;
+}): { files: number; edges: number; externals: number } {
+  let edges = 0;
+  const externals = new Set<string>();
+  for (const id of Object.keys(state.files)) {
+    const r = state.files[id] as {
+      imports: unknown[];
+      calls: unknown[];
+      externals: Array<{ id: string }>;
+    };
+    edges += r.imports.length + r.calls.length + r.externals.length;
+    for (const x of r.externals) externals.add(x.id);
+  }
+  return { files: Object.keys(state.files).length, edges, externals: externals.size };
+}
+
 /** Re-exported so `action.ts` needs one import for the whole preflight. */
 export type { NormalizedGraph };
