@@ -1,0 +1,70 @@
+# Send Backthread this repository's structure, from this repository's own runner.
+#
+# This is the dogfood of `packages/ci`, and it runs the PUBLISHED package rather than
+# the checkout beside it — `npx @backthread/ci` is the exact line the package README
+# tells a customer to write, so a break in what they run breaks this too. Running
+# `packages/ci/src/action.ts` from source here would test a path nobody else can take,
+# which is the failure the package was published to end.
+#
+# ⚠ NOTHING SECRET IS INVOLVED, AND THAT IS THE PROPERTY ON DISPLAY. There is no
+# repository secret, no API key, no token to rotate. `id-token: write` mints the OIDC
+# assertion that says WHICH repository is calling; it grants no access to anything.
+# `contents: read` is there only for `actions/checkout` — GitHub granting the RUNNER
+# access to this repository, which is the whole point: the permission never crosses to
+# us.
+#
+# ⚠ AND IT IS FREE HERE. Actions minutes are unmetered on public repositories, so this
+# dogfood does not depend on a bill. That is not incidental: the same dogfood inside a
+# private repository stopped for a month when spending was locked, and a dogfood that
+# can be switched off by an invoice is not a dogfood.
+name: backthread
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      endpoint:
+        description: Ingest worker base URL
+        required: false
+        default: https://clew-ingest-worker.arpy-183.workers.dev
+
+permissions:
+  contents: read
+  id-token: write
+
+# One checkpoint per head. A second run for the same ref is refused by the ingress
+# replay guard anyway — but only after paying for a full extract first.
+concurrency:
+  group: backthread-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  snapshot:
+    name: Post the structure snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # SHA-pinned, like every other action in this repository — see ci.yml.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Depth 1 is enough: the extractor never executes repository code and reads
+          # only the tree, and the git metadata that travels (HEAD sha, its date, its
+          # subject) is present at depth 1.
+          fetch-depth: 1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      # No `npm ci`. The client is self-contained and this repository's own dependency
+      # tree is irrelevant to it — which is also the honest shape, because a repository
+      # adopting this need not be a Node project at all.
+      - name: Extract and post
+        env:
+          BACKTHREAD_ENDPOINT: ${{ inputs.endpoint || 'https://clew-ingest-worker.arpy-183.workers.dev' }}
+        # ⚠ UNPINNED, ON PURPOSE, AND ONLY BECAUSE THIS IS THE DOGFOOD. It is the exact
+        # line the package README gives a customer, so this runs what a customer would
+        # get today rather than what was current when this file was written. A pin here
+        # would quietly stop testing every release after it — which is the one thing this
+        # workflow exists to catch. A customer wanting reproducible builds should pin;
+        # the dogfood wanting to break when the published client breaks should not.
+        run: npx --yes @backthread/ci
