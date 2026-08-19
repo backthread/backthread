@@ -1,5 +1,16 @@
 # Changelog — `@backthread/ci`
 
+## 0.2.0
+
+**The wire contract gains an optional `claim`** — a one-time code that binds a repository to a Backthread account on the run that first connects it. It is *not* a credential: holding it lets you do nothing, because using it also requires an OIDC token minted inside the repository it names. It is meant to sit in a workflow file, world-readable in a public repository by design.
+
+It carries the one fact the OIDC token cannot. The token proves **which repository** is calling; it says nothing about **which account** should own and be billed for it.
+
+Nothing changes for existing users: the field is optional, and a payload without it validates exactly as before. Absent on every run after the first, and absent forever for a repository connected through the GitHub App.
+
+⚠ **Order matters if you self-host an ingress.** The client and the validator ship in this same package, so a client sending `claim` to an ingress that has not been updated is refused with `unknown_field`. Deploy the ingress first.
+
+
 ## 0.1.2
 
 **Fixes a defect that refused every real payload.** `counts.externals` was computed from the noise-filtered graph while the ingress recomputes it from the serialised state on the wire, so a genuine extract was refused with `count_mismatch (externals 14 != 15)` before it could upload.

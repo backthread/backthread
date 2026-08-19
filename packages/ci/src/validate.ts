@@ -280,7 +280,24 @@ const ALLOWED_TOP_KEYS: ReadonlySet<string> = new Set([
   'envServices',
   'framework',
   'counts',
+  'claim',
 ]);
+
+/**
+ * The claim code's shape on the wire.
+ *
+ * ⚠ DELIBERATELY LOOSER THAN THE FORMAT THE DATABASE GENERATES. Codes are minted as
+ * `bt_` plus 24 hex characters, and pinning exactly that here would make the format
+ * a LOCKSTEP: change how codes are generated and every already-published client
+ * refuses the new ones, on a code path the customer cannot see or update quickly.
+ *
+ * So this bounds what could hurt — length, and an alphabet with no whitespace,
+ * quotes or control bytes to carry an injection — and leaves identity to the only
+ * thing that can actually decide it, which is whether a row matches. A well-formed
+ * code that names nothing is refused by the lookup, not by a regex guessing at the
+ * key space.
+ */
+const CLAIM_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 /**
  * The three locked enums the infra graph is validated against.
@@ -1759,6 +1776,15 @@ export function validateCiPayload(args: {
     // Unknown keys are REJECTED, not ignored. An ignored key is a field that
     // exists on the wire, is never checked, and one day acquires a meaning.
     if (!ALLOWED_TOP_KEYS.has(k)) return fail(2, 'unknown_field', 400, k);
+  }
+
+  // A claim is optional — absent on every run after the first, and forever for a
+  // repository connected through the App. Present, it must be a plausible code:
+  // whether it names anything is the ingress's lookup to answer, not this one's.
+  if (p.claim !== undefined) {
+    if (typeof p.claim !== 'string' || !CLAIM_RE.test(p.claim)) {
+      return fail(2, 'invalid_claim', 400, typeof p.claim === 'string' ? 'malformed' : typeof p.claim);
+    }
   }
 
   const state = p.state as { headSha?: unknown; files?: unknown } | undefined;
