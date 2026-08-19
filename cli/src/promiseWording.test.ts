@@ -15,6 +15,13 @@
 //
 // A false privacy promise is worst exactly here, at a consent moment, and it is the easiest
 // kind to discover — so the three copies are pinned against each other rather than trusted.
+//
+// WHAT A GREEN RUN HERE DOES NOT PROVE. This pins the three copies TO EACH OTHER. It cannot
+// see the server, so all three can be consistently stale, and a reword on the server side
+// lands here as a manual update. Fetching the live `--promise` output in CI would close that
+// gap and cost a network call plus a signed-in session on every run, which is worse. When you
+// change the server statement, change these three too — the string in the fixture is a
+// verbatim quote, not a paraphrase.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
