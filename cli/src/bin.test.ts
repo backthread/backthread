@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { main, runOnboarding, stripFlag } from './bin/backthread.js';
 import type { QueryOutcome } from './query.js';
 
@@ -434,6 +435,32 @@ test('the retired `edit-context` name reads nothing and asks nobody anything', a
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test('⚠️ the retired `edit-context` case does NOTHING — asserted over its source, not its output', async () => {
+  // ⚠️ WHY A SOURCE ASSERTION AND NOT ANOTHER BEHAVIOURAL ONE. Independent verification added
+  // `const _cfg = await readConfig();` to this case and it survived the ENTIRE suite: the
+  // behavioural tests pin the exit code, stdout, stderr and `fetch`, and a config read moves
+  // none of them. "It reads no config, opens no file and makes no request" was a claim in a
+  // comment with nothing behind it.
+  //
+  // The property is not "the output is right", it is "there is no work here at all", and the
+  // only way to check that is to read the case. So the body is pinned as a CLOSED set of
+  // statements: anything added fails, whether it is a config read, an `fs` touch, a throttle
+  // lookup or a request. If this case ever needs to DO something, the feature has come back.
+  const src = await readFile(new URL('./bin/backthread.ts', import.meta.url), 'utf8');
+  const start = src.indexOf("    case 'edit-context': {");
+  assert.notEqual(start, -1, 'the retired case is still routed — a stale registration must not error');
+  const end = src.indexOf("    case 'inflow-context': {", start);
+  assert.ok(end > start, 'could not delimit the retired case');
+  const body = src
+    .slice(start, end)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  assert.deepEqual(body, ["case 'edit-context': {", "console.log('{}');", 'return 0;', '}']);
 });
 
 // --- `inflow-context` dispatch (the dead-time hook) ---------------------------

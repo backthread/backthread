@@ -13,9 +13,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url)); // cli/src
 const cliRoot = join(here, '..'); // cli
@@ -115,7 +115,44 @@ test('GUARD: nothing fires before an edit — the pre-edit trigger was removed a
   //
   // The hosted POST /coverage-preflight route deliberately stays live: installed
   // plugin versions keep calling it and fail toward silence.
-  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
+  // ⚠️ EVERY SHIPPED MANIFEST, DISCOVERED FROM DISK — NOT JUST THIS PLUGIN'S. Independent
+  // verification registered a full pre-edit hook in the CODEX manifest and the whole suite
+  // stayed green: the guard read one file, and we ship three. The property being defended is
+  // "we do not put ourselves around somebody's edit", which is about the product, not about
+  // one agent's packaging. So the manifests are FOUND rather than listed — a fourth agent
+  // added tomorrow is covered the day its manifest lands, not the day someone remembers this
+  // test — and the search is asserted to have found all three, because a walk that finds
+  // nothing reports no offences and goes green having read nothing at all.
+  const manifests = findHookManifests(repoRoot);
+  assert.ok(
+    manifests.length >= 3,
+    `expected every shipped hooks.json to be found, got ${manifests.length}: ${manifests.join(', ')}`,
+  );
+  for (const manifestPath of manifests) {
+    assertNothingFiresBeforeAnEdit(manifestPath);
+  }
+});
+
+/** Every `hooks.json` we ship, wherever it lives. Never enters node_modules or dist. */
+function findHookManifests(root: string): string[] {
+  const out: string[] = [];
+  const skip = new Set(['node_modules', 'dist', 'dist-bundle', '.git', 'coverage']);
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!skip.has(entry.name)) walk(join(dir, entry.name));
+      } else if (entry.name === 'hooks.json') {
+        out.push(join(dir, entry.name));
+      }
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+function assertNothingFiresBeforeAnEdit(manifestPath: string): void {
+  const hooks = readJson(manifestPath);
+  const where = relative(repoRoot, manifestPath);
 
   // 1. No hook of ANY event may match a tool that edits the codebase. Every event, not
   //    just PreToolUse, because the property is "we do not put ourselves around
@@ -160,7 +197,7 @@ test('GUARD: nothing fires before an edit — the pre-edit trigger was removed a
       for (const entry of entries) {
         assert.ok(
           entry.matcher === undefined,
-          `${event} is not scoped to a tool but carries a matcher (${entry.matcher}) — say which it is`,
+          `${where}: ${event} is not scoped to a tool but carries a matcher (${entry.matcher}) — say which it is`,
         );
       }
       continue;
@@ -169,7 +206,7 @@ test('GUARD: nothing fires before an edit — the pre-edit trigger was removed a
       for (const tool of EDITING_TOOLS) {
         assert.ok(
           !firesOn(entry.matcher, tool),
-          `${event} registers a hook whose matcher (${entry.matcher}) fires on the editing tool ${tool}`,
+          `${where}: ${event} registers a hook whose matcher (${entry.matcher}) fires on the editing tool ${tool}`,
         );
       }
     }
@@ -183,19 +220,23 @@ test('GUARD: nothing fires before an edit — the pre-edit trigger was removed a
   for (const cmd of allCommands) {
     assert.ok(
       !cmd.includes('edit-context'),
-      `a hook still routes to the retired edit-context command: ${cmd}`,
+      `${where}: a hook still routes to the retired edit-context command: ${cmd}`,
     );
   }
 
   // 3. The Grep|Glob entry on the same array is a DIFFERENT hook and must survive the
-  //    removal — it injects context at search time, not at edit time.
-  const pre = hooks.hooks.PreToolUse as any[];
-  assert.deepEqual(
-    pre.map((e) => e.matcher),
-    ['Grep|Glob'],
-    'PreToolUse carries exactly the grep-context entry — nothing added, nothing lost',
-  );
-});
+  //    removal — it injects context at search time, not at edit time. Only the CC plugin
+  //    registers it; the other agents' manifests carry no PreToolUse array at all, and an
+  //    absent array is not a lost hook.
+  const pre = hooks.hooks.PreToolUse as any[] | undefined;
+  if (pre) {
+    assert.deepEqual(
+      pre.map((e) => e.matcher),
+      ['Grep|Glob'],
+      `${where}: PreToolUse carries exactly the grep-context entry — nothing added, nothing lost`,
+    );
+  }
+}
 
 test('the Stop hook runs the bundled bin, detaches, and matches the SessionEnd capture command', () => {
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
