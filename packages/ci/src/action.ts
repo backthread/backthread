@@ -134,6 +134,7 @@ import {
 // search of this file's source text.
 import {
   assertPayloadIsAcceptable,
+  payloadCounts,
   preparedEnvServices,
   preparedFramework,
   preparedInfra,
@@ -323,20 +324,6 @@ async function mintOidcToken(): Promise<string> {
   return body.value;
 }
 
-/**
- * Edges as the PAYLOAD carries them: every import, call and external ref in the
- * serialised state. Deliberately not `graph.edges.length` — see the note at the
- * call site. This is the exact quantity `ciValidate.ts` recomputes.
- */
-function countStateEdges(state: { files: Record<string, unknown> }): number {
-  let n = 0;
-  for (const id of Object.keys(state.files)) {
-    const r = state.files[id] as { imports: unknown[]; calls: unknown[]; externals: unknown[] };
-    n += r.imports.length + r.calls.length + r.externals.length;
-  }
-  return n;
-}
-
 function triggerOf(eventName: string | undefined): 'merge' | 'push' | 'dispatch' | 'schedule' {
   switch (eventName) {
     case 'schedule':
@@ -429,11 +416,13 @@ async function main(): Promise<void> {
     // would have been a self-report disagreeing with the payload it describes —
     // dormant today, and an instant refusal of every real payload the moment anyone
     // added the cross-check. Found by measuring rather than by reasoning about it.
-    counts: {
-      files: Object.keys(state.files).length,
-      edges: countStateEdges(state),
-      externals: new Set(graph.externals.map((x) => x.id)).size,
-    },
+    // ⚠ COMPUTED FROM THE STATE ON THE WIRE, BY THE FUNCTION THE INGRESS'S OWN
+    // CROSS-CHECK IS TESTED AGAINST. Every field here was once computed from the
+    // noise-filtered `graph` instead, which is a different quantity: `edges` was
+    // corrected when someone measured it, `externals` was not, and it refused every
+    // real payload with `count_mismatch (externals 14 != 15)` the first time anything
+    // reached body validation.
+    counts: payloadCounts(state),
   };
 
   // ⚠ THE WHOLE GATE, NOT THREE OF ITS SUB-CHECKS — the correction a reviewer forced.

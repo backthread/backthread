@@ -19,6 +19,7 @@ import type { CiSnapshotPayload } from './payload.js';
 import { CI_PAYLOAD_VERSION, MAX_ENV_SERVICES } from './payload.js';
 import {
   assertPayloadIsAcceptable,
+  payloadCounts,
   preparedEnvServices,
   preparedFramework,
   preparedInfra,
@@ -177,5 +178,81 @@ test('assertPayloadIsAcceptable USES the clock it is handed — a stale checkpoi
   // surviving mutant could not satisfy, because it derived `now` from the payload.
   assert.doesNotThrow(() =>
     assertPayloadIsAcceptable(stale, IDENTITY, Date.parse(stale.checkpoint.date) + 1000),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The producer's counts agree with the ingress's recomputation of them
+// ---------------------------------------------------------------------------
+//
+// ⚠ THIS IS THE TEST THAT WOULD HAVE CAUGHT `count_mismatch (externals 14 != 15)`.
+// The ingress cross-checks `counts` against the payload's own contents specifically so
+// that a producer disagreeing with itself is refused rather than rendered. The producer
+// computed two of those three numbers from the NOISE-FILTERED graph rather than from
+// the state it was sending — `edges` was found and fixed by measurement, `externals`
+// was left wrong beside it — and the cross-check sat unexercised through every suite,
+// because the counting happened inline in a file that runs `main()` on import.
+//
+// So this does not assert a number. It runs the producer's counter and the ingress's
+// gate over the SAME state and requires them to agree, which is the actual property and
+// cannot go stale when a fixture changes.
+
+/** A state whose FILTERED view would differ: a duplicate external id, and a noise file. */
+function stateWithDuplicateExternals(): CiSnapshotPayload['state'] {
+  const rec = (externals: Array<{ id: string; specifier: string; weight: number }>) => ({
+    language: 'ts',
+    loc: 10,
+    imports: [],
+    calls: [],
+    externals,
+    reexports: [],
+  });
+  return {
+    headSha: SHA,
+    files: {
+      // `react` appears in BOTH files: 3 external EDGES but only 2 distinct IDS. A
+      // counter that returned edges where ids were wanted passes on a one-file fixture
+      // and fails here, which is why the duplicate is the point of this shape.
+      'src/a.ts': rec([
+        { id: 'npm:react', specifier: 'react', weight: 1 },
+        { id: 'npm:zod', specifier: 'zod', weight: 1 },
+      ]),
+      'src/b.ts': rec([{ id: 'npm:react', specifier: 'react', weight: 1 }]),
+    },
+  } as unknown as CiSnapshotPayload['state'];
+}
+
+test('payloadCounts counts DISTINCT external ids, not external edges', () => {
+  const counts = payloadCounts(stateWithDuplicateExternals() as unknown as { files: Record<string, unknown> });
+  assert.equal(counts.files, 2);
+  assert.equal(counts.edges, 3, 'three external edges');
+  assert.equal(counts.externals, 2, 'two distinct ids — react is imported twice');
+});
+
+test('a payload carrying payloadCounts PASSES the ingress cross-check — the two agree by construction', () => {
+  const state = stateWithDuplicateExternals();
+  const payload = okPayload({
+    state,
+    counts: payloadCounts(state as unknown as { files: Record<string, unknown> }),
+  });
+  assert.doesNotThrow(() => assertPayloadIsAcceptable(payload, IDENTITY, Date.now()));
+});
+
+test('and the cross-check REFUSES counts computed the way the client used to compute them', () => {
+  // The exact defect: distinct-id counting replaced by edge counting. If the gate did
+  // not refuse this, the test above would prove nothing.
+  const state = stateWithDuplicateExternals();
+  const wrong = payloadCounts(state as unknown as { files: Record<string, unknown> });
+  assert.throws(
+    () => assertPayloadIsAcceptable(okPayload({ state, counts: { ...wrong, externals: 3 } }), IDENTITY, Date.now()),
+    /count_mismatch/,
+  );
+  assert.throws(
+    () => assertPayloadIsAcceptable(okPayload({ state, counts: { ...wrong, files: 99 } }), IDENTITY, Date.now()),
+    /count_mismatch/,
+  );
+  assert.throws(
+    () => assertPayloadIsAcceptable(okPayload({ state, counts: { ...wrong, edges: 0 } }), IDENTITY, Date.now()),
+    /count_mismatch/,
   );
 });
