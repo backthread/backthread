@@ -77,12 +77,33 @@ Running it before the POST is not belt-and-braces either. It is the same functio
 
 No branch input, no path filter, no include/exclude, no config file. Every knob here would be a knob to support, version and reason about on infrastructure we cannot see, and the absence of one is a deliberate guard against this turning into something you have to operate.
 
-The tracked branch comes from your connected repository's settings; the ingress refuses any ref that is not it. The only environment variable this reads beyond GitHub's own is `BACKTHREAD_ENDPOINT`, which exists for testing against a non-production ingress.
+The tracked branch comes from your connected repository's settings; the ingress refuses any ref that is not it. Two environment variables are read beyond GitHub's own:
+
+- **`BACKTHREAD_CLAIM`** — the one-time code that connects a repository that has never been added to the Backthread GitHub App. See below.
+- **`BACKTHREAD_ENDPOINT`** — for testing against a non-production ingress.
+
+## `BACKTHREAD_CLAIM` — connecting without the GitHub App
+
+CI mode exists so nobody has to grant `contents: read`. Connecting through the GitHub App would grant it, so a repository can instead be connected by a code you paste into this workflow:
+
+```yaml
+      - run: backthread-ci
+        env:
+          BACKTHREAD_CLAIM: bt_4e6c971191c6393e96d98a53
+```
+
+**The code is not a credential, and treating it as one teaches the wrong thing.** Holding it lets you do nothing: using it also requires an OpenID Connect token minted inside the repository it names, which only that repository's own Actions can produce. It belongs in the workflow file, world-readable in a public repository by design — it does **not** belong in a repository secret.
+
+It is consumed by the first successful run. Leave it in place afterwards if you like: once spent it names nothing, and a spent code is ignored rather than an error, so it will never fail a build.
+
+Through `env:`, never interpolated into `run:`. A `${{ }}` expression is substituted as text before the shell parses the line, in a job that holds `id-token: write`.
+
+**A repository connected this way has no GitHub App installation, so it gets no pull-request narration** — that needs `pull_requests: read`. The architecture and its history are complete; the recorded *why* behind each change is not. A thinner artefact, not a false one.
 
 ## Requirements
 
 - **Node 22.18+** (GitHub's `ubuntu-latest` runner satisfies this).
-- The repository must already be **connected to Backthread and set to CI mode.** A payload from a repository that is not is refused; connecting is done in the app, not here.
+- The repository must be **connected to Backthread and set to CI mode** — either through the GitHub App, or with a `BACKTHREAD_CLAIM` code as above. A payload from a repository that is neither is refused.
 - **No special checkout depth.** The default shallow checkout is enough: the client reads only `HEAD`'s sha, date and subject, and the tracked-file list. It never walks history, and the extractor never shells out to git at all.
 
 ## Library use

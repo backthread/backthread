@@ -15,6 +15,7 @@
  * import the contract and the gate without pulling a filesystem shim in behind them.
  */
 export * from './errors.js';
+export * from './connect.js';
 export * from './narrow.js';
 export * from './payload.js';
 // Listed rather than starred: `./validate.js` re-exports the byte-budget constants
@@ -50,5 +51,6 @@ export {
   validateInfraGraph,
   validateCiPayload,
   plausibilityWarnings,
+  isWellFormedClaimCode,
 } from './validate.js';
 export type { CiRejection, CiValidation, PriorCiFacts } from './validate.js';

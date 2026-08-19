@@ -170,3 +170,26 @@ test('the client reports a thrown value without assuming it is an Error', () => 
   assert.doesNotMatch(src, /\(e as Error\)\.message/);
   assert.match(src, /main\(\)\.catch\([\s\S]{0,200}errorMessage\(/);
 });
+
+test('the assembled payload routes BOTH connect inputs through the tested module', () => {
+  // ⚠ THIS IS A TEXT GUARD, AND IT IS DELIBERATELY THE WEAKER HALF. The deciding —
+  // which values are carried, which are dropped, what a malformed one does — lives in
+  // `connect.ts` and is measured behaviourally in `connect.test.ts`, because a guard
+  // over source text proves a call is PRESENT and cannot prove its answer is ACTED ON.
+  // What text CAN prove is that `main()` did not quietly grow a second, untested copy
+  // of either decision, which is exactly how the previous three defects got in.
+  const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
+  assert.match(src, /claimFromEnv\(process\.env\)/);
+  assert.match(src, /defaultBranchFrom\(\{/);
+  assert.match(src, /\.\.\.\(claim \? \{ claim \} : \{\}\)/, 'absent must stay absent, not become undefined');
+  // NEGATIVE CONTROL: the payload literal must still be in this file, or the three
+  // assertions above are matching text in a function that no longer builds anything.
+  assert.match(src, /const payload: CiSnapshotPayload = \{/);
+  // And neither decision may be re-derived here.
+  assert.doesNotMatch(src, /process\.env\.BACKTHREAD_CLAIM/, 'the env var is read in connect.ts only');
+  assert.doesNotMatch(
+    src,
+    /defaultBranch = \(process\.env\.GITHUB_REF_NAME/,
+    'the running ref is no longer the default branch',
+  );
+});

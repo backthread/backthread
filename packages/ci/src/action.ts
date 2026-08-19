@@ -115,6 +115,7 @@ const AUDIENCE = 'https://api.backthread.dev';
 // repo talk to", and the two paths' node sets would drift for a reason no hash
 // diff could explain.
 import { ENV_FILES, mergeEnvServiceCandidates } from './envVars.js';
+import { claimFromEnv, defaultBranchFrom } from './connect.js';
 import {
   CI_PAYLOAD_VERSION,
   MAX_MANIFEST_CONTENT_BYTES,
@@ -339,6 +340,21 @@ function triggerOf(eventName: string | undefined): 'merge' | 'push' | 'dispatch'
   }
 }
 
+/**
+ * `$GITHUB_EVENT_PATH`'s contents, or null. Unreadable is an ordinary outcome — the
+ * variable is absent outside Actions — and never a reason to fail a build, so the
+ * caller's fallback handles it rather than a throw.
+ */
+function readEventPayload(): string | null {
+  const path = process.env.GITHUB_EVENT_PATH;
+  if (!path) return null;
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
   const endpoint = process.env.BACKTHREAD_ENDPOINT ?? 'https://clew-ingest-worker.arpy-183.workers.dev';
   const repository = process.env.GITHUB_REPOSITORY;
@@ -348,14 +364,24 @@ async function main(): Promise<void> {
   const sha = git('rev-parse', 'HEAD');
   const date = git('show', '-s', '--format=%cI', sha);
   const subject = git('show', '-s', '--format=%s', sha);
-  // ⚠ THIS IS THE REF THIS RUN IS ON, WHICH IS NOT THE SAME THING AS THE REPO'S DEFAULT
-  // BRANCH, AND THE WIRE FIELD IS NAMED FOR THE LATTER. Saying so rather than renaming
-  // it: the field crosses a version-gated contract, and the ingress does not trust it
-  // either way — it compares this against the tracked branch on the repo row and
-  // refuses a mismatch with `ref_not_tracked_branch`. So the misnomer costs a reader a
-  // moment and cannot cost a snapshot anything, and the authority stays on our side
-  // where a customer's runner cannot move it.
-  const defaultBranch = (process.env.GITHUB_REF_NAME ?? 'main').trim();
+  // ⚠ THE REPOSITORY'S DEFAULT BRANCH, WHICH THIS USED TO GET WRONG ON PURPOSE. It
+  // carried `GITHUB_REF_NAME` — the RUNNING ref — under a field named for the default
+  // branch, and that was harmless only while nothing read it: the ingress compared the
+  // SIGNED ref against the branch on the repo row and ignored the payload's copy. It
+  // stopped being harmless when connecting a repository began to SEED that row. See
+  // `defaultBranchFrom` for the failure it prevents; the ref name is still the
+  // fallback, so nothing that works today stops working.
+  const defaultBranch = defaultBranchFrom({
+    eventJson: readEventPayload(),
+    refName: process.env.GITHUB_REF_NAME,
+  });
+
+  // ⚠ THROUGH `env:`, NEVER INTERPOLATED INTO `run:`. A `${{ }}` expression is
+  // substituted as TEXT before bash parses the line, in a job holding
+  // `id-token: write` — which is a hole this client's own workflow had to close
+  // once. Reading it here means the value never touches a shell.
+  const { claim, warning: claimWarning } = claimFromEnv(process.env);
+  if (claimWarning) console.warn(`[backthread] ${claimWarning}`);
 
   console.log(`[backthread] extracting ${repository} @ ${sha.slice(0, 7)} …`);
   const engine = new IncrementalExtractor();
@@ -390,6 +416,9 @@ async function main(): Promise<void> {
     actionVersion: ACTION_VERSION,
     extractorVersion: EXTRACTOR_PACKAGE_VERSION,
     repo: { owner, name, defaultBranch },
+    // Absent unless a claim was offered, so a payload without one is byte-identical
+    // to what every existing client already sends.
+    ...(claim ? { claim } : {}),
     checkpoint: { sha, date, subject, trigger: triggerOf(process.env.GITHUB_EVENT_NAME) },
     state,
     workspaceManifests,

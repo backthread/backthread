@@ -300,6 +300,20 @@ const ALLOWED_TOP_KEYS: ReadonlySet<string> = new Set([
 const CLAIM_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 /**
+ * Is this a plausible claim code?
+ *
+ * Exported so the PRODUCER can ask the same question the ingress asks, from ONE
+ * definition. The runner needs it for a reason the ingress does not have: a customer
+ * who typos `BACKTHREAD_CLAIM` must not have their build fail on `invalid_claim`
+ * after a full extract. The client checks first and simply does not send a value
+ * this refuses — and it can only do that without drifting from the gate if the gate
+ * hands out the question rather than the answer.
+ */
+export function isWellFormedClaimCode(value: unknown): value is string {
+  return typeof value === 'string' && CLAIM_RE.test(value);
+}
+
+/**
  * The three locked enums the infra graph is validated against.
  *
  * ⚠ WRITTEN AS `Record<Published, true>` RATHER THAN A `Set<string>`, AND THAT IS
