@@ -792,6 +792,24 @@ export interface CiSnapshotPayload {
   payloadVersion: number;
   actionVersion: string;
   extractorVersion: string;
+  /**
+   * A one-time code binding this repository to a Backthread ACCOUNT, sent only on
+   * the run that first connects it.
+   *
+   * ⚠ THIS IS NOT A CREDENTIAL, AND THE DISTINCTION IS THE WHOLE REASON IT EXISTS.
+   * Holding it lets you do nothing: using it also requires an OIDC token minted
+   * inside the repository it names, which is a thing only that repository's CI can
+   * produce. It is meant to sit in a workflow file, world-readable in a public
+   * repository by design.
+   *
+   * It carries the one fact the OIDC token cannot. The token proves WHICH
+   * REPOSITORY is calling; it says nothing about which account should own and be
+   * billed for it. Neither half is sufficient alone.
+   *
+   * Absent on every run after the first, and absent forever for a repository
+   * connected through the GitHub App.
+   */
+  claim?: string;
   /** FILE_GRAPH_VERSION the runner serialised with. Cache invalidator, never a gate. */
   fileGraphVersion?: number;
   /** EXTRACTOR_VERSION (numeric parse-cache key). Never a gate. */

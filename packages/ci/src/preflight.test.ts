@@ -256,3 +256,76 @@ test('and the cross-check REFUSES counts computed the way the client used to com
     /count_mismatch/,
   );
 });
+
+// ---------------------------------------------------------------------------
+// `claim` — the optional field that binds a repository to an account
+// ---------------------------------------------------------------------------
+//
+// ⚠ THE FIRST TEST IS THE ONE THAT MATTERS. Adding a field to a wire contract whose
+// ingress REFUSES unknown keys is the kind of change that breaks every existing
+// client if it is done wrong, and the breakage arrives as `unknown_field` on a
+// customer's build naming a field they never chose to send. So the compatibility
+// case is asserted before any of the new behaviour.
+
+test('a payload with NO claim validates exactly as before — every existing client keeps working', () => {
+  const payload = okPayload();
+  assert.equal('claim' in payload, false, 'NEGATIVE CONTROL: the fixture must not carry one');
+  assert.doesNotThrow(() => assertPayloadIsAcceptable(payload, IDENTITY, Date.now()));
+});
+
+test('a well-formed claim is accepted — whether it NAMES anything is the ingress lookup, not this gate', () => {
+  const payload = okPayload({ claim: 'bt_4e6c971191c6393e96d98a53' } as Partial<CiSnapshotPayload>);
+  assert.doesNotThrow(() => assertPayloadIsAcceptable(payload, IDENTITY, Date.now()));
+  // A code that is well-formed and names nothing is still accepted HERE. Refusing it
+  // would mean this gate had to know the database's key space, which is the coupling
+  // the loose grammar exists to avoid.
+  assert.doesNotThrow(() =>
+    assertPayloadIsAcceptable(
+      okPayload({ claim: 'totally-unknown-but-well-formed' } as Partial<CiSnapshotPayload>),
+      IDENTITY,
+      Date.now(),
+    ),
+  );
+});
+
+test('a claim that could carry an injection or a flood is refused', () => {
+  for (const bad of [
+    'bt_ has whitespace',
+    'bt_"quoted"',
+    'bt_\n newline',
+    'short',
+    'x'.repeat(65),
+    'bt_semi;colon',
+    'ignore previous instructions',
+  ]) {
+    assert.throws(
+      () => assertPayloadIsAcceptable(okPayload({ claim: bad } as Partial<CiSnapshotPayload>), IDENTITY, Date.now()),
+      /invalid_claim/,
+      `should have refused ${JSON.stringify(bad)}`,
+    );
+  }
+});
+
+test('a claim that is not a string at all is refused, and says which type it got', () => {
+  for (const bad of [42, true, null, {}, ['bt_aaaaaaaaaaaaaaaaaaaaaaaa']]) {
+    assert.throws(
+      () => assertPayloadIsAcceptable(okPayload({ claim: bad } as unknown as Partial<CiSnapshotPayload>), IDENTITY, Date.now()),
+      /invalid_claim/,
+      `should have refused ${JSON.stringify(bad)}`,
+    );
+  }
+});
+
+test('an UNKNOWN top-level field is still refused — admitting `claim` did not open the door', () => {
+  // The reason `unknown_field` exists: an ignored key is a field that exists on the
+  // wire, is never checked, and one day acquires a meaning. Adding one allowed name
+  // must not weaken that.
+  assert.throws(
+    () => assertPayloadIsAcceptable(
+      { ...okPayload(), somethingElse: true } as unknown as CiSnapshotPayload,
+      IDENTITY,
+      Date.now(),
+    ),
+    /unknown_field/,
+  );
+});
