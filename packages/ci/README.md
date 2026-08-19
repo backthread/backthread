@@ -85,6 +85,8 @@ CI mode exists so nobody has to grant `contents: read`. Connecting through the G
 
 **The code is not a credential, and treating it as one teaches the wrong thing.** Holding it lets you do nothing: using it also requires an OpenID Connect token minted inside the repository it names, which only that repository's own Actions can produce. It belongs in the workflow file, world-readable in a public repository by design — it does **not** belong in a repository secret.
 
+It is sent both as a request header and inside the payload, from one value — the ingress reads the header before it decompresses anything and refuses a disagreement between the two.
+
 It is consumed by the first successful run. Leave it in place afterwards if you like: once spent it names nothing, and a spent code is ignored rather than an error, so it will never fail a build.
 
 Through `env:`, never interpolated into `run:`. A `${{ }}` expression is substituted as text before the shell parses the line, in a job that holds `id-token: write`.

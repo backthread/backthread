@@ -193,3 +193,15 @@ test('the assembled payload routes BOTH connect inputs through the tested module
     'the running ref is no longer the default branch',
   );
 });
+
+test('the claim is sent in BOTH the header and the payload, from ONE value', () => {
+  // The ingress refuses a disagreement, so a second `claimFromEnv(...)` call here —
+  // or a hand-typed header name — would be a way for one client to contradict itself.
+  const src = codeOnly(readFileSync(new URL('./action.ts', import.meta.url), 'utf8'));
+  assert.match(src, /\[CLAIM_HEADER\]: claim/, 'the header carries it');
+  assert.match(src, /\.\.\.\(claim \? \{ claim \} : \{\}\)/, 'and so does the payload');
+  // NEGATIVE CONTROL: exactly ONE read of the environment, so both come from it.
+  const reads = src.match(/claimFromEnv\(/g) ?? [];
+  assert.equal(reads.length, 1, `expected one claimFromEnv call, saw ${reads.length}`);
+  assert.doesNotMatch(src, /'x-backthread-claim'/, 'the header name comes from the constant');
+});

@@ -115,7 +115,7 @@ const AUDIENCE = 'https://api.backthread.dev';
 // repo talk to", and the two paths' node sets would drift for a reason no hash
 // diff could explain.
 import { ENV_FILES, mergeEnvServiceCandidates } from './envVars.js';
-import { claimFromEnv, connectFailureHint, defaultBranchFrom } from './connect.js';
+import { CLAIM_HEADER, claimFromEnv, connectFailureHint, defaultBranchFrom } from './connect.js';
 import {
   CI_PAYLOAD_VERSION,
   MAX_MANIFEST_CONTENT_BYTES,
@@ -495,6 +495,11 @@ async function main(): Promise<void> {
       'Content-Type': 'application/json',
       'Content-Encoding': 'gzip',
       'x-backthread-version': ACTION_VERSION,
+      // ⚠ THE SAME CODE THE PAYLOAD CARRIES, AND BOTH ARE REQUIRED. The header is
+      // what the ingress can act on before it decompresses the body; the payload
+      // field is the published contract. The ingress refuses a disagreement, so
+      // sending one without the other is not a shortcut, it is a refusal.
+      ...(claim ? { [CLAIM_HEADER]: claim } : {}),
     },
     body,
   });
