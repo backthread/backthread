@@ -48,3 +48,24 @@ test('the README still explains WHY, so the next person does not "simplify" it b
   assert.match(readme, /command not found/);
   assert.match(readme, /npm 10\.9\.8/);
 });
+
+// ⚠ THE README ONCE SAID "the only environment variable this reads beyond
+// GitHub's own is BACKTHREAD_ENDPOINT". That sentence was TRUE when written and became
+// false the moment the client learned to carry a claim code — and nothing would have
+// noticed, because prose has no compiler. These pin the two facts a reader most needs
+// and most easily gets wrong.
+test('every environment variable the client reads is documented', () => {
+  const src = readFileSync(new URL('./connect.ts', import.meta.url), 'utf8');
+  const read = [...src.matchAll(/env\.([A-Z][A-Z0-9_]+)/g)].map((m) => m[1]);
+  // NEGATIVE CONTROL: if the parse stops matching, this must not go quietly green.
+  assert.ok(read.length >= 1, `expected connect.ts to read an env var, parsed ${read.length}`);
+  const undocumented = [...new Set(read)].filter((name) => !readme.includes(name));
+  assert.deepEqual(undocumented, [], 'env vars the client reads and the README never names');
+});
+
+test('the README says the claim code is NOT a secret, and does not tell anyone to store it as one', () => {
+  // Users who read it as a credential put it in repository secrets. Harmless, and it
+  // teaches the wrong thing about a product whose whole pitch is what it does not hold.
+  assert.match(readme, /not a credential/i);
+  assert.doesNotMatch(readme, /BACKTHREAD_CLAIM: \$\{\{\s*secrets\./);
+});
