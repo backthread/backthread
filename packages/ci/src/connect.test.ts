@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { claimFromEnv, connectFailureHint, defaultBranchFrom } from './connect.js';
+import { CLAIM_HEADER, claimFromEnv, connectFailureHint, defaultBranchFrom } from './connect.js';
 import { assertPayloadIsAcceptable } from './preflight.js';
 import { CI_PAYLOAD_VERSION, type CiSnapshotPayload } from './payload.js';
 import type { RawFrameworkContributions } from '@backthread/extractor';
@@ -150,4 +150,10 @@ test('NEGATIVE CONTROL: nothing is added when the claim was fine, or when it is 
   assert.equal(connectFailureHint({ claimWarning: undefined, status: 404 }), '');
   assert.equal(connectFailureHint({ claimWarning: 'w', status: 413 }), '', 'a size refusal is not this');
   assert.equal(connectFailureHint({ claimWarning: 'w', status: 402 }), '', 'nor is an expired trial');
+});
+
+test('the header name is the one the ingress reads', () => {
+  // Stated in one place on both sides of the wire. A typo here is a claim that
+  // silently never activates, and nothing else would notice.
+  assert.equal(CLAIM_HEADER, 'x-backthread-claim');
 });

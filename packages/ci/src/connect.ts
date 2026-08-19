@@ -120,3 +120,22 @@ export function connectFailureHint(input: { claimWarning?: string; status: numbe
     ' claim code, which is very likely why this repository is still not connected.'
   );
 }
+
+/**
+ * The header the ingress reads the claim from.
+ *
+ * ⚠ THE PAYLOAD FIELD IS NOT ENOUGH, AND THE REASON IS ORDERING RATHER THAN
+ * SECRECY. The ingress cannot read the body until after it has authenticated,
+ * checked for a replay, and decompressed up to 16 MiB — so a claim that lives only
+ * in the payload puts every refusal that depends on it below that read. Anyone with
+ * a GitHub account could then mint a token for a repository they own and post a
+ * small gzip that inflates to 16 MiB, over and over, to be told the same thing one
+ * indexed lookup already knew. In the header, the ingress decides before it inflates
+ * anything.
+ *
+ * The payload still carries `claim`, because that is the published contract and it
+ * is the auditable record of what was sent. The ingress cross-checks the two and
+ * refuses a disagreement, so the body can only ever AGREE with what authorised the
+ * request and never steer it. Sending both is therefore required, not belt-and-braces.
+ */
+export const CLAIM_HEADER = 'x-backthread-claim';
