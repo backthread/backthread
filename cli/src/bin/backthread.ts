@@ -61,7 +61,6 @@ import { runSessionStart } from '../sessionStart.js';
 import { refreshStructure } from '../localGraph.js';
 import { syncDecisions } from '../localDecisions.js';
 import { runGrepContext } from '../grepContext.js';
-import { runEditNudge } from '../editNudge.js';
 import { runInflowDeadTime } from '../inflowHook.js';
 import {
   requestAsk,
@@ -413,16 +412,19 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number 
       return 0;
     }
     case 'edit-context': {
-      // The PreToolUse PRE-EDIT hook. CC is about to Edit/MultiEdit/Write a file;
-      // we ask the server once whether this person has coverage of that file's
-      // area and, at most ONCE per session and only on a clean `uncovered`
-      // verdict, return a single `systemMessage` line offering the recorded
-      // context. SYNCHRONOUS (CC reads this stdout), short-timeout, and SILENT on
-      // every other outcome — including any error. It NEVER blocks the edit: no
-      // permission decision, no exit 2, always exit 0.
-      const raw = await readRawHookInput().catch(() => '');
-      const output = await runEditNudge(raw);
-      console.log(JSON.stringify(output));
+      // RETIRED IN 0.20.0, AND DELIBERATELY STILL ANSWERED. The pre-edit hook is gone from
+      // hooks.json (see its $comment_no_pretooluse_edit), but a session that was ALREADY
+      // running when the plugin updated still holds the old registration and keeps invoking
+      // this name against the NEW bundle. Falling through to the unknown-command branch
+      // would print a "did you mean" to stderr and exit 1 before every single edit — an
+      // interruption at exactly the moment this removal exists to protect, delivered to the
+      // people who did nothing but update. So it answers the way the hook itself always
+      // answered when it had nothing to say: an empty object, exit 0, not a word.
+      //
+      // It reads no config, opens no file and makes no request. Nothing may be added here —
+      // if this ever needs to DO something, the feature has come back, and plugin.test.ts's
+      // guard is what should stop that.
+      console.log('{}');
       return 0;
     }
     case 'inflow-context': {

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { main, runOnboarding, stripFlag } from './bin/backthread.js';
 import type { QueryOutcome } from './query.js';
 
@@ -382,12 +383,13 @@ test('a dangling `--answer` fails fast instead of starting a lesson', async () =
   assert.match(err, /needs a question id/);
 });
 
-// --- `edit-context` dispatch (the pre-edit hook) ------------------------------
+// --- shared hook-dispatch helper ---------------------------------------------
 //
-// Both payloads below stop inside runEditNudge BEFORE any config read, git read or
-// request — that is what makes them safe to run here, and it is also the contract
-// worth pinning: whatever happens, this command prints valid JSON and exits 0, so
-// it can never stall or deny an edit.
+// Feeds a hook payload in via BACKTHREAD_HOOK_INPUT so a hook subcommand can be
+// driven end-to-end without a real stdin. The payloads below all stop BEFORE any
+// config read, git read or request — that is what makes them safe to run here,
+// and it is also the contract worth pinning: whatever happens, a hook command
+// prints valid JSON and exits 0, so it can never stall or deny the tool call.
 
 async function withHookInput(
   payload: string,
@@ -404,25 +406,61 @@ async function withHookInput(
   }
 }
 
-test('`backthread edit-context` prints valid JSON and exits 0 on a payload it cannot use', async () => {
-  // No session id → nothing to throttle against → silence, before any I/O.
-  const { out, result } = await withHookInput(
-    JSON.stringify({ cwd: '/repo', tool_input: { file_path: '/repo/a.ts' } }),
-    () => main(['edit-context', '--agent', 'claude-code']),
-  );
-  assert.equal(result, 0);
+// --- the RETIRED `edit-context` name --------------------------------------------
+//
+// A session already running when the plugin updates keeps the 0.19.x registration and calls
+// this name against the new bundle. It must stay silent rather than fall through to the
+// unknown-command branch, which would interrupt every edit with a stderr line and exit 1.
+
+test('`backthread edit-context` is retired, and answers with silence rather than an error', async () => {
+  const { out, err, result } = await captureConsole(() => main(['edit-context', '--agent', 'claude-code']));
+  assert.equal(result, 0, 'exit 0 — a non-zero code in front of an edit is the interruption we removed');
   assert.deepEqual(JSON.parse(out), {}, 'an empty object = say nothing, the edit proceeds');
+  assert.equal(err, '', 'not one word on stderr');
 });
 
-test('`backthread edit-context` exits 0 on a malformed payload — it can never block an edit', async () => {
-  const { out, result } = await withHookInput('not json at all {{{', () => main(['edit-context']));
-  assert.equal(result, 0);
-  const parsed = JSON.parse(out);
-  assert.deepEqual(parsed, {});
-  // Never a permission verdict, never a stop — the only key it may ever emit is
-  // systemMessage, and here there is none.
-  assert.equal('permissionDecision' in parsed, false);
-  assert.equal('continue' in parsed, false);
+test('the retired `edit-context` name reads nothing and asks nobody anything', async () => {
+  // A stale registration must not become a live lookup. If this ever needs a payload, a
+  // config read or a request, the feature has come back.
+  let fetched = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    fetched += 1;
+    throw new Error('the retired edit-context command must never make a request');
+  }) as typeof fetch;
+  try {
+    const { result } = await captureConsole(() => main(['edit-context']));
+    assert.equal(result, 0);
+    assert.equal(fetched, 0, 'no request');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('⚠️ the retired `edit-context` case does NOTHING — asserted over its source, not its output', async () => {
+  // ⚠️ WHY A SOURCE ASSERTION AND NOT ANOTHER BEHAVIOURAL ONE. Independent verification added
+  // `const _cfg = await readConfig();` to this case and it survived the ENTIRE suite: the
+  // behavioural tests pin the exit code, stdout, stderr and `fetch`, and a config read moves
+  // none of them. "It reads no config, opens no file and makes no request" was a claim in a
+  // comment with nothing behind it.
+  //
+  // The property is not "the output is right", it is "there is no work here at all", and the
+  // only way to check that is to read the case. So the body is pinned as a CLOSED set of
+  // statements: anything added fails, whether it is a config read, an `fs` touch, a throttle
+  // lookup or a request. If this case ever needs to DO something, the feature has come back.
+  const src = await readFile(new URL('./bin/backthread.ts', import.meta.url), 'utf8');
+  const start = src.indexOf("    case 'edit-context': {");
+  assert.notEqual(start, -1, 'the retired case is still routed — a stale registration must not error');
+  const end = src.indexOf("    case 'inflow-context': {", start);
+  assert.ok(end > start, 'could not delimit the retired case');
+  const body = src
+    .slice(start, end)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  assert.deepEqual(body, ["case 'edit-context': {", "console.log('{}');", 'return 0;', '}']);
 });
 
 // --- `inflow-context` dispatch (the dead-time hook) ---------------------------

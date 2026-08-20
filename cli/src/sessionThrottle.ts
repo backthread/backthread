@@ -9,9 +9,9 @@
 // The state is a tiny, owner-only (0600) JSON file next to config.json holding a
 // BOUNDED RING of the most-recently-seen session ids, so several concurrent
 // sessions each get exactly one line while the file stays small and old ids fall
-// off. Each caller passes its OWN filename: a connect nudge and a pre-edit line
-// are different messages, and sharing one ring would let whichever fired first
-// silence the other.
+// off. Each caller passes its OWN filename: a connect nudge and an in-flow ask are
+// different messages, and sharing one ring would let whichever fired first silence
+// the other.
 //
 // BEST-EFFORT, NEVER THROWS (load-bearing). Every caller is wired into an
 // always-exit-0 hook. A missing, corrupt or unwritable state file degrades to the
@@ -29,13 +29,24 @@ import { configDir, CONFIG_MODE, DIR_MODE } from './config.js';
 
 /**
  * How many KEYS to remember before the oldest fall off the ring — keys, not
- * sessions. A caller that claims one key per session (the connect nudge) therefore
- * remembers fifty sessions; one that claims several per session (the pre-edit line,
- * which numbers its round-trip budget) remembers proportionally fewer. Eviction is
- * safe either way for both of today's callers: a forgotten key costs at most one
- * repeated line or one extra lookup, never a crash and never a wrong answer.
+ * sessions. Both of today's callers (the connect nudge and the in-flow ask) claim one
+ * key per session, so fifty keys is fifty sessions. The distinction is kept because it
+ * is the ring's actual contract: a caller that claimed several keys per session — as
+ * the removed pre-edit line did, numbering its round-trip budget — would remember
+ * proportionally fewer sessions. Eviction is safe either way: a forgotten key costs at
+ * most one repeated line or one extra lookup, never a crash and never a wrong answer.
  */
 export const MAX_REMEMBERED_SESSIONS = 50;
+
+// ⚠️ ONE ORPHAN IS LEFT BEHIND ON PURPOSE. The retired pre-edit line owned `edit-nudge.json`
+// in this same directory, and every machine that ran 0.17.x–0.19.x still has it. Nothing
+// prunes it, and nothing should: deleting a file in somebody's home directory on the way past
+// is a surprising thing for a courtesy hook to do, the whole point of removing that feature
+// was to stop it touching anything around an edit, and the cost of leaving it is a few hundred
+// bytes of dead JSON that no code reads. There is no `backthread uninstall` — verification
+// caught an earlier draft of this note claiming there was — so removal means deleting the
+// config directory by hand, and nothing in the product asks anyone to.
+
 
 export interface SessionRing {
   /** Session ids already seen (most-recent last). */

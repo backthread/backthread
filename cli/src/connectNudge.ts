@@ -70,7 +70,7 @@ export function parseNextStep(value: unknown): ServerNextStep | null | 'absent' 
 }
 
 // The throttle file: tiny, owner-only (0600), in the same dir as config.json.
-// The ring mechanics live in sessionThrottle.ts, shared with the pre-edit line —
+// The ring mechanics live in sessionThrottle.ts, shared with the in-flow ask —
 // each caller keeps its OWN file so one message can never silence the other.
 export const CONNECT_NUDGE_FILE = 'connect-nudge.json';
 

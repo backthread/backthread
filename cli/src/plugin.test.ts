@@ -13,9 +13,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url)); // cli/src
 const cliRoot = join(here, '..'); // cli
@@ -102,17 +102,141 @@ test('the PreToolUse grep hook runs the bundled bin SYNCHRONOUSLY, matches Grep|
   assert.ok(!cmd.includes('--detach'), 'PreToolUse must NOT detach — CC reads stdout for the additionalContext');
 });
 
-test('the PreToolUse pre-edit hook matches Edit|MultiEdit|Write, runs the bundled bin, and never detaches', () => {
-  const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
-  const entry = hooks.hooks.PreToolUse.find((e: any) => e.matcher === 'Edit|MultiEdit|Write');
-  assert.ok(entry, 'the pre-edit PreToolUse entry is registered');
-  const cmd: string = entry.hooks[0].command;
-  assert.ok(cmd.includes(BUNDLE_REF), 'hook invokes the bundled bin via ${CLAUDE_PLUGIN_ROOT}');
-  assert.ok(!/\bnpx\b/.test(cmd), 'hook must NOT use npx (a sync edit hook would block every edit on the resolve)');
-  assert.ok(cmd.includes('edit-context'), 'hook routes through the edit-context command');
-  assert.ok(cmd.includes('--agent claude-code'), 'hook stamps the claude-code provider');
-  assert.ok(!cmd.includes('--detach'), 'PreToolUse must NOT detach — CC reads stdout for the hook JSON');
+test('GUARD: nothing fires before an edit — the pre-edit trigger was removed and must not return', () => {
+  // INVERTED on 2026-08-19. This test used to PIN the existence of a PreToolUse hook
+  // on `Edit|MultiEdit|Write` — the pre-edit coverage line shipped in 0.17.0. It was
+  // removed because it fires at exactly the moment we ruled we would not interrupt
+  // anyone, four companies named the interruption as the objection, and ~28 preflight
+  // calls produced no observed action. The shipped version was mild — never blocked,
+  // short timeout, once per session, silent on everything but a clean `uncovered` —
+  // and was rejected anyway: "it never blocks" answers the letter of the ruling and
+  // leaves its intent untouched. A test that merely DELETED this case would let the
+  // hook come back unnoticed, so the assertion is inverted rather than dropped.
+  //
+  // The hosted POST /coverage-preflight route deliberately stays live: installed
+  // plugin versions keep calling it and fail toward silence.
+  // ⚠️ EVERY SHIPPED MANIFEST, DISCOVERED FROM DISK — NOT JUST THIS PLUGIN'S. Independent
+  // verification registered a full pre-edit hook in the CODEX manifest and the whole suite
+  // stayed green: the guard read one file, and we ship three. The property being defended is
+  // "we do not put ourselves around somebody's edit", which is about the product, not about
+  // one agent's packaging. So the manifests are FOUND rather than listed — a fourth agent
+  // added tomorrow is covered the day its manifest lands, not the day someone remembers this
+  // test — and the search is asserted to have found all three, because a walk that finds
+  // nothing reports no offences and goes green having read nothing at all.
+  const manifests = findHookManifests(repoRoot);
+  assert.ok(
+    manifests.length >= 3,
+    `expected every shipped hooks.json to be found, got ${manifests.length}: ${manifests.join(', ')}`,
+  );
+  for (const manifestPath of manifests) {
+    assertNothingFiresBeforeAnEdit(manifestPath);
+  }
 });
+
+/** Every `hooks.json` we ship, wherever it lives. Never enters node_modules or dist. */
+function findHookManifests(root: string): string[] {
+  const out: string[] = [];
+  const skip = new Set(['node_modules', 'dist', 'dist-bundle', '.git', 'coverage']);
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!skip.has(entry.name)) walk(join(dir, entry.name));
+      } else if (entry.name === 'hooks.json') {
+        out.push(join(dir, entry.name));
+      }
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+function assertNothingFiresBeforeAnEdit(manifestPath: string): void {
+  const hooks = readJson(manifestPath);
+  const where = relative(repoRoot, manifestPath);
+
+  // 1. No hook of ANY event may match a tool that edits the codebase. Every event, not
+  //    just PreToolUse, because the property is "we do not put ourselves around
+  //    somebody's edit", and a matcher naming an editing tool breaks it wherever it is
+  //    registered (inflowHook.ts re-checks the same closed allowlist for its own hook).
+  //
+  //    ⚠️ THE MATCHER IS EXECUTED, NOT INSPECTED, and two rounds of review are why. The first
+  //    version tested the matcher TEXT for `\bEdit\b`, so `.*` walked past it. The second
+  //    added a "is it made only of metacharacters" check, and review walked past THAT with
+  //    `Bash|.*`, `[A-Za-z]+` and `Edi[t]` — every one of which fires on `Edit` at runtime
+  //    while naming no editing tool. A matcher is a regex, so the only reading that cannot be
+  //    out-spelled is to RUN it against the tool names and ask whether it matches. An
+  //    unparseable matcher counts as firing: we cannot tell what the host would do with it,
+  //    and "I could not tell" must not share a verdict with "it is safe".
+  //
+  //    ⚠️ AND THE EVENT LIST IS CLOSED THE OTHER WAY ROUND. Naming the tool-scoped events
+  //    positively means an event nobody listed skips the check entirely — the guard fails
+  //    OPEN on a name it has not seen. So the events that are NOT scoped to a tool are the
+  //    enumerated ones (they carry no matcher because they cannot fire around an edit), and
+  //    everything else is treated as tool-scoped and must survive the match.
+  const NOT_TOOL_SCOPED = [
+    'SessionStart',
+    'SessionEnd',
+    'Stop',
+    'SubagentStop',
+    'Notification',
+    'PreCompact',
+    'UserPromptSubmit',
+  ];
+  const EDITING_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
+  /** Would this matcher fire on this tool? An unreadable matcher is assumed to fire. */
+  const firesOn = (matcher: string | undefined, tool: string): boolean => {
+    if (typeof matcher !== 'string' || matcher.length === 0) return true; // no matcher = every tool
+    try {
+      return new RegExp(matcher).test(tool);
+    } catch {
+      return true;
+    }
+  };
+  for (const [event, entries] of Object.entries(hooks.hooks) as [string, any[]][]) {
+    if (NOT_TOOL_SCOPED.includes(event)) {
+      for (const entry of entries) {
+        assert.ok(
+          entry.matcher === undefined,
+          `${where}: ${event} is not scoped to a tool but carries a matcher (${entry.matcher}) — say which it is`,
+        );
+      }
+      continue;
+    }
+    for (const entry of entries) {
+      for (const tool of EDITING_TOOLS) {
+        assert.ok(
+          !firesOn(entry.matcher, tool),
+          `${where}: ${event} registers a hook whose matcher (${entry.matcher}) fires on the editing tool ${tool}`,
+        );
+      }
+    }
+  }
+
+  // 2. And the entrypoint it routed to is gone, so a re-registration under some other
+  //    matcher cannot reach it either.
+  const allCommands = (Object.values(hooks.hooks) as any[][])
+    .flat()
+    .flatMap((entry: any) => (entry.hooks as any[]).map((h: any) => h.command as string));
+  for (const cmd of allCommands) {
+    assert.ok(
+      !cmd.includes('edit-context'),
+      `${where}: a hook still routes to the retired edit-context command: ${cmd}`,
+    );
+  }
+
+  // 3. The Grep|Glob entry on the same array is a DIFFERENT hook and must survive the
+  //    removal — it injects context at search time, not at edit time. Only the CC plugin
+  //    registers it; the other agents' manifests carry no PreToolUse array at all, and an
+  //    absent array is not a lost hook.
+  const pre = hooks.hooks.PreToolUse as any[] | undefined;
+  if (pre) {
+    assert.deepEqual(
+      pre.map((e) => e.matcher),
+      ['Grep|Glob'],
+      `${where}: PreToolUse carries exactly the grep-context entry — nothing added, nothing lost`,
+    );
+  }
+}
 
 test('the Stop hook runs the bundled bin, detaches, and matches the SessionEnd capture command', () => {
   const hooks = readJson(join(cliRoot, 'hooks', 'hooks.json'));
