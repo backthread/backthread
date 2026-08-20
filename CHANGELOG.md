@@ -24,7 +24,15 @@ the answer didn't come back. It failed on our side, and retrying is unlikely to 
 That distinction is not a guess on this end. The server has been sending it for a while —
 every relayed failure carries a `reason` saying which of the two it is — and the CLI simply
 never read it. Now it does, on **every** endpoint that sends one: `how` / the MCP `query`
-tool, `learn` (start and answer), `ask-me` (ask and answer), and session capture.
+tool, `learn` (start and answer), and `ask-me` (ask and answer).
+
+**`sync` and `capture` stop relaying slugs too.** Those talk to a different, older service
+that has no `reason` to send, so they were quietly printing things like
+`read-decisions rejected (403): not_a_member` and `ingest rejected (500): persist_failed`.
+Every code that service actually emits now maps to the action it implies — an expired
+credential says to run `backthread login`, a repo you cannot read says to ask its owner for
+an invite, a reached plan limit says where to raise it — and a code that is not on that list
+degrades to the plain HTTP status rather than to itself.
 
 **`--verbose` is new, and it is where the machine detail went.** The internal error code and
 the database's own SQLSTATE are operator fields, not something to put in front of somebody

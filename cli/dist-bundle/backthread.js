@@ -8110,6 +8110,21 @@ function describeFailure(input) {
   if (message) return `${lead}. ${message}${suffix}`;
   return `${lead}. The server rejected it (HTTP ${status}).${suffix}`;
 }
+var RE_AUTH = "this device is no longer authorized \u2014 run `backthread login` again.";
+var FUNCTIONS_SLUG_COPY = Object.freeze({
+  // read-decisions/authz.ts
+  repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
+  not_a_member: "you're not a member of the account that owns that repo \u2014 ask one of its owners to invite you.",
+  not_readable: "that repo is private and this account can't read it.",
+  // ingest-decisions
+  plan_limit: "your plan's decision limit is reached, so nothing was saved \u2014 open Billing in the web app to raise it.",
+  // the auth vocabulary, shared by every Function
+  "invalid token": RE_AUTH,
+  "token expired": RE_AUTH,
+  "invalid session": RE_AUTH,
+  "insufficient scope": RE_AUTH,
+  "missing authorization": RE_AUTH
+});
 var CLI_ENDPOINTS = Object.freeze({
   // --- worker origin, relayed-failure contract ---------------------------------------
   buildGroundedAskUrl: { renders: "failure-body", entryPoint: "queryDecisions" },
@@ -8128,14 +8143,17 @@ var CLI_ENDPOINTS = Object.freeze({
     why: "the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else's session."
   },
   // --- Supabase Functions origin -------------------------------------------------------
-  buildIngestDecisionsUrl: {
-    renders: "never-shown",
-    why: "the persist leg of a best-effort background capture. Its failure is summarised as a count by the capture path, never as a server sentence."
-  },
-  buildReadDecisionsUrl: {
-    renders: "never-shown",
-    why: "a local-cache warm-up that degrades to fewer hints. The read path never surfaces its failure \u2014 the grounded ask is the user-facing read."
-  },
+  // Same correction: `capture --manual` prints this detail under the summary, so
+  // `ingest rejected (502): persist_failed` was reaching a person. The detached
+  // SessionEnd hook does discard it — but "one of its two callers is silent" is not
+  // "never shown", and the loud one is the one somebody is watching.
+  buildIngestDecisionsUrl: { renders: "failure-body", entryPoint: "runCapture (persist leg)" },
+  // ⚠ CLASSIFIED `never-shown` IN THE FIRST DRAFT OF THIS REGISTRY, AND THAT WAS FALSE.
+  // `backthread sync` prints this outcome's detail, so a reader was getting
+  // `read-decisions rejected (403): not_a_member` — the very defect, on a route the
+  // registry claimed nobody ever saw. A registry whose justifications are unverified is
+  // the failure mode it was built to end, so the fix is the wiring, not the prose.
+  buildReadDecisionsUrl: { renders: "failure-body", entryPoint: "syncDecisions" },
   buildOnboardingStateUrl: {
     renders: "never-shown",
     why: 'onboarding state degrades to "unknown" and the flow continues; a server sentence here would interrupt a first run to report something the user cannot act on.'
@@ -10010,8 +10028,16 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
   }
   if (!res.ok) {
     const obj = payload && typeof payload === "object" ? payload : {};
-    const serverErr = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : "error" in obj ? String(obj.error) : `HTTP ${res.status}`;
-    return { status: "persist-failed", detail: `ingest rejected (${res.status}): ${serverErr}` };
+    return {
+      status: "persist-failed",
+      detail: describeFailure({
+        lead: "the decisions weren't saved",
+        status: res.status,
+        payload: obj,
+        env: ctx.env,
+        overrides: FUNCTIONS_SLUG_COPY
+      })
+    };
   }
   const rec = payload && typeof payload === "object" ? payload : {};
   const count = typeof rec.count === "number" ? rec.count : decisions.length;
@@ -35171,8 +35197,17 @@ async function syncDecisions(opts = {}, deps = {}) {
     }
     const rec = payload && typeof payload === "object" ? payload : {};
     if (!res.ok) {
-      const serverErr = typeof rec.message === "string" && rec.message.length > 0 ? rec.message : "error" in rec ? String(rec.error) : `HTTP ${res.status}`;
-      return { status: "read-failed", detail: `read-decisions rejected (${res.status}): ${serverErr}`, repo };
+      return {
+        status: "read-failed",
+        detail: describeFailure({
+          lead: "the decision log didn't sync",
+          status: res.status,
+          payload: rec,
+          env,
+          overrides: FUNCTIONS_SLUG_COPY
+        }),
+        repo
+      };
     }
     const flows = Array.isArray(rec.flows) ? rec.flows : [];
     const decisions = Array.isArray(rec.decisions) ? rec.decisions : [];

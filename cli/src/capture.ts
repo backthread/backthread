@@ -49,6 +49,7 @@ import { resolveRepo, resolveGitContext, type RemoteReader, type GitRunner } fro
 import { inferDecisions, type DerivedDecision, type RedactedTranscriptInput } from './infer.js';
 import { checkCaptureScope, type ScopeVerdict } from './captureScope.js';
 import { buildIngestDecisionsUrl } from './urls.js';
+import { describeFailure, FUNCTIONS_SLUG_COPY } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import { maybeNudge, maybeUnconnectedNudge, parseRepoStatus, parseNextStep } from './connectNudge.js';
 import { maybeShowTrustGate } from './firstRun.js';
@@ -542,17 +543,21 @@ async function persistDerived(
   }
 
   if (!res.ok) {
-    // A 426 means the server soft-blocked this `backthread` as too old for the API.
-    // The friendly "please update backthread …" copy is in `message`; prefer it over the
-    // machine `error` code so the hook surfaces the actionable upgrade instruction.
+    // `backthread capture --manual` prints this under the summary, so it is product copy
+    // whatever the detached hook does with it. A 426 soft-block still renders its
+    // worker-authored "please update backthread …" message verbatim — that branch is
+    // inside `describeFailure`, not a special case here.
     const obj = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
-    const serverErr =
-      typeof obj.message === 'string' && obj.message.length > 0
-        ? obj.message
-        : 'error' in obj
-          ? String(obj.error)
-          : `HTTP ${res.status}`;
-    return { status: 'persist-failed', detail: `ingest rejected (${res.status}): ${serverErr}` };
+    return {
+      status: 'persist-failed',
+      detail: describeFailure({
+        lead: "the decisions weren't saved",
+        status: res.status,
+        payload: obj,
+        env: ctx.env,
+        overrides: FUNCTIONS_SLUG_COPY,
+      }),
+    };
   }
 
   const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;

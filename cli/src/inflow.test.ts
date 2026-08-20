@@ -206,6 +206,20 @@ test('an expired ask is reported as the design working, never as a fault', async
   assert.doesNotMatch(outcome.detail, /fail|wrong|missed/i);
 });
 
+test('a BARE 410 — no body at all — still gets the reassurance, not a status line', async () => {
+  // The status check in expiryAwareDetail exists for exactly this shape, and without this
+  // case deleting it is invisible: every other 410 test sends `{error:'ask_expired'}`,
+  // which the override table catches on its own.
+  const { fetchImpl } = stubFetch(410, {});
+  const outcome = await answerAsk(
+    { token: TOKEN, answer: 'because' },
+    { env: {} as NodeJS.ProcessEnv, fetchImpl, readConfigImpl: SIGNED_IN },
+  );
+  assert.equal(outcome.status, 'failed');
+  assert.match(outcome.detail, /nothing is owed and nothing is missing/);
+  assert.doesNotMatch(outcome.detail, /HTTP 410/);
+});
+
 test('material that moved is reported honestly, and not against the person', async () => {
   const { fetchImpl } = stubFetch(409, { error: 'ask_material_moved' });
   const outcome = await answerAsk({ token: TOKEN, answer: 'x' }, {

@@ -1,5 +1,10 @@
 // failureCopy.ts — the ONE place a server failure becomes a sentence a person reads.
 //
+// "One place" is a claim the registry at the bottom of this file is answerable for, and
+// `failureCopy.test.ts` drives every endpoint it classifies as rendered through a real
+// rejection. Two entries were classified `never-shown` in the first draft on the strength
+// of a plausible-sounding reason, and both were wrong — see the notes on them.
+//
 // THE CONTRACT THIS EXISTS TO CONSUME. The worker's relayed-failure body carries
 // machine codes and nothing else:
 //
@@ -175,6 +180,40 @@ export function describeFailure(input: FailureCopyInput): string {
   return `${lead}. The server rejected it (HTTP ${status}).${suffix}`;
 }
 
+/**
+ * The Supabase-Functions endpoints answer with a DIFFERENT and OLDER vocabulary than the
+ * worker: no `reason`, and an `error` that is sometimes a machine slug (`not_a_member`,
+ * `plan_limit`) and sometimes plain English (`token expired`). Relaying either verbatim is
+ * what the CLI used to do on `sync` and `capture --manual`, and a slug is a slug wherever
+ * it comes from.
+ *
+ * These are the strings those two functions actually emit, enumerated from their source,
+ * each mapped to the ACTION it implies. It is deliberately a small closed table rather than
+ * a pattern: a slug that is not on it degrades to the honest "the server rejected it",
+ * never to itself.
+ *
+ * `client_too_old` is absent ON PURPOSE — it ships a server-authored `message` carrying the
+ * exact upgrade instruction, and the message branch renders that verbatim.
+ */
+const RE_AUTH = 'this device is no longer authorized — run `backthread login` again.';
+
+export const FUNCTIONS_SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
+  // read-decisions/authz.ts
+  repo_not_found: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
+  not_a_member:
+    "you're not a member of the account that owns that repo — ask one of its owners to invite you.",
+  not_readable: "that repo is private and this account can't read it.",
+  // ingest-decisions
+  plan_limit:
+    "your plan's decision limit is reached, so nothing was saved — open Billing in the web app to raise it.",
+  // the auth vocabulary, shared by every Function
+  'invalid token': RE_AUTH,
+  'token expired': RE_AUTH,
+  'invalid session': RE_AUTH,
+  'insufficient scope': RE_AUTH,
+  'missing authorization': RE_AUTH,
+});
+
 // --- the endpoint registry -------------------------------------------------------------
 //
 // Every endpoint this package sends a request to, and what happens to a failure from it.
@@ -223,14 +262,17 @@ export const CLI_ENDPOINTS: Readonly<Record<string, EndpointDisposition>> = Obje
   },
 
   // --- Supabase Functions origin -------------------------------------------------------
-  buildIngestDecisionsUrl: {
-    renders: 'never-shown',
-    why: 'the persist leg of a best-effort background capture. Its failure is summarised as a count by the capture path, never as a server sentence.',
-  },
-  buildReadDecisionsUrl: {
-    renders: 'never-shown',
-    why: 'a local-cache warm-up that degrades to fewer hints. The read path never surfaces its failure — the grounded ask is the user-facing read.',
-  },
+  // Same correction: `capture --manual` prints this detail under the summary, so
+  // `ingest rejected (502): persist_failed` was reaching a person. The detached
+  // SessionEnd hook does discard it — but "one of its two callers is silent" is not
+  // "never shown", and the loud one is the one somebody is watching.
+  buildIngestDecisionsUrl: { renders: 'failure-body', entryPoint: 'runCapture (persist leg)' },
+  // ⚠ CLASSIFIED `never-shown` IN THE FIRST DRAFT OF THIS REGISTRY, AND THAT WAS FALSE.
+  // `backthread sync` prints this outcome's detail, so a reader was getting
+  // `read-decisions rejected (403): not_a_member` — the very defect, on a route the
+  // registry claimed nobody ever saw. A registry whose justifications are unverified is
+  // the failure mode it was built to end, so the fix is the wiring, not the prose.
+  buildReadDecisionsUrl: { renders: 'failure-body', entryPoint: 'syncDecisions' },
   buildOnboardingStateUrl: {
     renders: 'never-shown',
     why: 'onboarding state degrades to "unknown" and the flow continues; a server sentence here would interrupt a first run to report something the user cannot act on.',

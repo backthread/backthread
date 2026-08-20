@@ -23,6 +23,7 @@
 import { readConfig as defaultReadConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildReadDecisionsUrl } from './urls.js';
+import { describeFailure, FUNCTIONS_SLUG_COPY } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import {
   resolveRepoRoot as defaultResolveRepoRoot,
@@ -267,13 +268,20 @@ export async function syncDecisions(
     }
     const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
     if (!res.ok) {
-      const serverErr =
-        typeof rec.message === 'string' && rec.message.length > 0
-          ? rec.message
-          : 'error' in rec
-            ? String(rec.error)
-            : `HTTP ${res.status}`;
-      return { status: 'read-failed', detail: `read-decisions rejected (${res.status}): ${serverErr}`, repo };
+      // `backthread sync` PRINTS this, so it gets the same treatment as every other
+      // rejection: a sentence, and the machine detail only behind `--verbose`. It used to
+      // relay the Function's own `error` field, which reads `not_a_member` / `repo_not_found`.
+      return {
+        status: 'read-failed',
+        detail: describeFailure({
+          lead: "the decision log didn't sync",
+          status: res.status,
+          payload: rec,
+          env,
+          overrides: FUNCTIONS_SLUG_COPY,
+        }),
+        repo,
+      };
     }
 
     const flows = (Array.isArray(rec.flows) ? rec.flows : []) as ReadFlow[];

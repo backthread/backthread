@@ -177,8 +177,8 @@ backthread help                Show the full usage (also --help, -h)
 
 Off by default, because those name *our* call sites and there is nothing you can do with them.
 What you get by default is a sentence that answers the only question a failure raises — whether
-trying again is worth it. `BACKTHREAD_VERBOSE=1` is the same switch, and the MCP tools read it too
-(they have no command line to pass a flag on).
+trying again is worth it, and if not, what to do instead. `BACKTHREAD_VERBOSE=1` is the same
+switch, and the MCP tools read it too (they have no command line to pass a flag on).
 
 ## Requirements
 

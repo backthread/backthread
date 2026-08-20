@@ -486,7 +486,21 @@ test('ingest persist failure → persist-failed (swallowed)', async () => {
   });
   const out = await runCapture(HOOK, deps({ fetchImpl }));
   assert.equal(out.status, 'persist-failed');
-  assert.match(out.detail, /500/);
+  // `capture --manual` PRINTS this detail, so it is product copy: the reader learns their
+  // decisions were not saved, and does not read `persist_failed`.
+  assert.match(out.detail, /the decisions weren't saved/);
+  assert.match(out.detail, /HTTP 500/);
+  assert.doesNotMatch(out.detail, /persist_failed/);
+});
+
+test('a plan-limit rejection tells the reader what to do about it', async () => {
+  const { fetch: fetchImpl } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }] } }),
+    ingest: () => ({ status: 402, body: { error: 'plan_limit' } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.match(out.detail, /decision limit is reached/);
+  assert.doesNotMatch(out.detail, /plan_limit/);
 });
 
 test('empty inference result → nothing-to-capture (no ingest POST)', async () => {

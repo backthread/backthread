@@ -25,12 +25,15 @@ import {
   verboseEnabled,
   readServerMessage,
   CLI_ENDPOINTS,
+  FUNCTIONS_SLUG_COPY,
   type EndpointDisposition,
 } from './failureCopy.js';
 import { queryDecisions } from './query.js';
 import { startLesson, answerLesson } from './lesson.js';
 import { requestAsk, answerAsk } from './inflow.js';
 import { serverInfer } from './infer.js';
+import { syncDecisions } from './localDecisions.js';
+import { runCapture } from './capture.js';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -262,6 +265,65 @@ const DRIVERS: Readonly<Record<string, Driver>> = {
         { env, fetchImpl: stubFetch(status, body) },
       )
     ).error ?? '',
+  buildReadDecisionsUrl: async (status, body, env) =>
+    (
+      await syncDecisions(
+        { cwd: '/repo', force: true },
+        {
+          env,
+          fetchImpl: stubFetch(status, body),
+          readConfigImpl: async () => CONFIG,
+          resolveRepoRootImpl: () => '/repo',
+          readCacheImpl: async () => null,
+          writeCacheSectionImpl: async () => ({}) as never,
+        },
+      )
+    ).detail,
+  // The persist leg of a capture. Only ingest-decisions is stubbed to fail — the infer
+  // hop before it must succeed, or the run never reaches the leg under test.
+  buildIngestDecisionsUrl: async (status, body, env) =>
+    (
+      await runCapture(
+        { transcript_path: '/tmp/s.jsonl', cwd: '/repo', session_id: 's' },
+        {
+          env,
+          readConfigImpl: async () => CONFIG as never,
+          readFileImpl: async () =>
+            JSON.stringify({
+              type: 'user',
+              message: { role: 'user', content: 'why is the charge keyed on the order id?' },
+            }) +
+            '\n' +
+            JSON.stringify({
+              type: 'assistant',
+              message: { role: 'assistant', content: 'Because retries must not double-charge.' },
+            }),
+          readRemoteImpl: () => 'git@github.com:acme/widgets.git',
+          readGitImpl: () => null,
+          ensureAuthImpl: () => {},
+          checkScopeImpl: async () => ({ send: true, reason: 'connected' }),
+          showTrustGateImpl: async () => false,
+          firstCaptureConfirmImpl: async () => false,
+          log: () => {},
+          fetchImpl: (async (input: unknown) => {
+            const url = String(input);
+            const reply =
+              url.includes('/ingest-decisions')
+                ? { status, body }
+                : {
+                    status: 200,
+                    body: { ok: true, persisted: false, decisions: [{ title: 'Key the charge on the order id' }] },
+                  };
+            return {
+              ok: reply.status >= 200 && reply.status < 300,
+              status: reply.status,
+              headers: { get: () => null },
+              json: async () => reply.body,
+            } as unknown as Response;
+          }) as unknown as typeof fetch,
+        },
+      )
+    ).detail,
 };
 
 function failureBodyEndpoints(): string[] {
@@ -379,8 +441,12 @@ test('endpoint construction is centralised, so nothing can dodge the registry', 
     const src = readFileSync(file, 'utf8');
     // An ORIGIN alone is fine — `doctor` probes the bare host for connectivity. What is
     // forbidden is an origin joined to a PATH, which is an endpoint by another name.
-    const inNewUrl = /new URL\((?:[^()]|\([^()]*\))*\b(?:workerBaseUrl|functionsBaseUrl)\s*\(/;
-    const inTemplate = /\$\{\s*(?:workerBaseUrl|functionsBaseUrl)\s*\(/;
+    const ORIGIN = '(?:workerBaseUrl|functionsBaseUrl)\\s*\\(|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL';
+    // The CONSTANTS are in there as well as the functions: reaching past the helper to
+    // `new URL('/x', DEFAULT_WORKER_URL)` builds the same endpoint and would have slipped
+    // through a check that only knew about the helper.
+    const inNewUrl = new RegExp(`new URL\\((?:[^()]|\\([^()]*\\))*(?:${ORIGIN})`);
+    const inTemplate = new RegExp(`\\$\\{\\s*(?:${ORIGIN})`);
     if (inNewUrl.test(src) || inTemplate.test(src)) offenders.push(base);
   }
   assert.deepEqual(offenders, [], 'these files build an endpoint URL outside urls.ts/claim.ts');
@@ -396,4 +462,56 @@ test('no module keeps a private copy of the helper this file replaced', () => {
     if (/function serverMessage\s*\(/.test(readFileSync(file, 'utf8'))) offenders.push(base);
   }
   assert.deepEqual(offenders, []);
+});
+
+// --- the Functions vocabulary ---------------------------------------------------------
+
+test('a Functions slug maps to the ACTION it implies, not to itself', () => {
+  const out = describeFailure({
+    lead: "the decision log didn't sync",
+    status: 403,
+    payload: { error: 'not_a_member' },
+    env: PLAIN_ENV,
+    overrides: FUNCTIONS_SLUG_COPY,
+  });
+  assert.match(out, /not a member of the account that owns that repo/);
+  assert.doesNotMatch(out, /not_a_member/);
+});
+
+test('the Functions table covers every slug those two endpoints emit', () => {
+  // Enumerated from supabase/functions/read-decisions + ingest-decisions. `client_too_old`
+  // is absent on purpose — it carries a server-authored `message` that says more than any
+  // sentence here could, and the message branch renders it verbatim.
+  for (const slug of [
+    'repo_not_found',
+    'not_a_member',
+    'not_readable',
+    'plan_limit',
+    'invalid token',
+    'token expired',
+    'invalid session',
+    'insufficient scope',
+    'missing authorization',
+  ]) {
+    assert.ok(FUNCTIONS_SLUG_COPY[slug], `${slug} has no sentence`);
+    assert.doesNotMatch(FUNCTIONS_SLUG_COPY[slug], new RegExp(slug), `${slug} maps to itself`);
+  }
+});
+
+test('an expired credential says what to DO, not what the server called it', () => {
+  for (const slug of ['token expired', 'invalid token', 'insufficient scope']) {
+    assert.match(FUNCTIONS_SLUG_COPY[slug], /backthread login/);
+  }
+});
+
+test('a Functions slug that is not on the table degrades, it does not leak', () => {
+  const out = describeFailure({
+    lead: 'x',
+    status: 500,
+    payload: { error: 'some_new_function_slug' },
+    env: PLAIN_ENV,
+    overrides: FUNCTIONS_SLUG_COPY,
+  });
+  assert.doesNotMatch(out, /some_new_function_slug/);
+  assert.match(out, /HTTP 500/);
 });
