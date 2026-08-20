@@ -18,6 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildGroundedAskUrl, buildRepoDeepLink } from './urls.js';
+import { describeFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // The general-purpose question used when the caller invokes the tool without one.
@@ -326,17 +327,20 @@ export async function queryDecisions(
     const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
 
     if (!res.ok) {
-      // A 426 means the server soft-blocked this `backthread` as too old. Prefer the
-      // friendly `message` over the machine error code.
-      const serverErr =
-        typeof rec.message === 'string' && rec.message.length > 0
-          ? rec.message
-          : 'error' in rec
-            ? String(rec.error)
-            : `HTTP ${res.status}`;
+      // ONE renderer, shared with every other route that speaks this contract — see
+      // failureCopy.ts. This used to read `message ?? String(rec.error)` and print
+      // `grounded-ask rejected (502): retrieval_failed`, which told the reader nothing
+      // about the only question they have: is trying again worth it? The server answers
+      // that in `reason`; the sentence below is that answer. The slug and the SQLSTATE
+      // are still available — behind `--verbose`, where an operator can ask for them.
       return {
         status: 'read-failed',
-        detail: `grounded-ask rejected (${res.status}): ${serverErr}`,
+        detail: describeFailure({
+          lead: "the answer didn't come back",
+          status: res.status,
+          payload: rec,
+          env,
+        }),
         repo,
         deepLink,
       };

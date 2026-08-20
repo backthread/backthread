@@ -1,0 +1,251 @@
+// failureCopy.ts — the ONE place a server failure becomes a sentence a person reads.
+//
+// THE CONTRACT THIS EXISTS TO CONSUME. The worker's relayed-failure body carries
+// machine codes and nothing else:
+//
+//     { error: '<machine_slug>', reason: 'overloaded' | 'unavailable', code?: '<SQLSTATE>' }
+//
+// There is deliberately NO `message` key on such a body — the server strips it — because
+// the client is the only layer that knows what the person was doing when it failed, so the
+// client owns every user-facing sentence. `reason` is the whole point: `overloaded` means
+// the database was busy and the same request will probably work in a moment; `unavailable`
+// means we do not know that, so promising a retry would be a lie.
+//
+// ⚠ WHAT WENT WRONG, AND WHY THIS IS A MODULE RATHER THAN A HABIT. The server half of that
+// contract shipped across five routes. The client half did not, so the wire got strictly
+// more actionable while the terminal still printed `grounded-ask rejected (502):
+// retrieval_failed` — a raw internal slug, from which a person can conclude nothing at all.
+// The reason it stayed broken across five routes is that each caller had its own private
+// copy of the same six-line `serverMessage()` helper (`message ?? String(error)`). Fixing
+// the one that was reported would have fixed one route and left four, which is exactly how
+// a defect recurs one endpoint at a time. There is now one renderer and one registry, and
+// failureCopy.test.ts fails when a new endpoint appears without a disposition.
+//
+// WHAT IS AND IS NOT PRODUCT COPY. `error` and `code` are OPERATOR fields. A SQLSTATE is
+// obviously one; a slug like `lesson_persist_failed` is no less one — it names an internal
+// call site, tells a user nothing they can act on, and is the literal defect in this
+// module's history. Both are therefore hidden by default and printed only when someone
+// asks for them with `--verbose` / `BACKTHREAD_VERBOSE=1`, which is the difference between
+// a user and an operator: the operator asked.
+
+/**
+ * The two verdicts the server is willing to give. Mirrors the worker's `FailureReason`
+ * structurally (the cli never imports from the worker bundle) — two values, because two
+ * values is what changes the sentence: one of them can honestly promise that a retry helps.
+ */
+export type FailureReason = 'overloaded' | 'unavailable';
+
+const REASONS: readonly FailureReason[] = ['overloaded', 'unavailable'];
+
+/**
+ * The retry verdict, in plain words. This is the half of the sentence that actually
+ * changes what somebody does next, which is why it lives in exactly one place: two copies
+ * would be free to disagree about whether trying again is worth it.
+ */
+const REASON_CLAUSE: Readonly<Record<FailureReason, string>> = Object.freeze({
+  overloaded: 'The database was busy — try again in a moment.',
+  unavailable: 'It failed on our side, and retrying is unlikely to help.',
+});
+
+export interface FailureCopyInput {
+  /**
+   * What did not happen, from the reader's point of view — "the answer didn't come back",
+   * "your answer wasn't recorded". The caller writes it because only the caller knows what
+   * the person was doing; this module supplies the verdict that follows it, as a SECOND
+   * SENTENCE. Two sentences rather than one dashed clause because the presenter above this
+   * already prefixes `query: read-failed — `, and a line carrying three em-dashes stops
+   * being a sentence and starts being a log entry.
+   */
+  lead: string;
+  /** The HTTP status. Shown only under verbose (a number is an operator field too). */
+  status: number;
+  /** The parsed response body. Any shape — this module never trusts it. */
+  payload: Record<string, unknown>;
+  /** Where `BACKTHREAD_VERBOSE` is read from. Defaults to the real environment. */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Sentences for specific slugs whose right ADVICE differs from their `reason` — an
+   * expired in-flow ask is the design working, not an outage, and saying "the database was
+   * busy" about it would be false. Deliberately per-call-site rather than a global table:
+   * a slug means something only in the route that emits it.
+   */
+  overrides?: Readonly<Record<string, string>>;
+}
+
+/** Read the `reason` field, or null when the body does not carry the failure contract. */
+export function readFailureReason(payload: Record<string, unknown>): FailureReason | null {
+  const raw = payload.reason;
+  return typeof raw === 'string' && REASONS.includes(raw as FailureReason)
+    ? (raw as FailureReason)
+    : null;
+}
+
+/** Read the machine slug (`error`), or null. An OPERATOR field — never rendered by default. */
+export function readFailureSlug(payload: Record<string, unknown>): string | null {
+  const raw = payload.error;
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+}
+
+/** Read the SQLSTATE (`code`), or null. An OPERATOR field — never rendered by default. */
+export function readFailureCode(payload: Record<string, unknown>): string | null {
+  const raw = payload.code;
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+}
+
+/**
+ * Read a SERVER-AUTHORED sentence (`message`), or null.
+ *
+ * ⚠ This is NOT the relayed-diagnostic field, and the distinction is the whole point of the
+ * contract above: a relayed failure body has no `message` at all — the worker's output allow-list
+ * drops it precisely so a Postgres string can never be refilled into one. What survives in
+ * `message` is worker-authored copy about the caller's own request: the 426 "please update
+ * backthread…" soft-block, the 409 "a lesson is already being prepared". Those are already
+ * complete, correct sentences and are rendered verbatim.
+ *
+ * It exists as its own reader so a caller that wants ONLY that can ask for only that. The
+ * helper it replaced was `message ?? String(error)`, which quietly degraded to printing the
+ * machine slug the moment `message` was absent — and absent is the normal case.
+ */
+export function readServerMessage(payload: Record<string, unknown>): string | null {
+  const raw = payload.message;
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+}
+
+/**
+ * Is the operator detail turned on?
+ *
+ * An ENV VAR is the seam rather than a parsed argv flag because the surface that hit this
+ * defect first — the MCP `query` tool — has no argv at all: it is called by the host agent,
+ * not typed. `bin/backthread.ts` translates a `--verbose` anywhere in the command line into
+ * this variable, so the flag and the variable are the same switch and cannot drift.
+ */
+export function verboseEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.BACKTHREAD_VERBOSE ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+/**
+ * The operator suffix: `[status=502 error=retrieval_failed reason=overloaded code=57014]`.
+ * Only fields actually present are named, so an absent SQLSTATE reads as absent rather than
+ * as `code=null`.
+ */
+function operatorSuffix(status: number, payload: Record<string, unknown>): string {
+  const parts = [`status=${status}`];
+  const slug = readFailureSlug(payload);
+  if (slug) parts.push(`error=${slug}`);
+  const reason = readFailureReason(payload);
+  if (reason) parts.push(`reason=${reason}`);
+  const code = readFailureCode(payload);
+  if (code) parts.push(`code=${code}`);
+  return ` [${parts.join(' ')}]`;
+}
+
+/**
+ * Turn a rejected response into the sentence a person reads.
+ *
+ * Order of preference, and each step is load-bearing:
+ *   1. a per-slug override — the advice genuinely differs from the retry verdict;
+ *   2. `reason` — the contract; this is the case the whole ticket is about;
+ *   3. a server-authored `message` — NOT a relayed diagnostic. A relayed failure body has
+ *      no `message` at all (the worker's allow-list drops it), so the only bodies that
+ *      reach here with one are worker-AUTHORED copy about the caller's own request, and the
+ *      clearest example is the 426 "please update backthread…" soft-block. Rendering that
+ *      verbatim is correct; replacing it with a generic sentence would lose the upgrade
+ *      instruction;
+ *   4. nothing recognisable — say the server rejected it and stop. No slug, no guessing.
+ *
+ * NEVER THROWS and never returns an empty string: this runs on the failure path, where a
+ * second failure has nowhere to go.
+ */
+export function describeFailure(input: FailureCopyInput): string {
+  const { lead, status, payload, overrides } = input;
+  const verbose = verboseEnabled(input.env ?? process.env);
+  const suffix = verbose ? operatorSuffix(status, payload) : '';
+
+  const slug = readFailureSlug(payload);
+  const override = slug && overrides ? overrides[slug] : undefined;
+  if (override) return `${override}${suffix}`;
+
+  const reason = readFailureReason(payload);
+  if (reason) return `${lead}. ${REASON_CLAUSE[reason]}${suffix}`;
+
+  const message = readServerMessage(payload);
+  if (message) return `${lead}. ${message}${suffix}`;
+
+  return `${lead}. The server rejected it (HTTP ${status}).${suffix}`;
+}
+
+// --- the endpoint registry -------------------------------------------------------------
+//
+// Every endpoint this package sends a request to, and what happens to a failure from it.
+//
+// THIS IS THE THING THAT STOPS THE DEFECT RECURRING, and it is a registry rather than a
+// note in a review checklist because a convention is only as durable as the next author's
+// memory. failureCopy.test.ts derives the set of `build*Url` builders from the source of
+// this package and fails when one is missing from this table — so adding an endpoint is
+// red until somebody says, in writing, what a person sees when it fails. The same test
+// then DRIVES every `failure-body` entry through a stubbed rejection and asserts the
+// sentence is a sentence: it carries the retry verdict and carries neither the slug nor
+// the SQLSTATE, unless verbose is on.
+//
+// Keyed by builder name rather than by URL path because the builder is what exists in this
+// repository; the path is the server's to name, and this package cannot see the server.
+
+export type EndpointDisposition =
+  /** Failures are rendered through `describeFailure`. `entryPoint` names the function the
+   *  conformance battery drives; there must be a driver for it in failureCopy.test.ts. */
+  | { readonly renders: 'failure-body'; readonly entryPoint: string }
+  /** The endpoint predates this contract and maps its own slugs to richer, more actionable
+   *  sentences than a retry verdict would be. `why` says why replacing it would be a loss. */
+  | { readonly renders: 'own-slug-map'; readonly why: string }
+  /** A failure here is never shown to anybody — it is swallowed, fail-open, or logged. */
+  | { readonly renders: 'never-shown'; readonly why: string }
+  /** Not a fetch target at all: a link handed to a browser or printed for the reader. */
+  | { readonly renders: 'not-a-fetch-target'; readonly why: string };
+
+export const CLI_ENDPOINTS: Readonly<Record<string, EndpointDisposition>> = Object.freeze({
+  // --- worker origin, relayed-failure contract ---------------------------------------
+  buildGroundedAskUrl: { renders: 'failure-body', entryPoint: 'queryDecisions' },
+  buildLessonStartUrl: { renders: 'failure-body', entryPoint: 'startLesson' },
+  buildLessonAnswerUrl: { renders: 'failure-body', entryPoint: 'answerLesson' },
+  buildInflowAskUrl: { renders: 'failure-body', entryPoint: 'requestAsk' },
+  buildInflowAnswerUrl: { renders: 'failure-body', entryPoint: 'answerAsk' },
+  // Not a `failureBody` route on the server TODAY — but it is a worker route whose failure
+  // is read by a human in the capture summary, and it carried a byte-identical copy of the
+  // `message ?? String(error)` helper. Wiring it now costs nothing and means the route can
+  // start returning the contract without a second round of this ticket.
+  buildInferDecisionsUrl: { renders: 'failure-body', entryPoint: 'serverInfer' },
+
+  // --- worker origin, nothing shown ---------------------------------------------------
+  buildCaptureScopeUrl: {
+    renders: 'never-shown',
+    why: 'the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else\'s session.',
+  },
+
+  // --- Supabase Functions origin -------------------------------------------------------
+  buildIngestDecisionsUrl: {
+    renders: 'never-shown',
+    why: 'the persist leg of a best-effort background capture. Its failure is summarised as a count by the capture path, never as a server sentence.',
+  },
+  buildReadDecisionsUrl: {
+    renders: 'never-shown',
+    why: 'a local-cache warm-up that degrades to fewer hints. The read path never surfaces its failure — the grounded ask is the user-facing read.',
+  },
+  buildOnboardingStateUrl: {
+    renders: 'never-shown',
+    why: 'onboarding state degrades to "unknown" and the flow continues; a server sentence here would interrupt a first run to report something the user cannot act on.',
+  },
+  buildCliAuthPollUrl: {
+    renders: 'own-slug-map',
+    why: 'the login poll owns a state machine (pending / expired / claimed), not a failure taxonomy — each state is its own instruction to the person waiting at the terminal.',
+  },
+  buildExchangeClaimUrl: {
+    renders: 'own-slug-map',
+    why: 'the claim exchange already maps invalid_code / code_expired / code_used to specific recovery instructions naming where to get a fresh code. A generic retry verdict would be strictly less actionable, and this endpoint carries no `reason` field to key one off.',
+  },
+
+  // --- links, not requests --------------------------------------------------------------
+  buildCliAuthUrl: { renders: 'not-a-fetch-target', why: 'opened in the browser during login.' },
+  buildBillingUrl: { renders: 'not-a-fetch-target', why: 'printed in the upgrade nudge.' },
+  buildRepoDeepLink: { renders: 'not-a-fetch-target', why: 'printed alongside an answer.' },
+});

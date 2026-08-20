@@ -5,6 +5,40 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.21.0
+
+**A failure now tells you whether to try again.** When something the CLI asks for gets
+rejected, you used to read `grounded-ask rejected (502): retrieval_failed` — an internal
+slug, naming one of our call sites, from which nobody could conclude anything. You now read:
+
+```
+the answer didn't come back. The database was busy — try again in a moment.
+```
+
+or, when the server is not merely busy:
+
+```
+the answer didn't come back. It failed on our side, and retrying is unlikely to help.
+```
+
+That distinction is not a guess on this end. The server has been sending it for a while —
+every relayed failure carries a `reason` saying which of the two it is — and the CLI simply
+never read it. Now it does, on **every** endpoint that sends one: `how` / the MCP `query`
+tool, `learn` (start and answer), `ask-me` (ask and answer), and session capture.
+
+**`--verbose` is new, and it is where the machine detail went.** The internal error code and
+the database's own SQLSTATE are operator fields, not something to put in front of somebody
+who just wanted an answer. Pass `--verbose` (or set `BACKTHREAD_VERBOSE=1`, which the MCP
+tools read too, having no command line of their own) and the line gains
+`[status=502 error=retrieval_failed reason=overloaded code=57014]` on the end. Nothing is
+removed by asking — verbose adds.
+
+Under the hood: three modules each carried their own copy of the same six-line helper that
+produced the old string, which is why fixing the reported one would have left four. There is
+one renderer now, plus a registry of every endpoint this package can reach and what a person
+sees when it fails — and a test that goes red when an endpoint joins the package without an
+answer to that question.
+
 ## 0.20.0
 
 **Nothing fires before you edit any more.** The pre-edit hook that shipped in `0.17.0` —

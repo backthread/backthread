@@ -168,6 +168,18 @@ backthread sync                Sync this repo's merged decision "why" into the l
 backthread help                Show the full usage (also --help, -h)
 ```
 
+### Global flags
+
+```
+--verbose                      When something fails, also print the operator detail: the HTTP
+                               status, our internal error code, and the database's own SQLSTATE.
+```
+
+Off by default, because those name *our* call sites and there is nothing you can do with them.
+What you get by default is a sentence that answers the only question a failure raises — whether
+trying again is worth it. `BACKTHREAD_VERBOSE=1` is the same switch, and the MCP tools read it too
+(they have no command line to pass a flag on).
+
 ## Requirements
 
 - **Node.js ≥ 22.18**

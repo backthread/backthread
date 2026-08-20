@@ -470,10 +470,13 @@ test('derived decisions but no resolvable repo → nothing-to-capture (nothing t
 });
 
 test('inference failure → infer-failed (swallowed)', async () => {
-  const { fetch: fetchImpl } = stubFetch({ infer: () => ({ status: 401, body: { error: 'token revoked' } }) });
+  const { fetch: fetchImpl } = stubFetch({ infer: () => ({ status: 401, body: { error: 'token_revoked' } }) });
   const out = await runCapture(HOOK, deps({ fetchImpl }));
   assert.equal(out.status, 'infer-failed');
-  assert.match(out.detail, /token revoked/);
+  // The detail a person reads is a sentence about what did not happen — never the
+  // internal slug, which is an operator field behind `--verbose`.
+  assert.match(out.detail, /this session wasn't written up/);
+  assert.doesNotMatch(out.detail, /token_revoked/);
 });
 
 test('ingest persist failure → persist-failed (swallowed)', async () => {

@@ -185,11 +185,14 @@ test('queryDecisions: no resolvable repo → no-repo, NO fetch', async () => {
 });
 
 test('queryDecisions: server rejection surfaces read-failed with detail + deep-link', async () => {
-  const { fetch } = stubFetch({ status: 403, body: { error: 'not authorized to read this repo' } });
+  const { fetch } = stubFetch({ status: 403, body: { error: 'repo_gate_failed' } });
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /403/);
-  assert.match(out.detail, /not authorized/);
+  // A body with no `reason` and no server-authored `message` says the status and stops.
+  // The machine slug is NOT product copy: it names one of our call sites and there is
+  // nothing a reader can do with it.
+  assert.match(out.detail, /The server rejected it \(HTTP 403\)/);
+  assert.doesNotMatch(out.detail, /repo_gate_failed/);
   // deep-link is still returned (repo was resolvable) so the agent can offer it.
   assert.equal(out.deepLink, 'https://app.backthread.dev/acme/app');
 });

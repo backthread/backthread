@@ -8061,6 +8061,99 @@ function resolveGitContext(cwd, run = defaultGitRunner) {
   };
 }
 
+// src/failureCopy.ts
+var REASONS = ["overloaded", "unavailable"];
+var REASON_CLAUSE = Object.freeze({
+  overloaded: "The database was busy \u2014 try again in a moment.",
+  unavailable: "It failed on our side, and retrying is unlikely to help."
+});
+function readFailureReason(payload) {
+  const raw = payload.reason;
+  return typeof raw === "string" && REASONS.includes(raw) ? raw : null;
+}
+function readFailureSlug(payload) {
+  const raw = payload.error;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function readFailureCode(payload) {
+  const raw = payload.code;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function readServerMessage(payload) {
+  const raw = payload.message;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function verboseEnabled(env = process.env) {
+  const raw = (env.BACKTHREAD_VERBOSE ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+function operatorSuffix(status, payload) {
+  const parts = [`status=${status}`];
+  const slug = readFailureSlug(payload);
+  if (slug) parts.push(`error=${slug}`);
+  const reason = readFailureReason(payload);
+  if (reason) parts.push(`reason=${reason}`);
+  const code = readFailureCode(payload);
+  if (code) parts.push(`code=${code}`);
+  return ` [${parts.join(" ")}]`;
+}
+function describeFailure(input) {
+  const { lead, status, payload, overrides } = input;
+  const verbose = verboseEnabled(input.env ?? process.env);
+  const suffix = verbose ? operatorSuffix(status, payload) : "";
+  const slug = readFailureSlug(payload);
+  const override = slug && overrides ? overrides[slug] : void 0;
+  if (override) return `${override}${suffix}`;
+  const reason = readFailureReason(payload);
+  if (reason) return `${lead}. ${REASON_CLAUSE[reason]}${suffix}`;
+  const message = readServerMessage(payload);
+  if (message) return `${lead}. ${message}${suffix}`;
+  return `${lead}. The server rejected it (HTTP ${status}).${suffix}`;
+}
+var CLI_ENDPOINTS = Object.freeze({
+  // --- worker origin, relayed-failure contract ---------------------------------------
+  buildGroundedAskUrl: { renders: "failure-body", entryPoint: "queryDecisions" },
+  buildLessonStartUrl: { renders: "failure-body", entryPoint: "startLesson" },
+  buildLessonAnswerUrl: { renders: "failure-body", entryPoint: "answerLesson" },
+  buildInflowAskUrl: { renders: "failure-body", entryPoint: "requestAsk" },
+  buildInflowAnswerUrl: { renders: "failure-body", entryPoint: "answerAsk" },
+  // Not a `failureBody` route on the server TODAY — but it is a worker route whose failure
+  // is read by a human in the capture summary, and it carried a byte-identical copy of the
+  // `message ?? String(error)` helper. Wiring it now costs nothing and means the route can
+  // start returning the contract without a second round of this ticket.
+  buildInferDecisionsUrl: { renders: "failure-body", entryPoint: "serverInfer" },
+  // --- worker origin, nothing shown ---------------------------------------------------
+  buildCaptureScopeUrl: {
+    renders: "never-shown",
+    why: "the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else's session."
+  },
+  // --- Supabase Functions origin -------------------------------------------------------
+  buildIngestDecisionsUrl: {
+    renders: "never-shown",
+    why: "the persist leg of a best-effort background capture. Its failure is summarised as a count by the capture path, never as a server sentence."
+  },
+  buildReadDecisionsUrl: {
+    renders: "never-shown",
+    why: "a local-cache warm-up that degrades to fewer hints. The read path never surfaces its failure \u2014 the grounded ask is the user-facing read."
+  },
+  buildOnboardingStateUrl: {
+    renders: "never-shown",
+    why: 'onboarding state degrades to "unknown" and the flow continues; a server sentence here would interrupt a first run to report something the user cannot act on.'
+  },
+  buildCliAuthPollUrl: {
+    renders: "own-slug-map",
+    why: "the login poll owns a state machine (pending / expired / claimed), not a failure taxonomy \u2014 each state is its own instruction to the person waiting at the terminal."
+  },
+  buildExchangeClaimUrl: {
+    renders: "own-slug-map",
+    why: "the claim exchange already maps invalid_code / code_expired / code_used to specific recovery instructions naming where to get a fresh code. A generic retry verdict would be strictly less actionable, and this endpoint carries no `reason` field to key one off."
+  },
+  // --- links, not requests --------------------------------------------------------------
+  buildCliAuthUrl: { renders: "not-a-fetch-target", why: "opened in the browser during login." },
+  buildBillingUrl: { renders: "not-a-fetch-target", why: "printed in the upgrade nudge." },
+  buildRepoDeepLink: { renders: "not-a-fetch-target", why: "printed alongside an answer." }
+});
+
 // src/infer.ts
 async function localByokInfer(_transcript, _config, _opts) {
   return { configured: false };
@@ -8138,14 +8231,18 @@ async function serverInfer(transcript, config2, opts = {}) {
   }
   if (!res.ok) {
     const obj = payload && typeof payload === "object" ? payload : {};
-    const serverErr = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : "error" in obj ? String(obj.error) : `HTTP ${res.status}`;
     return {
       ok: false,
       model: "server",
       decisions: [],
       persisted: false,
       sessionId: transcript.sessionId ?? null,
-      error: `inference rejected (${res.status}): ${serverErr}`
+      error: describeFailure({
+        lead: "this session wasn't written up",
+        status: res.status,
+        payload: obj,
+        env
+      })
     };
   }
   const rec = payload && typeof payload === "object" ? payload : {};
@@ -34424,10 +34521,14 @@ async function queryDecisions(input, deps = {}) {
     }
     const rec = payload && typeof payload === "object" ? payload : {};
     if (!res.ok) {
-      const serverErr = typeof rec.message === "string" && rec.message.length > 0 ? rec.message : "error" in rec ? String(rec.error) : `HTTP ${res.status}`;
       return {
         status: "read-failed",
-        detail: `grounded-ask rejected (${res.status}): ${serverErr}`,
+        detail: describeFailure({
+          lead: "the answer didn't come back",
+          status: res.status,
+          payload: rec,
+          env
+        }),
         repo,
         deepLink
       };
@@ -35333,7 +35434,10 @@ async function startLesson(input, deps = {}) {
     if (res.status === 409) {
       return {
         status: "in-progress",
-        detail: serverMessage(rec) ?? "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+        // The 409 body carries a worker-AUTHORED sentence, not a relayed diagnostic —
+        // render it verbatim. Reading only `message` (never the `error` slug) is the
+        // point: the old helper fell back to the slug and printed `lesson_in_progress`.
+        detail: readServerMessage(rec) ?? "a lesson is already being prepared for this repo \u2014 try again in a moment.",
         repo,
         ...upgrade ? { upgrade } : {}
       };
@@ -35341,7 +35445,15 @@ async function startLesson(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: `lesson start rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ""}`,
+        // One renderer for every route that speaks the relayed-failure contract
+        // (failureCopy.ts). The reader gets the retry verdict the server sent in
+        // `reason`; the slug and the SQLSTATE stay behind `--verbose`.
+        detail: describeFailure({
+          lead: "the lesson didn't start",
+          status: res.status,
+          payload: rec,
+          env
+        }),
         repo,
         ...upgrade ? { upgrade } : {}
       };
@@ -35398,7 +35510,14 @@ async function answerLesson(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: `answer rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ""}`,
+        // "wasn't recorded" rather than "failed": the one thing somebody who just
+        // answered wants to know is whether their answer counted.
+        detail: describeFailure({
+          lead: "your answer wasn't recorded",
+          status: res.status,
+          payload: rec,
+          env
+        }),
         ...upgrade ? { upgrade } : {}
       };
     }
@@ -35455,11 +35574,6 @@ async function postJson(doFetch, url2, token, body, timeoutMs) {
   } finally {
     clearTimeout(timer);
   }
-}
-function serverMessage(rec) {
-  if (typeof rec.message === "string" && rec.message.length > 0) return rec.message;
-  if (typeof rec.error === "string" && rec.error.length > 0) return rec.error;
-  return null;
 }
 function readUpgrade(header, rec) {
   if (header && header.length > 0) return header;
@@ -35690,7 +35804,15 @@ async function requestAsk(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: `ask rejected (${res.status})${serverMessage2(res.payload) ? `: ${serverMessage2(res.payload)}` : ""}`,
+        // One renderer for every route that speaks the relayed-failure contract
+        // (failureCopy.ts). An ask that could not be fetched is a non-event for the
+        // person — the only thing worth saying is whether asking again is worth it.
+        detail: describeFailure({
+          lead: "no question came back",
+          status: res.status,
+          payload: res.payload,
+          env
+        }),
         repo,
         ...upgrade ? { upgrade } : {}
       };
@@ -35750,7 +35872,7 @@ async function answerAsk(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: expiryAwareDetail(res.status, res.payload),
+        detail: expiryAwareDetail(res.status, res.payload, env),
         ...upgrade ? { upgrade } : {}
       };
     }
@@ -35765,15 +35887,20 @@ async function answerAsk(input, deps = {}) {
     return { status: "error", detail: `answer failed (swallowed): ${e.message}` };
   }
 }
-function expiryAwareDetail(status, payload) {
-  const slug = serverMessage2(payload) ?? "";
-  if (status === 410 || slug === "ask_expired") {
-    return "that ask has expired \u2014 it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.";
-  }
-  if (slug === "ask_material_moved") {
-    return "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.";
-  }
-  return `answer rejected (${status})${slug ? `: ${slug}` : ""}`;
+var ASK_EXPIRED_COPY = "that ask has expired \u2014 it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.";
+var INFLOW_ANSWER_OVERRIDES = Object.freeze({
+  ask_expired: ASK_EXPIRED_COPY,
+  ask_material_moved: "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you."
+});
+function expiryAwareDetail(status, payload, env) {
+  if (status === 410) return ASK_EXPIRED_COPY;
+  return describeFailure({
+    lead: "your answer wasn't recorded",
+    status,
+    payload,
+    env,
+    overrides: INFLOW_ANSWER_OVERRIDES
+  });
 }
 async function postJson2(doFetch, url2, token, body, timeoutMs) {
   const ac = new AbortController();
@@ -35814,18 +35941,13 @@ async function postJson2(doFetch, url2, token, body, timeoutMs) {
     clearTimeout(timer);
   }
 }
-function serverMessage2(rec) {
-  if (typeof rec.message === "string" && rec.message.length > 0) return rec.message;
-  if (typeof rec.error === "string" && rec.error.length > 0) return rec.error;
-  return null;
-}
 function readUpgrade2(rec) {
   return typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
 }
 var RUNGS2 = ["teach", "recognise", "produce"];
-var REASONS = ["served", "nothing-banked", "nothing-new"];
+var REASONS2 = ["served", "nothing-banked", "nothing-new"];
 function normalizeReason(raw) {
-  return REASONS.includes(raw) ? raw : "nothing-new";
+  return REASONS2.includes(raw) ? raw : "nothing-new";
 }
 function normalizeAsk(raw) {
   if (!raw || typeof raw !== "object") return null;
@@ -36075,6 +36197,13 @@ Manage
   backthread version            Print the installed version (also --version, -v)
   backthread help               Show this message (also --help, -h)
 
+Global flags
+  --verbose               When something fails, also print the operator detail \u2014 the
+                          HTTP status, the internal error code and the database's own
+                          SQLSTATE. Off by default: those name our call sites, not
+                          anything you can act on. (Also BACKTHREAD_VERBOSE=1, which
+                          the MCP tools read too.)
+
 Your source never leaves your machine unredacted \u2014 it's checkable in this OSS repo.
 Docs:     https://app.backthread.dev
 Security: https://backthread.dev/security`;
@@ -36130,7 +36259,13 @@ async function runOnboarding(rest) {
   });
   return result.exitCode;
 }
-async function main(argv, deps = {}) {
+function consumeVerboseFlag(argv, env) {
+  if (!argv.includes("--verbose")) return argv;
+  env.BACKTHREAD_VERBOSE = "1";
+  return argv.filter((a) => a !== "--verbose");
+}
+async function main(rawArgv, deps = {}) {
+  const argv = consumeVerboseFlag(rawArgv, deps.env ?? process.env);
   const [command, ...rest] = argv;
   const onboarding = deps.runOnboardingImpl ?? runOnboarding;
   switch (command) {

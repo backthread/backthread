@@ -42,6 +42,7 @@ import { readConfig, type BackthreadConfig } from './config.js';
 import { type RemoteReader, type RepoHandle } from './repo.js';
 import { resolveQueryRepo } from './query.js';
 import { buildInflowAskUrl, buildInflowAnswerUrl } from './urls.js';
+import { describeFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import { normalizeAnswer, formatAnswerResult, type LessonRung } from './lesson.js';
 
@@ -200,7 +201,15 @@ export async function requestAsk(
     if (res.status < 200 || res.status >= 300) {
       return {
         status: 'failed',
-        detail: `ask rejected (${res.status})${serverMessage(res.payload) ? `: ${serverMessage(res.payload)}` : ''}`,
+        // One renderer for every route that speaks the relayed-failure contract
+        // (failureCopy.ts). An ask that could not be fetched is a non-event for the
+        // person — the only thing worth saying is whether asking again is worth it.
+        detail: describeFailure({
+          lead: 'no question came back',
+          status: res.status,
+          payload: res.payload,
+          env,
+        }),
         repo,
         ...(upgrade ? { upgrade } : {}),
       };
@@ -287,7 +296,7 @@ export async function answerAsk(
     if (res.status < 200 || res.status >= 300) {
       return {
         status: 'failed',
-        detail: expiryAwareDetail(res.status, res.payload),
+        detail: expiryAwareDetail(res.status, res.payload, env),
         ...(upgrade ? { upgrade } : {}),
       };
     }
@@ -306,17 +315,40 @@ export async function answerAsk(
 
 /**
  * An expired ask is the DESIGN WORKING, not a failure the person caused, and it is
- * said that way. The rest are reported plainly with the server's own slug.
+ * said that way.
+ *
+ * ⚠ THESE TWO SLUGS ARE OVERRIDES, NOT EXCEPTIONS TO THE CONTRACT. They are handed to
+ * `describeFailure` as an override table rather than short-circuiting around it, because
+ * everything the shared renderer does still has to apply to them: the operator suffix,
+ * and the guarantee that nothing else leaks a slug. What used to be here was
+ * `` `answer rejected (${status}): ${slug}` `` for every other case — the exact defect,
+ * with two nice sentences in front of it.
+ *
+ * The 410 stays a STATUS check as well as a slug check: an expiry is also expressible as
+ * a bare 410 with no body at all, and the reassurance is the whole point of that path.
  */
-function expiryAwareDetail(status: number, payload: Record<string, unknown>): string {
-  const slug = serverMessage(payload) ?? '';
-  if (status === 410 || slug === 'ask_expired') {
-    return 'that ask has expired — it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.';
-  }
-  if (slug === 'ask_material_moved') {
-    return 'the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.';
-  }
-  return `answer rejected (${status})${slug ? `: ${slug}` : ''}`;
+const ASK_EXPIRED_COPY =
+  'that ask has expired — it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.';
+
+const INFLOW_ANSWER_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  ask_expired: ASK_EXPIRED_COPY,
+  ask_material_moved:
+    'the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.',
+});
+
+function expiryAwareDetail(
+  status: number,
+  payload: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+): string {
+  if (status === 410) return ASK_EXPIRED_COPY;
+  return describeFailure({
+    lead: "your answer wasn't recorded",
+    status,
+    payload,
+    env,
+    overrides: INFLOW_ANSWER_OVERRIDES,
+  });
 }
 
 // --- transport -------------------------------------------------------------------
@@ -372,12 +404,6 @@ async function postJson(
   } finally {
     clearTimeout(timer);
   }
-}
-
-function serverMessage(rec: Record<string, unknown>): string | null {
-  if (typeof rec.message === 'string' && rec.message.length > 0) return rec.message;
-  if (typeof rec.error === 'string' && rec.error.length > 0) return rec.error;
-  return null;
 }
 
 function readUpgrade(rec: Record<string, unknown>): string | undefined {
