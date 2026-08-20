@@ -278,7 +278,9 @@ test('queryDecisions: 4xx rejections do NOT retry (auth/bad-repo are not transie
   }) as typeof fetch;
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl }));
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /403/);
+  // The worker writes this one for the reader rather than emitting a slug, so it survives
+  // verbatim — `error` carries both kinds and only the machine kind is hidden.
+  assert.match(out.detail, /not authorized/);
   assert.equal(n, 1, '4xx must not be retried');
 });
 

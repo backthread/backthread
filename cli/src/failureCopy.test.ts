@@ -23,9 +23,10 @@ import { fileURLToPath } from 'node:url';
 import {
   describeFailure,
   verboseEnabled,
+  isMachineCode,
   readServerMessage,
   CLI_ENDPOINTS,
-  FUNCTIONS_SLUG_COPY,
+  SLUG_COPY,
   type EndpointDisposition,
 } from './failureCopy.js';
 import { queryDecisions } from './query.js';
@@ -64,9 +65,91 @@ test('unavailable refuses to promise a retry', () => {
     payload: UNAVAILABLE,
     env: PLAIN_ENV,
   });
-  assert.match(out, /It failed on our side, and retrying is unlikely to help\./);
+  assert.match(out, /It failed on our side, so retrying will not help\./);
   // The distinction is the whole contract: the two reasons must not read the same.
   assert.doesNotMatch(out, /try again in a moment/);
+  // ⚠ AND IT MUST NOT STOP THERE. "Your one available action is useless" with no next step
+  // leaves the reader with nothing to do, which is the state this whole change exists to
+  // get them out of. The dead end names where to take it.
+  assert.match(out, /run it again with --verbose/);
+  assert.match(out, /github\.com\/backthread\/backthread\/issues/);
+});
+
+test('an operator at a dead end is told where to SEND the detail, not how to get it', () => {
+  const out = describeFailure({
+    lead: 'x',
+    status: 502,
+    payload: UNAVAILABLE,
+    env: VERBOSE_ENV,
+  });
+  assert.match(out, /report the detail above at/);
+  assert.doesNotMatch(out, /run it again with --verbose/);
+});
+
+test('a busy database is NOT sent to the issue tracker', () => {
+  // The next step belongs on dead ends only. Telling somebody to file an issue about a
+  // transient blip is how an issue tracker becomes noise.
+  const out = describeFailure({ lead: 'x', status: 502, payload: OVERLOADED, env: PLAIN_ENV });
+  assert.doesNotMatch(out, /issues/);
+});
+
+// --- prose in `error` is a sentence, not a slug ----------------------------------------
+
+test('worker-AUTHORED prose in `error` is rendered, not hidden as an operator field', () => {
+  // ⚠ THE REGRESSION THIS PINS. `error` carries BOTH kinds: `repo_gate_failed` is a slug,
+  // `repo not found or not connected to Backthread` is a sentence somebody wrote for this
+  // reader. Hiding the second made `how` / `learn` / `ask-me` read WORSE than before the
+  // fix on their three most common non-transient failures.
+  for (const prose of [
+    'repo not found or not connected to Backthread',
+    'not authorized to read this repo',
+    'no repo given and none connected — pass repo:"owner/name"',
+  ]) {
+    const out = describeFailure({
+      lead: "the answer didn't come back",
+      status: 404,
+      payload: { error: prose },
+      env: PLAIN_ENV,
+    });
+    assert.match(out, new RegExp(prose.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), out);
+  }
+});
+
+test('a machine slug is still hidden, on the same field, in the same call', () => {
+  const out = describeFailure({
+    lead: 'x',
+    status: 502,
+    payload: { error: 'repo_gate_failed' },
+    env: PLAIN_ENV,
+  });
+  assert.doesNotMatch(out, /repo_gate_failed/);
+});
+
+test('isMachineCode draws the line where the server draws it', () => {
+  for (const yes of ['retrieval_failed', 'not_a_member', 'plan_limit', 'e', 'a1_b2']) {
+    assert.equal(isMachineCode(yes), true, yes);
+  }
+  for (const no of [
+    'repo not found or not connected to Backthread',
+    'token expired',
+    'Repo_Not_Found',
+    'lesson: decision read failed (500): {"code":"57014"}',
+    '_leading',
+    '9leading',
+  ]) {
+    assert.equal(isMachineCode(no), false, no);
+  }
+});
+
+test('prose in `error` is not repeated as a diagnostic under --verbose', () => {
+  const out = describeFailure({
+    lead: 'x',
+    status: 404,
+    payload: { error: 'repo not found or not connected to Backthread' },
+    env: VERBOSE_ENV,
+  });
+  assert.match(out, /\[status=404\]/);
+  assert.doesNotMatch(out, /error=repo not found/);
 });
 
 test('neither the machine slug nor the SQLSTATE is product copy', () => {
@@ -130,7 +213,9 @@ test('a body carrying BOTH prefers the reason — a relayed failure has no messa
 
 test('an unrecognisable body says the status and stops — it never guesses', () => {
   const out = describeFailure({ lead: 'x', status: 500, payload: {}, env: PLAIN_ENV });
-  assert.equal(out, 'x. The server rejected it (HTTP 500).');
+  assert.match(out, /^x\. The server rejected it \(HTTP 500\)\./);
+  // A dead end all the same, so it names the next step too.
+  assert.match(out, /--verbose/);
 });
 
 test('a bogus reason value is not a reason', () => {
@@ -362,7 +447,8 @@ for (const name of failureBodyEndpoints()) {
 
   test(`${name}: an unavailable failure does not promise a retry`, async () => {
     const detail = await DRIVERS[name](502, UNAVAILABLE, PLAIN_ENV);
-    assert.match(detail, /It failed on our side, and retrying is unlikely to help\./, detail);
+    assert.match(detail, /It failed on our side, so retrying will not help\./, detail);
+    assert.match(detail, /github\.com\/backthread\/backthread\/issues/, detail);
     assert.doesNotMatch(detail, /lesson_persist_failed/, detail);
     assert.doesNotMatch(detail, /08006/, detail);
   });
@@ -389,13 +475,60 @@ function sourceFiles(): string[] {
     .map((f) => join(SRC_DIR, f));
 }
 
-/** Every exported endpoint builder in the package, found in source rather than listed. */
+/** The two modules allowed to turn an origin into an endpoint. */
+const URL_MODULES = ['urls.ts', 'claim.ts'];
+
+/**
+ * The two origins a FETCH can go to. Deliberately excludes the app origin: that one is a
+ * browser link and is printed all over the package, so banning it would be a vocabulary
+ * rule rather than a safety one.
+ */
+const ORIGIN_TOKEN = /\b(?:workerBaseUrl|functionsBaseUrl|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL)\b/;
+
+/** The literal hosts, for the author who pastes a URL out of a curl command. */
+const ORIGIN_HOST = /\b(?:workers\.dev|supabase\.co)\b/;
+
+/** Any origin at all — what makes an exported function a URL builder, fetched or linked. */
+const ANY_ORIGIN =
+  /\b(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL|DEFAULT_APP_URL)\b|\b(?:workers\.dev|supabase\.co)\b/;
+
+/** The origin declarations themselves are not builders — they are what builders reach for. */
+const IS_ORIGIN_DECL = /^(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_\w+_URL)$/;
+
+/**
+ * Every exported endpoint builder in the package, found in source rather than listed.
+ *
+ * ⚠ IT USED TO MATCH `export function build…Url` AND NOTHING ELSE, and an outside read got
+ * SEVEN new endpoints past it — `export const`, `export async function`, a name that did
+ * not end in `Url`, and three ways of joining an origin to a path that the centralisation
+ * check did not recognise. Every one of those is an ordinary TypeScript spelling, not a
+ * contrivance.
+ *
+ * So the question asked is no longer "is it spelled like a builder?" but "does this
+ * exported function BUILD AN ENDPOINT?" — which is answered by looking for an origin inside
+ * its body. The naming convention is not enforced and does not need to be: the origins are
+ * allow-listed to these two modules by the test below, so an endpoint has nowhere else to
+ * be born.
+ */
 function declaredBuilders(): string[] {
   const found = new Set<string>();
-  for (const file of sourceFiles()) {
-    const src = readFileSync(file, 'utf8');
-    for (const m of src.matchAll(/export function (build[A-Za-z0-9_]*(?:Url|Link))\b/g)) {
-      found.add(m[1]);
+  for (const base of URL_MODULES) {
+    const src = readFileSync(join(SRC_DIR, base), 'utf8');
+    // Split on top-level `export`s and keep the ones whose body reaches for an origin.
+    const parts = src.split(/\nexport /);
+    for (const part of parts.slice(1)) {
+      const name = part.match(/^(?:async )?function ([A-Za-z0-9_]+)/)?.[1]
+        ?? part.match(/^const ([A-Za-z0-9_]+)\s*[:=]/)?.[1];
+      if (!name) continue;
+      if (IS_ORIGIN_DECL.test(name)) continue;
+      // A BUILDER constructs a URL and hands it back; it never uses one. That is what
+      // separates `buildExchangeClaimUrl` from `exchangeClaim`, which sits beside it and
+      // names an origin only to print "generate a fresh code at …". The discriminator is
+      // behavioural rather than lexical on purpose — `export async function` and
+      // `export const` both have to keep working, because both walked past the previous,
+      // name-shaped version of this scan.
+      if (/\b(?:doFetch|fetch)\s*\(/.test(part)) continue;
+      if (ANY_ORIGIN.test(part)) found.add(name);
     }
   }
   return [...found].sort();
@@ -420,6 +553,9 @@ test('the guard above is actually looking at source, not at an empty list', () =
   assert.ok(builders.length >= 10, `only found ${builders.length} builders`);
   assert.ok(builders.includes('buildGroundedAskUrl'));
   assert.ok(builders.includes('buildExchangeClaimUrl')); // proves it scans past urls.ts
+  // And that it is finding them by what they DO, not by what they are called: this one
+  // ends in `Link`, not `Url`, and would be missed by a name-shaped scan.
+  assert.ok(builders.includes('buildRepoDeepLink'));
 });
 
 test('a decision NOT to show somebody a failure is defended in a sentence', () => {
@@ -442,27 +578,62 @@ test('every disposition that is not a renderer says something', () => {
   }
 });
 
+/**
+ * `doctor` probes the BARE origins for reachability and reports only up/down — it drains
+ * the body and constructs no path. It is the one module outside urls.ts/claim.ts with a
+ * reason to name an origin, and it is named here rather than pattern-matched so that a
+ * second such module has to be argued for.
+ */
+const ORIGIN_ALLOWED = new Set([...URL_MODULES, 'doctor.ts']);
+
 test('endpoint construction is centralised, so nothing can dodge the registry', () => {
-  // The registry keys off BUILDERS. A route added by inlining
-  // `new URL('/new-thing', workerBaseUrl(env))` at a call site would have no builder and
-  // would therefore never be classified — so the origin helpers are an allow-list.
-  const ALLOWED = new Set(['urls.ts', 'claim.ts']);
+  // ⚠ WIDENED FROM A PATTERN TO A BAN, after an outside read walked four spellings past the
+  // pattern version: `base + '/path'`, a `const base = workerBaseUrl(env)` hop, a hardcoded
+  // `https://….workers.dev/path`, and a builder that simply was not called `build…Url`.
+  // Chasing the shapes was the mistake — every one of them starts by naming an origin, so
+  // the origins themselves are the allow-list now. There is no "an origin, but joined to a
+  // path in a way I recognise": outside these three modules, do not name one.
   const offenders: string[] = [];
   for (const file of sourceFiles()) {
     const base = file.slice(SRC_DIR.length + 1);
-    if (ALLOWED.has(base)) continue;
+    if (ORIGIN_ALLOWED.has(base)) continue;
     const src = readFileSync(file, 'utf8');
-    // An ORIGIN alone is fine — `doctor` probes the bare host for connectivity. What is
-    // forbidden is an origin joined to a PATH, which is an endpoint by another name.
-    const ORIGIN = '(?:workerBaseUrl|functionsBaseUrl)\\s*\\(|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL';
-    // The CONSTANTS are in there as well as the functions: reaching past the helper to
-    // `new URL('/x', DEFAULT_WORKER_URL)` builds the same endpoint and would have slipped
-    // through a check that only knew about the helper.
-    const inNewUrl = new RegExp(`new URL\\((?:[^()]|\\([^()]*\\))*(?:${ORIGIN})`);
-    const inTemplate = new RegExp(`\\$\\{\\s*(?:${ORIGIN})`);
-    if (inNewUrl.test(src) || inTemplate.test(src)) offenders.push(base);
+    if (ORIGIN_TOKEN.test(src)) offenders.push(`${base} (names an origin)`);
+    if (ORIGIN_HOST.test(src)) offenders.push(`${base} (hardcodes an origin host)`);
   }
-  assert.deepEqual(offenders, [], 'these files build an endpoint URL outside urls.ts/claim.ts');
+  assert.deepEqual(offenders, [], 'build the endpoint in urls.ts and register it instead');
+});
+
+test('urls.ts builds endpoints and never calls one', () => {
+  // The builder scan tells a builder from a consumer by whether it fetches. That only
+  // holds while the module of builders contains no fetch — otherwise one function could be
+  // both, and would be skipped as a consumer while quietly being an unregistered endpoint.
+  assert.doesNotMatch(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8'), /\bfetch\s*\(/);
+});
+
+test('the centralisation ban is not vacuous — the allow-listed modules really do trip it', () => {
+  // If the tokens ever stop matching, the test above passes over every file in silence.
+  for (const base of URL_MODULES) {
+    assert.ok(ORIGIN_TOKEN.test(readFileSync(join(SRC_DIR, base), 'utf8')), base);
+  }
+  assert.ok(ORIGIN_HOST.test(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8')));
+});
+
+test('each driver drives its REGISTERED entry point, not a convenient stand-in', () => {
+  // ⚠ Otherwise the conformance battery is satisfiable by a driver that calls
+  // `describeFailure` itself: green, proving only that the renderer renders. The registry
+  // names the function that must appear in the driver's own source.
+  const selfSrc = readFileSync(join(SRC_DIR, 'failureCopy.test.ts'), 'utf8');
+  const table = selfSrc.slice(selfSrc.indexOf('const DRIVERS'), selfSrc.indexOf('function failureBodyEndpoints'));
+  assert.ok(table.length > 500, 'could not locate the driver table in this file');
+  for (const [builder, d] of Object.entries(CLI_ENDPOINTS) as Array<[string, EndpointDisposition]>) {
+    if (d.renders !== 'failure-body') continue;
+    const start = table.indexOf(`${builder}:`);
+    assert.ok(start >= 0, `${builder}: no driver`);
+    const body = table.slice(start, start + 900);
+    const fn = d.entryPoint.split(' ')[0];
+    assert.ok(body.includes(fn), `${builder}: its driver never calls ${fn}`);
+  }
 });
 
 test('no module keeps a private copy of the helper this file replaced', () => {
@@ -485,7 +656,7 @@ test('a Functions slug maps to the ACTION it implies, not to itself', () => {
     status: 403,
     payload: { error: 'not_a_member' },
     env: PLAIN_ENV,
-    overrides: FUNCTIONS_SLUG_COPY,
+    overrides: SLUG_COPY,
   });
   assert.match(out, /not a member of the account that owns that repo/);
   assert.doesNotMatch(out, /not_a_member/);
@@ -506,14 +677,14 @@ test('the Functions table covers every slug those two endpoints emit', () => {
     'insufficient scope',
     'missing authorization',
   ]) {
-    assert.ok(FUNCTIONS_SLUG_COPY[slug], `${slug} has no sentence`);
-    assert.doesNotMatch(FUNCTIONS_SLUG_COPY[slug], new RegExp(slug), `${slug} maps to itself`);
+    assert.ok(SLUG_COPY[slug], `${slug} has no sentence`);
+    assert.doesNotMatch(SLUG_COPY[slug], new RegExp(slug), `${slug} maps to itself`);
   }
 });
 
 test('an expired credential says what to DO, not what the server called it', () => {
   for (const slug of ['token expired', 'invalid token', 'insufficient scope']) {
-    assert.match(FUNCTIONS_SLUG_COPY[slug], /backthread login/);
+    assert.match(SLUG_COPY[slug], /backthread login/);
   }
 });
 
@@ -523,7 +694,7 @@ test('a Functions slug that is not on the table degrades, it does not leak', () 
     status: 500,
     payload: { error: 'some_new_function_slug' },
     env: PLAIN_ENV,
-    overrides: FUNCTIONS_SLUG_COPY,
+    overrides: SLUG_COPY,
   });
   assert.doesNotMatch(out, /some_new_function_slug/);
   assert.match(out, /HTTP 500/);
@@ -577,4 +748,54 @@ test('the never-shown guard is looking at real callers, not at an empty list', (
   }
   // And prove the finder works on a builder we know has one.
   assert.ok(callersOf('buildGroundedAskUrl').includes('query.ts'));
+});
+
+// --- the two remaining slug tables, held to the same rule -------------------------------
+
+test('a scope skip reads as a sentence, and every enum value has one', async () => {
+  const { SCOPE_REASON_COPY } = await import('./captureScope.js');
+  for (const [reason, copy] of Object.entries(SCOPE_REASON_COPY)) {
+    assert.ok(copy.length > 0, reason);
+    // The underscore is what makes a value a machine code rather than a word: `connected`
+    // is ordinary English and may legitimately appear in its own sentence, `not_a_member`
+    // never can.
+    if (reason.includes('_')) {
+      assert.doesNotMatch(copy, new RegExp(reason), `${reason} maps to itself`);
+    }
+  }
+  // The enum is closed, so the table must be exhaustive — a new value with no sentence
+  // would render `undefined` to a person, which is worse than the slug it replaced.
+  const src = readFileSync(join(SRC_DIR, 'captureScope.ts'), 'utf8');
+  const decl = src.slice(src.indexOf('export type ScopeReason'), src.indexOf('export const SCOPE_REASON_COPY'));
+  for (const m of decl.matchAll(/'([a-z_]+)'/g)) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(SCOPE_REASON_COPY, m[1]),
+      `ScopeReason '${m[1]}' has no sentence`,
+    );
+  }
+});
+
+test('the inflow override table is reachable on every route it claims to cover', async () => {
+  // ⚠ `ask_expired` SURVIVED A MUTATION. Deleting it from the table changed nothing,
+  // because the server only ever sends it as a bare 410 and the status check catches that
+  // first — so the entry was unasserted defensive redundancy that a server-side status
+  // change would have silently activated, wrong. Driven here as the non-410 it is defended
+  // against being.
+  const { answerAsk } = await import('./inflow.js');
+  for (const [status, slug, expected] of [
+    [400, 'ask_expired', /nothing is owed and nothing is missing/],
+    [409, 'ask_material_moved', /changed since it was asked/],
+  ] as Array<[number, string, RegExp]>) {
+    const out = await answerAsk(
+      { token: 'tok', answer: 'because' },
+      {
+        env: PLAIN_ENV,
+        fetchImpl: stubFetch(status, { error: slug }),
+        readConfigImpl,
+        readRemoteImpl,
+      },
+    );
+    assert.match(out.detail, expected, `${slug} @ ${status}: ${out.detail}`);
+    assert.doesNotMatch(out.detail, new RegExp(slug), out.detail);
+  }
 });

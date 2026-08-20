@@ -49,8 +49,25 @@ const REASONS: readonly FailureReason[] = ['overloaded', 'unavailable'];
  */
 const REASON_CLAUSE: Readonly<Record<FailureReason, string>> = Object.freeze({
   overloaded: 'The database was busy — try again in a moment.',
-  unavailable: 'It failed on our side, and retrying is unlikely to help.',
+  unavailable: 'It failed on our side, so retrying will not help.',
 });
+
+/** Where a dead end goes next. Empty when the reader is already an operator. */
+const ISSUES_URL = 'https://github.com/backthread/backthread/issues';
+
+/**
+ * ⚠ "RETRYING WILL NOT HELP" IS ONLY HALF A SENTENCE WITHOUT THIS. Telling somebody their
+ * one available action is useless and then stopping leaves them with nothing to do, which
+ * is the state the ticket asks us not to leave a reader in. Every dead end names the next
+ * step — and the step is different depending on who is reading, which is exactly what the
+ * verbose switch already knows: a reader is told how to GET the detail, an operator
+ * already has it and is told where to send it.
+ */
+function nextStep(verbose: boolean): string {
+  return verbose
+    ? ` If it keeps happening, report the detail above at ${ISSUES_URL}`
+    : ` If it keeps happening, run it again with --verbose and report what that prints at ${ISSUES_URL}`;
+}
 
 export interface FailureCopyInput {
   /**
@@ -85,10 +102,47 @@ export function readFailureReason(payload: Record<string, unknown>): FailureReas
     : null;
 }
 
-/** Read the machine slug (`error`), or null. An OPERATOR field — never rendered by default. */
-export function readFailureSlug(payload: Record<string, unknown>): string | null {
+/**
+ * A machine code: lowercase, digits and underscores. `retrieval_failed`, `not_a_member`.
+ *
+ * ⚠ THE PREDICATE THIS MODULE WAS MISSING, AND ITS ABSENCE WAS A REGRESSION. The first
+ * draft assumed `error` is ALWAYS a slug and hid it unconditionally. It is not: the same
+ * field carries worker-AUTHORED English about the caller's own request —
+ * `repo not found or not connected to Backthread`, `not authorized to read this repo`,
+ * `no repo given and none connected — pass repo:"owner/name"`. Hiding those made the three
+ * most common non-transient failures of `how` / `learn` / `ask-me` read WORSE than before
+ * the fix: a reader who used to be told their repo was not connected got `the server
+ * rejected it (HTTP 404)`.
+ *
+ * The rule is the server's own, mirrored: what EXCLUDES prose is the first space, colon,
+ * brace or capital. A value that passes is an operator field and stays behind `--verbose`;
+ * a value that fails it is a sentence somebody wrote for a reader, and is rendered.
+ */
+const MACHINE_CODE = /^[a-z][a-z0-9_]*$/;
+
+export function isMachineCode(raw: string): boolean {
+  return MACHINE_CODE.test(raw);
+}
+
+/** Read `error` whatever its kind, or null. */
+function readErrorField(payload: Record<string, unknown>): string | null {
   const raw = payload.error;
   return typeof raw === 'string' && raw.length > 0 ? raw : null;
+}
+
+/** Read the machine slug (`error`), or null. An OPERATOR field — never rendered by default. */
+export function readFailureSlug(payload: Record<string, unknown>): string | null {
+  const raw = readErrorField(payload);
+  return raw !== null && isMachineCode(raw) ? raw : null;
+}
+
+/**
+ * Read `error` when it is PROSE rather than a slug — a sentence the server wrote for this
+ * reader. Rendered like `message`, because that is what it is.
+ */
+export function readAuthoredError(payload: Record<string, unknown>): string | null {
+  const raw = readErrorField(payload);
+  return raw !== null && !isMachineCode(raw) ? raw : null;
 }
 
 /** Read the SQLSTATE (`code`), or null. An OPERATOR field — never rendered by default. */
@@ -136,6 +190,9 @@ export function verboseEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
  */
 function operatorSuffix(status: number, payload: Record<string, unknown>): string {
   const parts = [`status=${status}`];
+  // Only a MACHINE code goes here. Prose in `error` has already been rendered as the
+  // sentence it is; repeating it as `error=repo not found or not connected to Backthread`
+  // dresses a readable sentence up as a diagnostic, which is the inverse of the job.
   const slug = readFailureSlug(payload);
   if (slug) parts.push(`error=${slug}`);
   const reason = readFailureReason(payload);
@@ -167,38 +224,56 @@ export function describeFailure(input: FailureCopyInput): string {
   const verbose = verboseEnabled(input.env ?? process.env);
   const suffix = verbose ? operatorSuffix(status, payload) : '';
 
-  const slug = readFailureSlug(payload);
-  const override = slug && overrides ? overrides[slug] : undefined;
-  if (override) return `${override}${suffix}`;
+  // 1. A known code, mapped to the action it implies. Looked up on the RAW field, not on
+  //    the slug-filtered one: half this table's keys ('token expired') are two words and
+  //    would fail the machine-code test they are not being asked to pass.
+  const raw = payload.error;
+  if (typeof raw === 'string' && raw.length > 0) {
+    const mapped = { ...SLUG_COPY, ...(overrides ?? {}) }[raw];
+    if (mapped) return `${mapped}${suffix}`;
+  }
 
+  // 2. The contract. The only branch that can honestly promise a retry.
   const reason = readFailureReason(payload);
-  if (reason) return `${lead}. ${REASON_CLAUSE[reason]}${suffix}`;
+  if (reason) {
+    const tail = reason === 'unavailable' ? nextStep(verbose) : '';
+    return `${lead}. ${REASON_CLAUSE[reason]}${tail}${suffix}`;
+  }
 
-  const message = readServerMessage(payload);
-  if (message) return `${lead}. ${message}${suffix}`;
+  // 3. A sentence somebody wrote for this reader, in either field it can arrive in. Joined
+  //    with a dash rather than a full stop because it is an appositive and is not
+  //    guaranteed to start with a capital.
+  const authored = readServerMessage(payload) ?? readAuthoredError(payload);
+  if (authored) return `${lead} — ${authored}${suffix}`;
 
-  return `${lead}. The server rejected it (HTTP ${status}).${suffix}`;
+  // 4. Nothing recognisable. Say the status, refuse to guess, and still name a next step.
+  return `${lead}. The server rejected it (HTTP ${status}).${nextStep(verbose)}${suffix}`;
 }
 
 /**
- * The Supabase-Functions endpoints answer with a DIFFERENT and OLDER vocabulary than the
- * worker: no `reason`, and an `error` that is sometimes a machine slug (`not_a_member`,
- * `plan_limit`) and sometimes plain English (`token expired`). Relaying either verbatim is
- * what the CLI used to do on `sync` and `capture --manual`, and a slug is a slug wherever
- * it comes from.
+ * Slugs whose right sentence is an ACTION, not a retry verdict — mapped once, for every
+ * endpoint.
  *
- * These are the strings those two functions actually emit, enumerated from their source,
- * each mapped to the ACTION it implies. It is deliberately a small closed table rather than
- * a pattern: a slug that is not on it degrades to the honest "the server rejected it",
- * never to itself.
+ * ⚠ APPLIED BY DEFAULT INSIDE `describeFailure`, NOT PASSED IN BY CALL SITES, AND THAT IS
+ * THE WHOLE DESIGN. The first draft made it an `overrides` argument and handed it to the
+ * two Supabase-Functions call sites only. But `deviceAuth.ts` on the WORKER emits the
+ * identical auth vocabulary, so one expired token produced two different answers depending
+ * on which command you happened to run: `sync` said "run `backthread login` again" and
+ * `how` said "the server rejected it (HTTP 401)". That is this ticket's own stated failure
+ * mode — "or this recurs one endpoint at a time" — reproduced inside the fix, by the same
+ * mechanism as the original: something correct that each call site had to remember. A
+ * default cannot be forgotten.
+ *
+ * It is deliberately a small CLOSED table rather than a pattern: a slug that is not on it
+ * degrades to the honest "the server rejected it", never to itself.
  *
  * `client_too_old` is absent ON PURPOSE — it ships a server-authored `message` carrying the
  * exact upgrade instruction, and the message branch renders that verbatim.
  */
 const RE_AUTH = 'this device is no longer authorized — run `backthread login` again.';
 
-export const FUNCTIONS_SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
-  // read-decisions/authz.ts
+export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
+  // read-decisions/authz.ts — and the worker's repo gate says the same things
   repo_not_found: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
   not_a_member:
     "you're not a member of the account that owns that repo — ask one of its owners to invite you.",
@@ -206,7 +281,7 @@ export const FUNCTIONS_SLUG_COPY: Readonly<Record<string, string>> = Object.free
   // ingest-decisions
   plan_limit:
     "your plan's decision limit is reached, so nothing was saved — open Billing in the web app to raise it.",
-  // the auth vocabulary, shared by every Function
+  // the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
   'invalid token': RE_AUTH,
   'token expired': RE_AUTH,
   'invalid session': RE_AUTH,

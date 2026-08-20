@@ -47,9 +47,9 @@ import { ensureAuth } from './login.js';
 import { parseJsonl, redactTranscript, sessionPaths, sessionTimestamp } from './redact.js';
 import { resolveRepo, resolveGitContext, type RemoteReader, type GitRunner } from './repo.js';
 import { inferDecisions, type DerivedDecision, type RedactedTranscriptInput } from './infer.js';
-import { checkCaptureScope, type ScopeVerdict } from './captureScope.js';
+import { checkCaptureScope, type ScopeVerdict, SCOPE_REASON_COPY } from './captureScope.js';
 import { buildIngestDecisionsUrl } from './urls.js';
-import { describeFailure, FUNCTIONS_SLUG_COPY } from './failureCopy.js';
+import { describeFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import { maybeNudge, maybeUnconnectedNudge, parseRepoStatus, parseNextStep } from './connectNudge.js';
 import { maybeShowTrustGate } from './firstRun.js';
@@ -294,7 +294,10 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         }
         return {
           status: 'skipped-out-of-scope',
-          detail: `capture skipped (${scope.reason}) — repo not in capture scope; nothing read or sent.`,
+          // The reason is a closed enum, so it renders as the sentence it means. It used to
+          // print as `capture skipped (not_a_member) — repo not in capture scope`, which is
+          // a slug in front of a person however respectable its provenance.
+          detail: `capture skipped — ${SCOPE_REASON_COPY[scope.reason]}.`,
           count: 0,
         };
       }
@@ -555,7 +558,6 @@ async function persistDerived(
         status: res.status,
         payload: obj,
         env: ctx.env,
-        overrides: FUNCTIONS_SLUG_COPY,
       }),
     };
   }

@@ -23,7 +23,7 @@
 import { readConfig as defaultReadConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildReadDecisionsUrl } from './urls.js';
-import { describeFailure, FUNCTIONS_SLUG_COPY } from './failureCopy.js';
+import { describeFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import {
   resolveRepoRoot as defaultResolveRepoRoot,
@@ -278,7 +278,6 @@ export async function syncDecisions(
           status: res.status,
           payload: rec,
           env,
-          overrides: FUNCTIONS_SLUG_COPY,
         }),
         repo,
       };

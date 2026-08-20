@@ -29,6 +29,27 @@ export type ScopeReason =
   | 'not_a_member'
   | 'capture_paused';
 
+/**
+ * A skip reason, as a sentence.
+ *
+ * ⚠ NOT A SERVER DIAGNOSTIC — this arrives on a 200, from a CLOSED enum this file declares,
+ * and the request succeeded. It is on this table anyway because the test that matters is
+ * not "where did the string come from" but "does a person read a slug", and
+ * `capture skipped (not_a_member) — repo not in capture scope` is a slug a person reads.
+ * A closed enum is also the easy case: there is nothing to degrade to, because every value
+ * is known here.
+ */
+export const SCOPE_REASON_COPY: Readonly<Record<ScopeReason | 'unknown' | 'other', string>> =
+  Object.freeze({
+    connected: 'this repo is connected',
+    not_connected: "this repo isn't connected to Backthread yet, so nothing was read or sent",
+    repo_not_writable: "this repo is connected but this account can't write to it, so nothing was read or sent",
+    not_a_member: "you're not a member of the account that owns this repo, so nothing was read or sent",
+    capture_paused: 'capture is paused for this repo, so nothing was read or sent',
+    unknown: 'the scope check could not be reached, so nothing was read or sent',
+    other: 'this repo is out of capture scope, so nothing was read or sent',
+  });
+
 export interface ScopeVerdict {
   /** Whether the hook should send this session's transcript at all. */
   send: boolean;

@@ -18,8 +18,13 @@ the answer didn't come back. The database was busy — try again in a moment.
 or, when the server is not merely busy:
 
 ```
-the answer didn't come back. It failed on our side, and retrying is unlikely to help.
+the answer didn't come back. It failed on our side, so retrying will not help. If it keeps
+happening, run it again with --verbose and report what that prints at
+https://github.com/backthread/backthread/issues
 ```
+
+A dead end always names the next step. "Retrying will not help" on its own leaves you with
+nothing to do, which is the state this release exists to get you out of.
 
 That distinction is not a guess on this end. The server has been sending it for a while —
 every relayed failure carries a `reason` saying which of the two it is — and the CLI simply
@@ -40,6 +45,11 @@ who just wanted an answer. Pass `--verbose` (or set `BACKTHREAD_VERBOSE=1`, whic
 tools read too, having no command line of their own) and the line gains
 `[status=502 error=retrieval_failed reason=overloaded code=57014]` on the end. Nothing is
 removed by asking — verbose adds.
+
+**Sentences the server wrote for you still reach you.** `error` carries two different kinds
+of thing — a machine code like `retrieval_failed`, and plain English like `repo not found or
+not connected to Backthread`. Only the first is hidden. The second is a sentence somebody
+wrote for a reader, and it is rendered as one.
 
 Under the hood: three modules each carried their own copy of the same six-line helper that
 produced the old string, which is why fixing the reported one would have left four. There is

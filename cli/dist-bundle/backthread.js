@@ -8065,15 +8065,31 @@ function resolveGitContext(cwd, run = defaultGitRunner) {
 var REASONS = ["overloaded", "unavailable"];
 var REASON_CLAUSE = Object.freeze({
   overloaded: "The database was busy \u2014 try again in a moment.",
-  unavailable: "It failed on our side, and retrying is unlikely to help."
+  unavailable: "It failed on our side, so retrying will not help."
 });
+var ISSUES_URL = "https://github.com/backthread/backthread/issues";
+function nextStep(verbose) {
+  return verbose ? ` If it keeps happening, report the detail above at ${ISSUES_URL}` : ` If it keeps happening, run it again with --verbose and report what that prints at ${ISSUES_URL}`;
+}
 function readFailureReason(payload) {
   const raw = payload.reason;
   return typeof raw === "string" && REASONS.includes(raw) ? raw : null;
 }
-function readFailureSlug(payload) {
+var MACHINE_CODE = /^[a-z][a-z0-9_]*$/;
+function isMachineCode(raw) {
+  return MACHINE_CODE.test(raw);
+}
+function readErrorField(payload) {
   const raw = payload.error;
   return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function readFailureSlug(payload) {
+  const raw = readErrorField(payload);
+  return raw !== null && isMachineCode(raw) ? raw : null;
+}
+function readAuthoredError(payload) {
+  const raw = readErrorField(payload);
+  return raw !== null && !isMachineCode(raw) ? raw : null;
 }
 function readFailureCode(payload) {
   const raw = payload.code;
@@ -8101,24 +8117,29 @@ function describeFailure(input) {
   const { lead, status, payload, overrides } = input;
   const verbose = verboseEnabled(input.env ?? process.env);
   const suffix = verbose ? operatorSuffix(status, payload) : "";
-  const slug = readFailureSlug(payload);
-  const override = slug && overrides ? overrides[slug] : void 0;
-  if (override) return `${override}${suffix}`;
+  const raw = payload.error;
+  if (typeof raw === "string" && raw.length > 0) {
+    const mapped = { ...SLUG_COPY, ...overrides ?? {} }[raw];
+    if (mapped) return `${mapped}${suffix}`;
+  }
   const reason = readFailureReason(payload);
-  if (reason) return `${lead}. ${REASON_CLAUSE[reason]}${suffix}`;
-  const message = readServerMessage(payload);
-  if (message) return `${lead}. ${message}${suffix}`;
-  return `${lead}. The server rejected it (HTTP ${status}).${suffix}`;
+  if (reason) {
+    const tail = reason === "unavailable" ? nextStep(verbose) : "";
+    return `${lead}. ${REASON_CLAUSE[reason]}${tail}${suffix}`;
+  }
+  const authored = readServerMessage(payload) ?? readAuthoredError(payload);
+  if (authored) return `${lead} \u2014 ${authored}${suffix}`;
+  return `${lead}. The server rejected it (HTTP ${status}).${nextStep(verbose)}${suffix}`;
 }
 var RE_AUTH = "this device is no longer authorized \u2014 run `backthread login` again.";
-var FUNCTIONS_SLUG_COPY = Object.freeze({
-  // read-decisions/authz.ts
+var SLUG_COPY = Object.freeze({
+  // read-decisions/authz.ts — and the worker's repo gate says the same things
   repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
   not_a_member: "you're not a member of the account that owns that repo \u2014 ask one of its owners to invite you.",
   not_readable: "that repo is private and this account can't read it.",
   // ingest-decisions
   plan_limit: "your plan's decision limit is reached, so nothing was saved \u2014 open Billing in the web app to raise it.",
-  // the auth vocabulary, shared by every Function
+  // the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
   "invalid token": RE_AUTH,
   "token expired": RE_AUTH,
   "invalid session": RE_AUTH,
@@ -8291,6 +8312,15 @@ async function inferDecisions(transcript, config2, opts = {}) {
 }
 
 // src/captureScope.ts
+var SCOPE_REASON_COPY = Object.freeze({
+  connected: "this repo is connected",
+  not_connected: "this repo isn't connected to Backthread yet, so nothing was read or sent",
+  repo_not_writable: "this repo is connected but this account can't write to it, so nothing was read or sent",
+  not_a_member: "you're not a member of the account that owns this repo, so nothing was read or sent",
+  capture_paused: "capture is paused for this repo, so nothing was read or sent",
+  unknown: "the scope check could not be reached, so nothing was read or sent",
+  other: "this repo is out of capture scope, so nothing was read or sent"
+});
 var CAPTURE_SCOPE_TIMEOUT_MS = 1e4;
 function interpretScopeResponse(ok, status, payload) {
   if (!ok || status !== 200) return { send: true, reason: "unknown" };
@@ -8440,17 +8470,17 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
     if (!repo) return false;
     if (!sessionId || sessionId.trim().length === 0) return false;
     const rawNext = deps.nextStep;
-    const nextStep = rawNext === void 0 ? "absent" : rawNext;
+    const nextStep2 = rawNext === void 0 ? "absent" : rawNext;
     const env = deps.env ?? process.env;
     let line = null;
     if (deps.captureSkipped === FREE_LIMIT_REACHED) {
       line = freeLimitMessage(env);
     } else if (deps.captureSkipped === TRIAL_EXPIRED) {
       line = trialExpiredMessage(env);
-    } else if (nextStep === null) {
+    } else if (nextStep2 === null) {
       return false;
-    } else if (nextStep !== "absent") {
-      line = nextStepMessage(nextStep, repo, env);
+    } else if (nextStep2 !== "absent") {
+      line = nextStepMessage(nextStep2, repo, env);
     } else {
       if (status !== "not_connected" && status !== "disconnected") return false;
       line = nudgeMessage(status, repo, env);
@@ -9611,8 +9641,7 @@ async function fetchOnboardingState(input = {}, deps = {}) {
           lead: "your setup status didn't load",
           status: res.status,
           payload: obj,
-          env,
-          overrides: FUNCTIONS_SLUG_COPY
+          env
         }),
         repo: repo ?? void 0
       };
@@ -9638,12 +9667,12 @@ function normalizeState(raw) {
     agentCapturing: sig.agentCapturing === true,
     anythingCaptured: sig.anythingCaptured === true
   };
-  let nextStep = null;
+  let nextStep2 = null;
   const ns = r.nextStep;
   if (ns && typeof ns === "object") {
     const o = ns;
     if (typeof o.slug === "string" && o.slug.trim().length > 0) {
-      nextStep = {
+      nextStep2 = {
         slug: o.slug,
         title: typeof o.title === "string" ? o.title : "",
         body: typeof o.body === "string" ? o.body : ""
@@ -9658,7 +9687,7 @@ function normalizeState(raw) {
   return {
     signals,
     cell: typeof r.cell === "string" ? r.cell : "",
-    nextStep,
+    nextStep: nextStep2,
     terminal,
     repoSyncStatus: typeof r.repoSyncStatus === "string" ? r.repoSyncStatus : null,
     repo
@@ -9892,7 +9921,10 @@ async function runCapture(input, deps = {}) {
         }
         return {
           status: "skipped-out-of-scope",
-          detail: `capture skipped (${scope.reason}) \u2014 repo not in capture scope; nothing read or sent.`,
+          // The reason is a closed enum, so it renders as the sentence it means. It used to
+          // print as `capture skipped (not_a_member) — repo not in capture scope`, which is
+          // a slug in front of a person however respectable its provenance.
+          detail: `capture skipped \u2014 ${SCOPE_REASON_COPY[scope.reason]}.`,
           count: 0
         };
       }
@@ -10042,8 +10074,7 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
         lead: "the decisions weren't saved",
         status: res.status,
         payload: obj,
-        env: ctx.env,
-        overrides: FUNCTIONS_SLUG_COPY
+        env: ctx.env
       })
     };
   }
@@ -35211,8 +35242,7 @@ async function syncDecisions(opts = {}, deps = {}) {
           lead: "the decision log didn't sync",
           status: res.status,
           payload: rec,
-          env,
-          overrides: FUNCTIONS_SLUG_COPY
+          env
         }),
         repo
       };

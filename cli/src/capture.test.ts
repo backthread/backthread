@@ -810,6 +810,19 @@ test('ARP-693 — fromTurnIndex at/after the end → nothing-to-capture, no infe
 
 // --- ARP-1054: pre-send capture-scope skip ----------------------------------
 
+test('a scope skip is reported as a sentence, not as the enum value', async () => {
+  // ⚠ A MUTANT SURVIVED HERE. A table of sentences with nothing driving the call site is a
+  // table, not a behaviour: reverting `capture.ts` to `capture skipped (not_a_member)` was
+  // invisible to the whole suite. This drives the real runCapture.
+  const out = await runCapture(
+    HOOK,
+    deps({ checkScopeImpl: async () => ({ send: false, reason: 'not_a_member' }) }),
+  );
+  assert.equal(out.status, 'skipped-out-of-scope');
+  assert.match(out.detail, /you're not a member of the account that owns this repo/);
+  assert.doesNotMatch(out.detail, /not_a_member/);
+});
+
 test('scope skip (capture_paused) → skipped-out-of-scope; transcript never read, nothing sent, no nudge', async () => {
   const { fetch: fetchImpl, calls } = stubFetch({});
   let readTranscript = false;

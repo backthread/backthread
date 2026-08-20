@@ -15,7 +15,7 @@
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildOnboardingStateUrl } from './urls.js';
-import { describeFailure, FUNCTIONS_SLUG_COPY } from './failureCopy.js';
+import { describeFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // --- response contract (mirrors supabase/functions/onboarding-state/state.ts) ---
@@ -199,7 +199,6 @@ export async function fetchOnboardingState(
           status: res.status,
           payload: obj,
           env,
-          overrides: FUNCTIONS_SLUG_COPY,
         }),
         repo: repo ?? undefined,
       };
