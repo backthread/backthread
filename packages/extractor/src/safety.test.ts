@@ -32,6 +32,27 @@
 //   8. the DEFAULT_BUDGET default parameter widened — production passes no budget at all
 //   9. a `SKIP_DIRS` entry removed          — must not throw, but must change what is counted
 
+// ⚠️ ONE GUARANTEE IS DELIBERATELY NOT PINNED, AND SAYING SO IS THE POINT. The docstring
+// promises a throw on the FIRST violation, and for a zip-bomb guard aborting mid-walk rather
+// than after walking the whole tree is most of the value. Verification proved it unpinned:
+// hoisting the `maxTotalBytes` and `maxFiles` checks out of the loop to after `walk()` leaves
+// all of these tests green, because the same error is still raised — just later.
+//
+// It is unpinned because no honest deterministic test exists here. `readdirSync` order is
+// unspecified, so every "the walk stopped before reaching X" fixture depends on which entry the
+// filesystem happens to return first, and the only order-independent instrument is a timing
+// assertion, which is flaky by construction. A guard that fails on a fast machine and passes on
+// a slow one is worse than a recorded gap. Pinning it properly needs an injectable `readdir`
+// counter, which means changing `safety.ts`'s signature for testability — a real option, and a
+// deliberate decision for whoever needs the guarantee rather than a silent omission here.
+//
+// Two further mutants survive and were proved EQUIVALENT rather than missed: deleting the
+// `continue` after the symlink branch (an `lstat` on a symlink reports neither file nor
+// directory, so control leaves the body either way) and `walk(resolve(root))` → `walk(root)`
+// (identical accept/reject; only the path printed in the message differs). A third —
+// `else if (st.isFile())` → `else` — is a real behaviour change reachable only by a FIFO,
+// socket or device node, none of which git can check out, and it makes the guard stricter.
+
 import {
   mkdtempSync,
   mkdirSync,
@@ -49,8 +70,6 @@ import { enforceSourceBudget, DEFAULT_BUDGET, type SafetyBudget } from './safety
 interface Fixtures {
   /** A real directory on disk, with real files in it. Path fully resolved. */
   tree(files?: Record<string, string>): string;
-  /** The same, but with the path left UNRESOLVED — see the unresolved-root test. */
-  unresolvedTree(files?: Record<string, string>): string;
   /** A directory OUTSIDE any clone — what a hostile symlink wants to reach. */
   outside(): string;
   /** A directory whose NAME merely starts with another's — the prefix-match bypass. */
@@ -77,13 +96,10 @@ function withTrees<T>(body: (make: Fixtures) => T): T {
     return dir;
   };
   const make: Fixtures = {
-    unresolvedTree(files = {}) {
+    tree(files = {}) {
       const dir = mkdtempSync(join(tmpdir(), 'bt-safety-'));
       made.push(dir);
-      return write(dir, files);
-    },
-    tree(files = {}) {
-      return write(realpathSync(make.unresolvedTree()), files);
+      return write(realpathSync(dir), files);
     },
     outside() {
       return make.tree({ 'secret.txt': 'a token, or /etc/passwd' });
@@ -238,24 +254,36 @@ describe('the path-traversal guard', () => {
       ).not.toThrow();
     }));
 
-  test('⚠️ works on an UNRESOLVED root, so it is the guard resolving and not the caller', () =>
+  test('⚠️ works on a root reached THROUGH a symlink, so it is the guard resolving', () =>
     withTrees((make) => {
-      // ⚠️ REVIEW FINDING, AND IT CORRECTED THIS FILE'S OWN REASONING. An earlier note here
-      // claimed fixtures MUST pre-resolve their root or in-tree symlinks would look like
-      // escapes. That is false: `enforceSourceBudget` calls `realpathSync(root)` itself, so the
-      // comparison is resolved-to-resolved whatever the caller passes — and because every
-      // fixture WAS pre-resolved, replacing that call with `resolve(root)` survived the whole
-      // suite. A test resting on a false premise is a test nobody can maintain.
+      // ⚠️ REVIEW FINDING, AND IT CORRECTED THIS FILE'S OWN REASONING TWICE.
       //
-      // On macOS `os.tmpdir()` is `/var/folders/…` and `/var` is a symlink to `/private/var`,
-      // so an unresolved root is exactly where that mutant bites. Both halves are asserted: an
-      // in-tree link is still accepted, and an escape is still caught.
-      const root = make.unresolvedTree({ 'pkg/a.ts': 'export const a = 1;' });
-      symlinkSync(join(root, 'pkg'), join(root, 'alias'));
-      expect(() => enforceSourceBudget(root, NO_LIMITS)).not.toThrow();
+      // First: an earlier note claimed fixtures MUST pre-resolve their root or in-tree symlinks
+      // would look like escapes. False — `enforceSourceBudget` calls `realpathSync(root)`
+      // itself. And because every fixture pre-resolved anyway, replacing that call with
+      // `resolve(root)` survived the whole suite.
+      //
+      // Then: the first fix relied on `os.tmpdir()` being reached through a symlink, which is
+      // true on macOS (`/var` → `/private/var`) and FALSE on the Linux runner CI actually uses,
+      // where it is plain `/tmp`. Verification measured it: with the mutant applied under a
+      // non-symlinked TMPDIR the suite stayed at 26/26. A guarantee pinned only on the author's
+      // machine is not pinned.
+      //
+      // So the fixture builds its own symlinked route to the root and passes THAT as the root.
+      // `realpathSync` collapses it and the comparison is resolved-to-resolved; `resolve` does
+      // not, and the in-tree link below then reads as an escape. True on every platform,
+      // because the symlink is ours rather than the operating system's.
+      const real = make.tree({ 'pkg/a.ts': 'export const a = 1;' });
+      const route = join(make.tree(), 'route-to-root');
+      symlinkSync(real, route);
+      expect(realpathSync(route)).toBe(real);
+      expect(route).not.toBe(real);
 
-      symlinkSync(make.outside(), join(root, 'escape'));
-      expect(() => enforceSourceBudget(root, NO_LIMITS)).toThrow(/symlink escapes clone root/);
+      symlinkSync(join(real, 'pkg'), join(real, 'alias'));
+      expect(() => enforceSourceBudget(route, NO_LIMITS)).not.toThrow();
+
+      symlinkSync(make.outside(), join(real, 'escape'));
+      expect(() => enforceSourceBudget(route, NO_LIMITS)).toThrow(/symlink escapes clone root/);
     }));
 });
 
