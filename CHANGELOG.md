@@ -26,7 +26,7 @@ every relayed failure carries a `reason` saying which of the two it is — and t
 never read it. Now it does, on **every** endpoint that sends one: `how` / the MCP `query`
 tool, `learn` (start and answer), and `ask-me` (ask and answer).
 
-**`sync` and `capture` stop relaying slugs too.** Those talk to a different, older service
+**`sync`, `capture` and the setup check stop relaying slugs too.** Those talk to a different, older service
 that has no `reason` to send, so they were quietly printing things like
 `read-decisions rejected (403): not_a_member` and `ingest rejected (500): persist_failed`.
 Every code that service actually emits now maps to the action it implies — an expired

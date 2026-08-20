@@ -34,6 +34,7 @@ import { requestAsk, answerAsk } from './inflow.js';
 import { serverInfer } from './infer.js';
 import { syncDecisions } from './localDecisions.js';
 import { runCapture } from './capture.js';
+import { fetchOnboardingState } from './onboardingState.js';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -265,6 +266,18 @@ const DRIVERS: Readonly<Record<string, Driver>> = {
         { env, fetchImpl: stubFetch(status, body) },
       )
     ).error ?? '',
+  buildOnboardingStateUrl: async (status, body, env) =>
+    (
+      await fetchOnboardingState(
+        {},
+        {
+          env,
+          fetchImpl: stubFetch(status, body),
+          readConfigImpl: async () => CONFIG as never,
+          readRemoteImpl,
+        },
+      )
+    ).detail,
   buildReadDecisionsUrl: async (status, body, env) =>
     (
       await syncDecisions(
@@ -514,4 +527,54 @@ test('a Functions slug that is not on the table degrades, it does not leak', () 
   });
   assert.doesNotMatch(out, /some_new_function_slug/);
   assert.match(out, /HTTP 500/);
+});
+
+// --- "never shown" has to mean the string is never BUILT ----------------------------
+
+/** The non-test modules that call a given builder. */
+function callersOf(builder: string): string[] {
+  const callers: string[] = [];
+  for (const file of sourceFiles()) {
+    const base = file.slice(SRC_DIR.length + 1);
+    if (base === 'urls.ts' || base === 'failureCopy.ts') continue;
+    if (new RegExp(`\\b${builder}\\s*\\(`).test(readFileSync(file, 'utf8'))) callers.push(base);
+  }
+  return callers;
+}
+
+test('a never-shown endpoint does not even READ the server diagnostic', () => {
+  // ⚠ THE ESCAPE THIS CLOSES. `never-shown` is the one disposition the registry cannot
+  // check by driving code, so it was a promise — and an outside read found the promise
+  // false on THREE entries at once, each with a plausible sentence attached. Two were
+  // printed outright; the third built the string and relied on its single caller
+  // discarding it, which is a fact about the caller and not about the string.
+  //
+  // So the word is held to its strong reading: a module serving a `never-shown` endpoint
+  // must not pull `error` or `message` off a response at all. Then there is no sentence to
+  // leak, whoever prints what. It is a source-level property rather than a behavioural one,
+  // which is the honest limit here — but it is checkable, and a promise is not.
+  const READS_DIAGNOSTIC = /\b(?:rec|obj|payload|body|json|data|res)\.(?:error|message)\b/;
+  const offenders: string[] = [];
+  for (const [builder, d] of Object.entries(CLI_ENDPOINTS) as Array<[string, EndpointDisposition]>) {
+    if (d.renders !== 'never-shown') continue;
+    for (const caller of callersOf(builder)) {
+      if (READS_DIAGNOSTIC.test(readFileSync(join(SRC_DIR, caller), 'utf8'))) {
+        offenders.push(`${builder} -> ${caller}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], 'a "never shown" endpoint is having its diagnostic read anyway');
+});
+
+test('the never-shown guard is looking at real callers, not at an empty list', () => {
+  // A caller-finder that matches nothing passes the test above having checked nothing.
+  const neverShown = (Object.entries(CLI_ENDPOINTS) as Array<[string, EndpointDisposition]>).filter(
+    ([, d]) => d.renders === 'never-shown',
+  );
+  assert.ok(neverShown.length > 0, 'nothing is classified never-shown any more — delete the guard, do not leave it vacuous');
+  for (const [builder] of neverShown) {
+    assert.ok(callersOf(builder).length > 0, `${builder}: no caller found, so the guard checked nothing`);
+  }
+  // And prove the finder works on a builder we know has one.
+  assert.ok(callersOf('buildGroundedAskUrl').includes('query.ts'));
 });

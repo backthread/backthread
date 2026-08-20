@@ -15,6 +15,7 @@
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildOnboardingStateUrl } from './urls.js';
+import { describeFailure, FUNCTIONS_SLUG_COPY } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // --- response contract (mirrors supabase/functions/onboarding-state/state.ts) ---
@@ -186,16 +187,20 @@ export async function fetchOnboardingState(
     }
 
     if (!res.ok) {
+      // The one caller today discards this detail, and that is exactly why it goes
+      // through the shared renderer anyway: "nobody prints it" is a property of the
+      // CALLER, not of this string, and the string was being built ready to leak the
+      // moment a second caller decided to show it.
       const obj = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
-      const serverErr =
-        typeof obj.message === 'string' && obj.message.length > 0
-          ? obj.message
-          : 'error' in obj
-            ? String(obj.error)
-            : `HTTP ${res.status}`;
       return {
         status: 'fetch-failed',
-        detail: `onboarding rejected (${res.status}): ${serverErr}`,
+        detail: describeFailure({
+          lead: "your setup status didn't load",
+          status: res.status,
+          payload: obj,
+          env,
+          overrides: FUNCTIONS_SLUG_COPY,
+        }),
         repo: repo ?? undefined,
       };
     }

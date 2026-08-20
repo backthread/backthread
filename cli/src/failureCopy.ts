@@ -256,9 +256,12 @@ export const CLI_ENDPOINTS: Readonly<Record<string, EndpointDisposition>> = Obje
   buildInferDecisionsUrl: { renders: 'failure-body', entryPoint: 'serverInfer' },
 
   // --- worker origin, nothing shown ---------------------------------------------------
+  // The ONLY `never-shown` endpoint left, and the test below holds it to the strong reading
+  // of that word: its module must not read `error` / `message` off the response at all, so
+  // there is no sentence to leak rather than merely nobody printing one today.
   buildCaptureScopeUrl: {
     renders: 'never-shown',
-    why: 'the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else\'s session.',
+    why: 'the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else\'s session. It reads a verdict, never a diagnostic.',
   },
 
   // --- Supabase Functions origin -------------------------------------------------------
@@ -273,10 +276,10 @@ export const CLI_ENDPOINTS: Readonly<Record<string, EndpointDisposition>> = Obje
   // registry claimed nobody ever saw. A registry whose justifications are unverified is
   // the failure mode it was built to end, so the fix is the wiring, not the prose.
   buildReadDecisionsUrl: { renders: 'failure-body', entryPoint: 'syncDecisions' },
-  buildOnboardingStateUrl: {
-    renders: 'never-shown',
-    why: 'onboarding state degrades to "unknown" and the flow continues; a server sentence here would interrupt a first run to report something the user cannot act on.',
-  },
+  // Its one caller discards the detail today — but that is a fact about the CALLER, and a
+  // second one would inherit a ready-made slug. Rendered, so the category below can mean
+  // "the string is never even built" rather than "nobody happens to print it".
+  buildOnboardingStateUrl: { renders: 'failure-body', entryPoint: 'fetchOnboardingState' },
   buildCliAuthPollUrl: {
     renders: 'own-slug-map',
     why: 'the login poll owns a state machine (pending / expired / claimed), not a failure taxonomy — each state is its own instruction to the person waiting at the terminal.',

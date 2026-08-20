@@ -126,7 +126,10 @@ test('a non-2xx response → fetch-failed (never throws)', async () => {
   const { fetch } = stubFetch({ status: 401, body: { error: 'invalid token' } });
   const out = await fetchOnboardingState({}, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'fetch-failed');
-  assert.match(out.detail, /401/);
+  // An expired credential says what to DO. The detail is discarded by today's only
+  // caller, which is precisely why it must already be safe to print.
+  assert.match(out.detail, /run `backthread login` again/);
+  assert.doesNotMatch(out.detail, /invalid token/);
 });
 
 test('a thrown fetch → fetch-failed (never throws)', async () => {
