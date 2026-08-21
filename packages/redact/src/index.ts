@@ -328,13 +328,67 @@ export const HARVESTED_PATH_EXTENSIONS: readonly string[] = [
   'py', 'rb', 'ex', 'exs', 'php', 'kt', 'dart', 'swift', 'java', 'go',
 ];
 
-// LONGEST-FIRST alternation. JS regex alternation is first-match-wins, not
-// longest-match-wins, so `js|json` would match `package.js` out of
-// `package.json` and emit a file that doesn't exist. Sorted by length desc
-// (ties broken alphabetically, so the built pattern is deterministic).
-const EXT_ALTERNATION = [...HARVESTED_PATH_EXTENSIONS]
-  .sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0))
-  .join('|');
+// ALTERNATION ORDER IS NOT A GUARD — the trailing lookahead is. JS alternation is
+// first-match-wins, so it is tempting to sort longest-first and call that the thing
+// stopping `package.json` from matching as `package.js`. It isn't: `SHELL_PATH_TOKEN`
+// ends in `(?![\w.@~+/\\-])`, and every shorter extension in this list is followed by
+// a word character in the pair that shadows it (`js` inside `json`, `ts` inside `tsx`,
+// `ex` inside `exs`), so the lookahead rejects the short match and the engine
+// backtracks to the long one on its own. A longest-first sort here is measurably dead
+// code — reversing this list produces byte-identical output — so it is deliberately
+// absent rather than present-and-untested. If you ever weaken the lookahead, the
+// shadowing pairs above are what breaks.
+const EXT_ALTERNATION = HARVESTED_PATH_EXTENSIONS.join('|');
+
+/**
+ * Longest plausible repo-relative path, in characters. A shell command can carry a
+ * heredoc, a base64 blob, or a generated one-liner; `+` and `/` both being legal in
+ * base64 means a blob can present as an enormous "path". Fuzzing produced a single
+ * 16,892-character token. No file anyone learns a system from is anywhere near this.
+ */
+const MAX_SHELL_PATH_CHARS = 200;
+
+/**
+ * Most distinct shell-derived paths one session may contribute. Fuzzing produced a
+ * single command yielding 20,000. The cap is applied in ENCOUNTER order, before the
+ * final sort, deliberately: the output is sorted, so truncating after sorting would
+ * systematically keep alphabetically-early junk (`.git/…`, `AAAA+bbb/…`) and throw
+ * away the real source files this harvest exists to capture.
+ */
+const MAX_SHELL_PATHS = 200;
+
+/**
+ * Directories that exist on disk, pass every other gate, and are still never part of
+ * the system anyone is learning. Applied to shell-derived paths only — a path-named
+ * tool input is an explicit act by the agent and keeps its existing behaviour.
+ */
+const SHELL_EXCLUDED_DIRS = new Set(['.git', 'node_modules']);
+
+/** Options for `sessionPaths`. */
+export interface SessionPathsOptions {
+  /**
+   * Does `repoRelativePath` name a file that actually exists in this repo?
+   *
+   * REQUIRED for any shell-derived path to be emitted at all. A token scraped out
+   * of a command string can be a file outside the repo reached after a `cd`, a
+   * hostname in a scheme-less URL, a REST route, a string literal inside a heredoc,
+   * or prose in a heredoc'd document. Every one of those is well-formed enough that
+   * no string rule can reject it, and every one of them is, by construction, not a
+   * file in the repo — so existence is the only check that separates them from the
+   * real thing. Omit this and NO shell-derived path is emitted (fail closed); path-
+   * named tool inputs are unaffected either way.
+   *
+   * Injected rather than performed here because this package is pure and dependency-
+   * free by design (the CLI bundle inlines it). The caller already holds the repo
+   * root and a filesystem; it should memoise, since one session asks thousands of
+   * times.
+   *
+   * KNOWN TRADE: a file the session DELETED no longer exists, so its path is lost.
+   * Accepted — a decision anchored to a path that resolves to nothing teaches
+   * nobody anything, and the alternative is trusting every unverifiable token.
+   */
+  exists?: (repoRelativePath: string) => boolean;
+}
 
 /**
  * Path-shaped tokens inside a shell command string. Deliberately a TOKEN SCAN,
@@ -352,17 +406,27 @@ const EXT_ALTERNATION = [...HARVESTED_PATH_EXTENSIONS]
  *    as natural token boundaries — no stripping pass needed. It also excludes the
  *    glob metacharacters `* ? [ { `, so `src/*.ts` and `src/a[0].ts` simply do not
  *    match (a glob is not a file).
- *  - The lookbehind rejects a token whose preceding character is itself path-ish
- *    (`/ \ . @ ~ + - $ _` + word chars). That is what keeps a URL out:
- *    `https://example.com/x.json` can only start at `example`, which is preceded
- *    by `/` → rejected; `x.json` alone has no `/` → rejected.
- *  - The lookahead rejects a token followed by a path-ish character, so
- *    `bundle.js.map` doesn't harvest as `bundle.js`.
+ *  - The lookahead rejects a token followed by a path-ish character. THIS is what
+ *    keeps `package.json` from harvesting as `package.js`, and `bundle.js.map`
+ *    from harvesting as `bundle.js` — not the order of the extension list.
+ *  - The lookbehind rejects a token whose preceding character is itself path-ish.
+ *    It stops a mid-path false start (`…/vendor/x.json` re-matching at `x`). It is
+ *    NOT what keeps URLs out, despite how it reads: measured, deleting it leaves
+ *    every URL case still passing, because `https://example.com/x.json` matches at
+ *    the second slash as the ABSOLUTE path `/example.com/x.json` and is then
+ *    dropped for being outside the repo root. Say what actually holds a line.
  *
- * Everything the scan yields is then run through the SAME absolute/relative
- * fence as every other harvested path (`isAbsolute` → `relativizeUnder` →
- * `normalizeRepoRelative`, or `isForeignRelativePath`) — there is no second,
- * weaker path into the output.
+ * A REGEX CANNOT DECIDE THIS, which is the load-bearing point. `cd /etc && cat
+ * app/secrets.json` names a file outside the repo using a token indistinguishable
+ * from a real relative path; a scheme-less `curl internal-api.example/v3/x.json`
+ * is a hostname; a heredoc writing a `.ts` file contains string literals shaped
+ * exactly like paths. All three were produced by fuzzing and all three used to be
+ * emitted. So the scan is only a CANDIDATE generator: everything it yields runs
+ * through the SAME absolute/relative fence as every other harvested path
+ * (`isAbsolute` → `relativizeUnder` → `normalizeRepoRelative`, or
+ * `isForeignRelativePath`) AND THEN through the caller's `exists` predicate, which
+ * is the actual authority on whether a token names a file in this repo. There is
+ * no second, weaker route into the output.
  */
 const SHELL_PATH_TOKEN = new RegExp(
   `(?<![\\w.@~$+/\\\\-])/?[\\w.@~+-]+(?:/[\\w.@~+-]+)+\\.(?:${EXT_ALTERNATION})(?![\\w.@~+/\\\\-])`,
@@ -392,9 +456,20 @@ const SHELL_PATH_TOKEN = new RegExp(
  * so an agent that calls its shell tool something other than `Bash` is covered
  * too; Codex passes the same field as an argv array, which we join first.
  */
-function pathsFromRecord(rec: unknown): string[] {
+/**
+ * One candidate path plus WHERE it came from. The origin decides which gates apply:
+ * a path-named tool input is an unambiguous, explicit act by the agent and keeps its
+ * long-standing behaviour, while a token scraped out of a command string is a guess
+ * and has to earn its place (see `sessionPaths`).
+ */
+interface CandidatePath {
+  raw: string;
+  fromShell: boolean;
+}
+
+function pathsFromRecord(rec: unknown): CandidatePath[] {
   if (!rec || typeof rec !== 'object') return [];
-  const out: string[] = [];
+  const out: CandidatePath[] = [];
   const r = rec as {
     type?: unknown;
     message?: { content?: unknown };
@@ -412,7 +487,7 @@ function pathsFromRecord(rec: unknown): string[] {
           ? command.filter((c): c is string => typeof c === 'string').join(' ')
           : null;
     if (text === null || text.length === 0) return;
-    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push(m[0]);
+    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push({ raw: m[0], fromShell: true });
   };
 
   const pushFromInput = (input: unknown): void => {
@@ -425,7 +500,7 @@ function pathsFromRecord(rec: unknown): string[] {
       command?: unknown;
     };
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
-      if (typeof v === 'string' && v.trim().length > 0) out.push(v.trim());
+      if (typeof v === 'string' && v.trim().length > 0) out.push({ raw: v.trim(), fromShell: false });
     }
     pushFromCommand(i.command);
   };
@@ -488,13 +563,29 @@ function codexSessionCwd(records: unknown[]): string | null {
  * Paths NOT under the resolved root are dropped (foreign to this repo). Already-
  * relative paths are kept as-is (deduped). Output is deduped + sorted for a
  * stable order. Pure → unit-testable; zero runtime deps (plain string ops).
+ *
+ * `options.exists` — REQUIRED for any shell-derived path to be emitted; see
+ * `SessionPathsOptions`. Without it this function behaves exactly as it did before
+ * shell scanning existed.
  */
-export function sessionPaths(records: unknown[], repoRoot?: string): string[] {
+export function sessionPaths(records: unknown[], repoRoot?: string, options?: SessionPathsOptions): string[] {
   const root = (repoRoot && repoRoot.trim().length > 0 ? repoRoot.trim() : codexSessionCwd(records)) ?? null;
+  const exists = options?.exists;
 
   const seen = new Set<string>();
+  let shellPathCount = 0;
   for (const rec of records) {
-    for (const p of pathsFromRecord(rec)) {
+    for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
+      // FAIL CLOSED. A shell token is a guess until something confirms it names a
+      // real file in this repo. A consumer that hasn't opted in by supplying
+      // `exists` gets the pre-scan behaviour rather than unverified guesses — the
+      // absence of a check must never be the reason something leaks.
+      if (fromShell && exists === undefined) continue;
+      // Length cap BEFORE the fence: a base64 blob is not a path, and there is no
+      // reason to normalize 17 kilobytes of it to find that out.
+      if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
+
+      let norm: string | null;
       if (isAbsolute(p)) {
         // Absolute path: needs a root to relativize against. No root → skip it
         // (never emit a machine-absolute path). Outside the root → foreign → drop.
@@ -504,9 +595,7 @@ export function sessionPaths(records: unknown[], repoRoot?: string): string[] {
         // Re-check the relativized RESULT: string-prefix relativization can leave
         // a `../`-escape (`/repo/../etc/passwd` → `../etc/passwd`). Normalize it
         // and drop anything that still traverses above the root.
-        const norm = normalizeRepoRelative(rel);
-        if (norm === null || norm.length === 0) continue;
-        seen.add(norm);
+        norm = normalizeRepoRelative(rel);
       } else if (!isForeignRelativePath(p)) {
         // Genuinely relative — keep as-is (a path the agent referenced relative
         // to the repo). Strip any leading `./` for a stable, canonical form.
@@ -514,9 +603,28 @@ export function sessionPaths(records: unknown[], repoRoot?: string): string[] {
         // above: they can't be confirmed inside the repo, so we never emit them.
         // `isForeignRelativePath` only catches a LEADING `../`, so normalize to
         // resolve MID-path `..` and drop any that escape the root.
-        const norm = normalizeRepoRelative(p.replace(/^(?:\.\/)+/, ''));
-        if (norm !== null && norm.length > 0) seen.add(norm);
+        norm = normalizeRepoRelative(p.replace(/^(?:\.\/)+/, ''));
+      } else {
+        continue;
       }
+      if (norm === null || norm.length === 0) continue;
+
+      if (fromShell) {
+        // A relative token carries no evidence of WHERE it is relative to. `cd /etc
+        // && cat app/secrets.json` yields `app/secrets.json`, which the fence above
+        // cannot fault — it is a well-formed in-repo-looking path naming a file
+        // outside the repo. So does a scheme-less URL, a REST route, and a string
+        // literal inside a heredoc. Only the filesystem can settle it, so the last
+        // word belongs to the caller's predicate, not to any string rule here.
+        if (norm.split('/').some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
+        if (!exists!(norm)) continue;
+        // Cap in ENCOUNTER order (see MAX_SHELL_PATHS) — never after the sort.
+        if (!seen.has(norm)) {
+          if (shellPathCount >= MAX_SHELL_PATHS) continue;
+          shellPathCount += 1;
+        }
+      }
+      seen.add(norm);
     }
   }
 

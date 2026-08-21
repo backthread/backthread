@@ -19,12 +19,23 @@ recorded decisions carrying any file at all fell from 85% to 38%. One session th
 produced nothing at all yields 153 real files once the commands are read.
 
 So the harvest now reads shell commands too — `Bash` in Claude Code, the `shell` argv
-array in Codex — and the fence around it did not move. A token scraped out of a command
-goes through exactly the same checks as every other path: never machine-absolute, never
-outside your repo root, never a `../` escape. On top of that it has to end in a known
-source or doc extension and name a directory, so a wildcard, a bare filename, and a URL
-in a `curl` are all left alone. **Only path-shaped substrings are ever kept — the command
-itself, and anything it printed, still never leaves your machine.**
+array in Codex.
+
+**A path found this way has to be a real file in your repo before it counts.** That
+sounds obvious and it is the whole design. A token taken out of a command carries no
+evidence of what it is relative to: after `cd /etc`, `cat app/secrets.json` reads a file
+that has nothing to do with your repo while looking exactly like one that does. A
+scheme-less `curl internal-api.example/v3/export.json` is a hostname. A string literal
+inside a heredoc is program text, not a file anyone opened. No amount of pattern matching
+separates those from the real thing, so the capture hook checks each one against your
+working tree and keeps only what is actually there. `.git/` and `node_modules/` are
+excluded even though they exist.
+
+The rest of the fence is unchanged and still absolute: nothing machine-absolute, nothing
+outside your repo root, nothing that traverses upward, ever leaves your machine. **Only
+path-shaped substrings can be kept at all — the command itself, and anything it printed,
+still never leave.** One consequence worth stating plainly: a file the session *deleted*
+no longer exists, so it is not recorded.
 
 ## 0.21.0
 
