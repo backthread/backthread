@@ -33,7 +33,7 @@
 // seam lets tests inject a stub without a live network or Worker.
 
 import { buildInferDecisionsUrl } from './urls.js';
-import { describeFailure } from './failureCopy.js';
+import { describeFailure, describeTransportFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import type { BackthreadConfig } from './config.js';
 
@@ -259,7 +259,14 @@ export async function serverInfer(
       decisions: [],
       persisted: false,
       sessionId: transcript.sessionId ?? null,
-      error: `inference request failed: ${(e as Error).message}`,
+      error: describeTransportFailure({
+        lead: "this session wasn't written up",
+        kind: (e as Error).name === 'AbortError' ? 'timeout' : 'unreachable',
+        route: 'infer-decisions',
+        attempts: 1,
+        cause: (e as Error).message,
+        env,
+      }),
     };
   }
 

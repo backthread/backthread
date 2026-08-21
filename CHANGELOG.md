@@ -28,6 +28,11 @@ leaves you with nothing to do, which is the state this release exists to get you
 *refusal* — not a member, no allowance left, asked too soon — names its own remedy instead,
 and is never sent to the issue tracker.
 
+And when nothing comes back at all — a timeout, a dead socket — you get
+`Backthread could not be reached — check your connection and try again.` rather than
+`grounded-ask request failed: fetch failed (after 2 attempts)`. No body means no `reason` to
+key off; it never meant the route name was yours to read.
+
 That distinction is not a guess on this end. The server has been sending it for a while —
 every relayed failure carries a `reason` saying which of the two it is — and the CLI simply
 never read it. Now it does, on **every** endpoint that sends one: `how` / the MCP `query`

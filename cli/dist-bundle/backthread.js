@@ -7325,6 +7325,18 @@ var SLUG_COPY = Object.freeze({
   "insufficient scope": RE_AUTH,
   "missing authorization": RE_AUTH
 });
+function describeTransportFailure(input) {
+  const verbose = verboseEnabled(input.env ?? process.env);
+  const parts = [`route=${input.route}`, `attempts=${input.attempts}`];
+  if (input.timeoutMs !== void 0) parts.push(`timeoutMs=${input.timeoutMs}`);
+  if (input.cause) parts.push(`cause=${input.cause}`);
+  const suffix = verbose ? ` [${parts.join(" ")}]` : "";
+  if (input.kind === "timeout") {
+    const secs = input.timeoutMs === void 0 ? null : Math.round(input.timeoutMs / 1e3);
+    return `${input.lead}. It took longer than ${secs === null ? "expected" : `${secs}s`} \u2014 try again.${suffix}`;
+  }
+  return `${input.lead}. Backthread could not be reached \u2014 check your connection and try again.${suffix}`;
+}
 var CLI_ENDPOINTS = Object.freeze({
   // --- worker origin, relayed-failure contract ---------------------------------------
   buildGroundedAskUrl: { renders: "failure-body", entryPoint: "queryDecisions" },
@@ -8348,7 +8360,14 @@ async function serverInfer(transcript, config2, opts = {}) {
       decisions: [],
       persisted: false,
       sessionId: transcript.sessionId ?? null,
-      error: `inference request failed: ${e.message}`
+      error: describeTransportFailure({
+        lead: "this session wasn't written up",
+        kind: e.name === "AbortError" ? "timeout" : "unreachable",
+        route: "infer-decisions",
+        attempts: 1,
+        cause: e.message,
+        env
+      })
     };
   }
   let payload;
@@ -9713,7 +9732,18 @@ async function fetchOnboardingState(input = {}, deps = {}) {
         body: JSON.stringify(repo ? { repo_slug: `${repo.owner}/${repo.name}` } : {})
       });
     } catch (e) {
-      return { status: "fetch-failed", detail: `onboarding request failed: ${e.message}`, repo: repo ?? void 0 };
+      return {
+        status: "fetch-failed",
+        detail: describeTransportFailure({
+          lead: "your setup status didn't load",
+          kind: e.name === "AbortError" ? "timeout" : "unreachable",
+          route: "onboarding-state",
+          attempts: 1,
+          cause: e.message,
+          env
+        }),
+        repo: repo ?? void 0
+      };
     }
     let payload;
     try {
@@ -34626,7 +34656,8 @@ async function queryDecisions(input, deps = {}) {
     const deepLink = buildRepoDeepLink(repo.owner, repo.name, env);
     const question = typeof input.question === "string" && input.question.trim().length > 0 ? input.question.trim() : DEFAULT_QUESTION;
     let res;
-    let failDetail = "";
+    let failKind = "unreachable";
+    let failCause = "";
     for (let attempt = 1; attempt <= GROUNDED_ASK_ATTEMPTS; attempt++) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
@@ -34645,14 +34676,14 @@ async function queryDecisions(input, deps = {}) {
           signal: ac.signal
         });
         if (res.status >= 500 && attempt < GROUNDED_ASK_ATTEMPTS) {
-          failDetail = `grounded-ask rejected (${res.status})`;
           res = void 0;
           continue;
         }
         break;
       } catch (e) {
         const aborted2 = e.name === "AbortError";
-        failDetail = aborted2 ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1e3}s` : `grounded-ask request failed: ${e.message}`;
+        failKind = aborted2 ? "timeout" : "unreachable";
+        failCause = e.message;
         res = void 0;
       } finally {
         clearTimeout(timer);
@@ -34661,7 +34692,15 @@ async function queryDecisions(input, deps = {}) {
     if (!res) {
       return {
         status: "read-failed",
-        detail: `${failDetail} (after ${GROUNDED_ASK_ATTEMPTS} attempts) \u2014 try again.`,
+        detail: describeTransportFailure({
+          lead: "the answer didn't come back",
+          kind: failKind,
+          route: "grounded-ask",
+          attempts: GROUNDED_ASK_ATTEMPTS,
+          ...failKind === "timeout" ? { timeoutMs: GROUNDED_ASK_TIMEOUT_MS } : {},
+          ...failCause ? { cause: failCause } : {},
+          env
+        }),
         repo,
         deepLink
       };
@@ -34690,7 +34729,9 @@ async function queryDecisions(input, deps = {}) {
     if (!answer) {
       return {
         status: "read-failed",
-        detail: "grounded-ask returned no answer.",
+        // Shouldn't happen (the server never-refuses) — and if it does, the reader learns
+        // what did not happen, not which endpoint disappointed us.
+        detail: "the answer came back empty. It failed on our side, so retrying will not help.",
         repo,
         deepLink
       };
@@ -35283,7 +35324,8 @@ async function syncDecisions(opts = {}, deps = {}) {
       }
     }
     let res;
-    let failDetail = "";
+    let failKind = "unreachable";
+    let failCause = "";
     for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt++) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), READ_TIMEOUT_MS);
@@ -35301,20 +35343,32 @@ async function syncDecisions(opts = {}, deps = {}) {
           signal: ac.signal
         });
         if (res.status >= 500 && attempt < READ_ATTEMPTS) {
-          failDetail = `read-decisions rejected (${res.status})`;
           res = void 0;
           continue;
         }
         break;
       } catch (e) {
-        failDetail = e.name === "AbortError" ? `read-decisions timed out after ${READ_TIMEOUT_MS / 1e3}s` : `read-decisions request failed: ${e.message}`;
+        failKind = e.name === "AbortError" ? "timeout" : "unreachable";
+        failCause = e.message;
         res = void 0;
       } finally {
         clearTimeout(timer);
       }
     }
     if (!res) {
-      return { status: "read-failed", detail: `${failDetail} (after ${READ_ATTEMPTS} attempts).`, repo };
+      return {
+        status: "read-failed",
+        detail: describeTransportFailure({
+          lead: "the decision log didn't sync",
+          kind: failKind,
+          route: "read-decisions",
+          attempts: READ_ATTEMPTS,
+          ...failKind === "timeout" ? { timeoutMs: READ_TIMEOUT_MS } : {},
+          ...failCause ? { cause: failCause } : {},
+          env
+        }),
+        repo
+      };
     }
     let payload;
     try {

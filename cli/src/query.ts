@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildGroundedAskUrl, buildRepoDeepLink } from './urls.js';
-import { describeFailure } from './failureCopy.js';
+import { describeFailure, describeTransportFailure, type TransportFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // The general-purpose question used when the caller invokes the tool without one.
@@ -275,7 +275,8 @@ export async function queryDecisions(
     // automatic retry on timeout / network error / 5xx — read-only + idempotent, so
     // repeating is safe; 4xx (auth, bad repo, too-old client) never retries.
     let res: Response | undefined;
-    let failDetail = '';
+    let failKind: TransportFailure = 'unreachable';
+    let failCause = '';
     for (let attempt = 1; attempt <= GROUNDED_ASK_ATTEMPTS; attempt++) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
@@ -293,16 +294,14 @@ export async function queryDecisions(
           signal: ac.signal,
         });
         if (res.status >= 500 && attempt < GROUNDED_ASK_ATTEMPTS) {
-          failDetail = `grounded-ask rejected (${res.status})`;
           res = undefined;
           continue; // transient server failure — retry once
         }
         break;
       } catch (e) {
         const aborted = (e as Error).name === 'AbortError';
-        failDetail = aborted
-          ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1000}s`
-          : `grounded-ask request failed: ${(e as Error).message}`;
+        failKind = aborted ? 'timeout' : 'unreachable';
+        failCause = (e as Error).message;
         res = undefined;
         // timeout / network error — retry once, then surface
       } finally {
@@ -310,9 +309,20 @@ export async function queryDecisions(
       }
     }
     if (!res) {
+      // No body came back, so there is no `reason` to key off — but "no slug reached the
+      // wire" is not the same as "this is product copy". The route name and the transport
+      // error are operator fields here exactly as they are everywhere else.
       return {
         status: 'read-failed',
-        detail: `${failDetail} (after ${GROUNDED_ASK_ATTEMPTS} attempts) — try again.`,
+        detail: describeTransportFailure({
+          lead: "the answer didn't come back",
+          kind: failKind,
+          route: 'grounded-ask',
+          attempts: GROUNDED_ASK_ATTEMPTS,
+          ...(failKind === 'timeout' ? { timeoutMs: GROUNDED_ASK_TIMEOUT_MS } : {}),
+          ...(failCause ? { cause: failCause } : {}),
+          env,
+        }),
         repo,
         deepLink,
       };
@@ -352,7 +362,9 @@ export async function queryDecisions(
       // result: degrade to a clear read-failed with the diagram link.
       return {
         status: 'read-failed',
-        detail: 'grounded-ask returned no answer.',
+        // Shouldn't happen (the server never-refuses) — and if it does, the reader learns
+        // what did not happen, not which endpoint disappointed us.
+        detail: "the answer came back empty. It failed on our side, so retrying will not help.",
         repo,
         deepLink,
       };

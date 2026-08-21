@@ -467,6 +467,56 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
   'missing authorization': RE_AUTH,
 });
 
+/**
+ * The failure that never reached a server: a timeout or a dead socket.
+ *
+ * ⚠ THE TICKET'S OWN EXAMPLE STRING LIVED HERE UNTIL LAST. `describeFailure` covers every
+ * path that got a BODY back — and these paths, by definition, did not, so they kept their
+ * original wording: `grounded-ask rejected (502) (after 2 attempts) — try again.`,
+ * `read-decisions timed out after 20s`, `inference request failed: ECONNREFUSED`. That is a bare internal route name in front of a
+ * person, on the very command the ticket names, and the fact that no slug came off the wire
+ * does not make it product copy.
+ *
+ * The route name and the transport error are operator fields like any other, so they go
+ * where the rest went.
+ */
+/**
+ * TWO KINDS, NOT THREE. A first draft had a `server` kind for "every retry returned a 5xx" —
+ * and that state does not exist: the retry loops break on the LAST attempt with the response
+ * still in hand, so a run of 5xx ends at `describeFailure` with a real body, not here. Only a
+ * timeout or a dead socket leaves nothing to render. An unreachable branch is exactly the
+ * thing this change keeps finding in other people's code.
+ */
+export type TransportFailure = 'timeout' | 'unreachable';
+
+export interface TransportCopyInput {
+  /** What did not happen, from the reader's point of view. */
+  lead: string;
+  kind: TransportFailure;
+  /** The endpoint, for the operator suffix only — never for the reader. */
+  route: string;
+  attempts: number;
+  /** The client-side budget, in ms, when the kind is a timeout. */
+  timeoutMs?: number;
+  /** The thrown transport error, for the operator suffix only. */
+  cause?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export function describeTransportFailure(input: TransportCopyInput): string {
+  const verbose = verboseEnabled(input.env ?? process.env);
+  const parts = [`route=${input.route}`, `attempts=${input.attempts}`];
+  if (input.timeoutMs !== undefined) parts.push(`timeoutMs=${input.timeoutMs}`);
+  if (input.cause) parts.push(`cause=${input.cause}`);
+  const suffix = verbose ? ` [${parts.join(' ')}]` : '';
+
+  if (input.kind === 'timeout') {
+    const secs = input.timeoutMs === undefined ? null : Math.round(input.timeoutMs / 1000);
+    return `${input.lead}. It took longer than ${secs === null ? 'expected' : `${secs}s`} — try again.${suffix}`;
+  }
+  return `${input.lead}. Backthread could not be reached — check your connection and try again.${suffix}`;
+}
+
 // --- the endpoint registry -------------------------------------------------------------
 //
 // Every endpoint this package sends a request to, and what happens to a failure from it.

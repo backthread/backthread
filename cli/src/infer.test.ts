@@ -300,7 +300,8 @@ test('serverInfer surfaces a network failure without leaking the token', async (
   }) as typeof fetch;
   const res = await serverInfer(TRANSCRIPT, CONFIG, { fetchImpl, env: {} as NodeJS.ProcessEnv });
   assert.equal(res.ok, false);
-  assert.match(res.error ?? '', /ECONNREFUSED/);
+  assert.match(res.error ?? '', /Backthread could not be reached/);
+  assert.doesNotMatch(res.error ?? '', /ECONNREFUSED/);
   assert.doesNotMatch(res.error ?? '', /backthread_pat_/);
 });
 

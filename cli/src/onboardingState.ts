@@ -15,7 +15,7 @@
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildOnboardingStateUrl } from './urls.js';
-import { describeFailure } from './failureCopy.js';
+import { describeFailure, describeTransportFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // --- response contract (mirrors supabase/functions/onboarding-state/state.ts) ---
@@ -176,7 +176,18 @@ export async function fetchOnboardingState(
         body: JSON.stringify(repo ? { repo_slug: `${repo.owner}/${repo.name}` } : {}),
       });
     } catch (e) {
-      return { status: 'fetch-failed', detail: `onboarding request failed: ${(e as Error).message}`, repo: repo ?? undefined };
+      return {
+        status: 'fetch-failed',
+        detail: describeTransportFailure({
+          lead: "your setup status didn't load",
+          kind: (e as Error).name === 'AbortError' ? 'timeout' : 'unreachable',
+          route: 'onboarding-state',
+          attempts: 1,
+          cause: (e as Error).message,
+          env,
+        }),
+        repo: repo ?? undefined,
+      };
     }
 
     let payload: unknown;

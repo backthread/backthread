@@ -138,7 +138,8 @@ test('a thrown fetch → fetch-failed (never throws)', async () => {
   }) as typeof fetch;
   const out = await fetchOnboardingState({}, deps({ fetchImpl }));
   assert.equal(out.status, 'fetch-failed');
-  assert.match(out.detail, /network down/);
+  assert.match(out.detail, /Backthread could not be reached/);
+  assert.doesNotMatch(out.detail, /network down/);
 });
 
 // --- normalizeState: defensive against a malformed payload -------------------
