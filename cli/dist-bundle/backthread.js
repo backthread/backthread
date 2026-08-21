@@ -7427,6 +7427,9 @@ function exchangeErrorMessage(status, body, env) {
     case "rate_limited":
       return "Too many attempts from this machine \u2014 wait a few minutes and try again.";
     default: {
+      if (slug === "mint_failed" && typeof body?.message === "string") {
+        return `Exchange failed (HTTP ${status}) \u2014 ${body.message}`;
+      }
       if (status >= 500) {
         return describeFailure({
           lead: "this device could not be authorized",

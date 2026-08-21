@@ -723,13 +723,16 @@ const NETWORK_MODULES = new Set([
 ]);
 
 /**
- * ⚠ THE IDENTIFIER, NOT A CALL SHAPE. The first version matched `doFetch(` / `fetch(`, and
+ * ⚠ THE IDENTIFIER, NOT A CALL SHAPE — and `\bfetch\b` alone was not enough, because it does
+ * not match `fetchImpl`, so a module taking the sender as an injected dep never tripped the
+ * allow-list at all. Named forms rather than a bare prefix, so `fetchOnboardingState` — a
+ * function that happens to start with the word — is not mistaken for one. The first version matched `doFetch(` / `fetch(`, and
  * an outside read walked past it with `const send = deps.fetchImpl ?? globalThis.fetch;`
  * followed by `await send(url, …)` — an ordinary alias. Chasing call spellings is the same
  * mistake this file already made twice with URL spellings. A module that cannot NAME fetch
  * cannot call it, however it spells the call, so the token itself is the allow-list.
  */
-const TOUCHES_FETCH = /\bfetch\b/i;
+const TOUCHES_FETCH = /\bfetch\s*\(|\bfetchImpl\b|\bfetch\b/i;
 
 test('only declared modules put a request on the wire', () => {
   const offenders = sourceFiles()
@@ -781,18 +784,41 @@ test('a not-a-fetch-target really is never fetched', () => {
  */
 function urlBindings(src: string, registered: string[]): string[] {
   const bound = new Set<string>();
+  // ⚠ IMPORTS ARE BINDINGS TOO. Only `const|let|var` was followed, so
+  // `import { buildLessonStartUrl as lessonStart }` produced a holder under a name nothing
+  // recognised — one rename and the trace stopped at the door.
+  for (const m of src.matchAll(/\bimport\s*\{([^}]*)\}\s*from/g)) {
+    for (const spec of m[1].split(',')) {
+      const parts = spec.split(/\bas\b/).map((x) => x.trim());
+      if (parts.length !== 2) continue;
+      const [orig, alias] = parts;
+      if (registered.includes(orig) || ORIGIN_DECLS.has(orig)) bound.add(alias);
+    }
+  }
   const sources = [...registered, ...ORIGIN_DECLS].join('|');
   let changed = true;
   while (changed) {
     changed = false;
     const from = [...bound, ...registered, ...ORIGIN_DECLS].join('|');
+    const add = (name: string): void => {
+      if (!bound.has(name)) {
+        bound.add(name);
+        changed = true;
+      }
+    };
     for (const m of src.matchAll(
       new RegExp(`(?:const|let|var)\\s+([A-Za-z0-9_]+)\\s*(?::[^=;]+)?=\\s*[^;\\n]*\\b(?:${from})\\b`, 'g'),
     )) {
-      if (!bound.has(m[1])) {
-        bound.add(m[1]);
-        changed = true;
-      }
+      add(m[1]);
+    }
+    // ⚠ A FUNCTION THAT RETURNS ONE IS A HOLDER TOO. `function origin() { return
+    // buildLessonStartUrl(env); }` then `origin().replace(…)` put a whole call frame between
+    // the builder and the edit — and a rule that follows values has to follow them through
+    // the plainest indirection there is.
+    for (const m of src.matchAll(
+      new RegExp(`function\\s+([A-Za-z0-9_]+)\\s*\\([^)]*\\)[^{]*\\{([^{}]*)\\}`, 'g'),
+    )) {
+      if (new RegExp(`\\b(?:${from})\\b`).test(m[2])) add(m[1]);
     }
     void sources;
   }
@@ -809,74 +835,93 @@ const LINK_EXEMPT = new Set([
   'sweep.ts', // the GitHub clone URL for a repo being swept
 ]);
 
+const EDIT_VERBS =
+  '(?:\\.\\s*(?:replace|replaceAll|concat|slice|substring|substr|split|padStart|padEnd|trim)\\b|\\s*\\+)';
+
+/**
+ * The URL-trace rule, as ONE implementation.
+ *
+ * ⚠ IT WAS TWO — the real check and a "not vacuous" copy of it — and they drifted, so the
+ * fixture list went on passing against a version of the rule the package no longer used.
+ * A guard and its own proof cannot be separate transcriptions of the same idea.
+ *
+ * `canFetch` is what separates a module that can make a request from one that merely writes
+ * a link down: constructing a URL and inventing an address are only bans where a request
+ * can follow.
+ */
+function urlTraceOffences(src: string, registered: string[], canFetch: boolean): string[] {
+  const out: string[] = [];
+  const held = [...registered, ...urlBindings(src, registered)].join('|');
+
+  // 1. Editing a URL — anywhere in the same STATEMENT as a value that holds one, not merely
+  //    adjacent to its name. ⚠ Adjacency was the last thing standing and it fell to a bare
+  //    pair of parentheses: `(builder(env)).replace(…)`, `String(b).replace(…)`,
+  //    `ENDPOINTS.start(env).replace(…)`, `(b ?? '').replace(…)`. One property access or one
+  //    wrapper call broke it every time.
+  for (const stmt of src.split(/[;\n]/)) {
+    if (!new RegExp(`\\b(?:${held})\\b`).test(stmt)) continue;
+    if (new RegExp(EDIT_VERBS).test(stmt)) {
+      out.push('edits a URL');
+      break;
+    }
+  }
+  // 2. Interpolating one in front of a PATH. The rule used to require a literal `/` right
+  //    after the closing brace and was defeated by `` `${base}${'/lesson/next'}` ``; both
+  //    continuations are covered. It stays scoped to a path because printing a link inside a
+  //    sentence is what half these modules do, and banning that would be a vocabulary rule.
+  if (new RegExp(`\\$\\{[^}]*\\b(?:${held})\\b[^}]*\\}\\s*(?:/|\\$\\{)`).test(src)) {
+    out.push('interpolates a URL in front of a path');
+  }
+  if (!canFetch) return out;
+  // 3. Constructing one at all, in a module that can request it.
+  if (/new\s+(?:globalThis\.|window\.)?URL\s*\(/.test(src)) out.push('constructs a URL');
+  // 4. Reaching for ANY origin, the app origin included, in front of a path. The app origin
+  //    is off the fetch-side ban elsewhere because it is a link people print — but
+  //    `app.backthread.dev` really does serve `/api/*`, so inside a fetcher it is an endpoint.
+  if (/\b(?:appBaseUrl\s*\(|DEFAULT_APP_URL|BACKTHREAD_APP_URL)[^;\n]*\//.test(src)) {
+    out.push('builds a path on the app origin');
+  }
+  return out;
+}
+
 test('a fetched URL traces to a registered builder — nothing invented, nothing edited', () => {
-  // ⚠ THE PROPERTY, NOT A LIST OF SHAPES — and it took four rounds of being told that. Every
+  // ⚠ THE PROPERTY, NOT A LIST OF SHAPES — and it took five rounds of being told that. Every
   // previous version banned a syntax: a method name, adjacency to the call, one spelling of
-  // an origin. Each was walked past by ordinary TypeScript — `replaceAll`, a `const` hop,
-  // `new URL(path, base)`, an interpolated binding, `export let`. `/lesson/next` is a REAL
-  // worker route emitting the contract, so each of those was the ticket's own defect one
-  // line away.
+  // an origin, a `const` binding but not an import. Each was walked past by ordinary
+  // TypeScript. `/lesson/next` is a REAL worker route emitting the contract, so each of
+  // those was the ticket's own defect one line away.
   //
-  // What holds instead: in a module that can make requests, a URL may not be CONSTRUCTED
-  // (`new URL`), INVENTED (a literal address) or EDITED — where "edited" follows the value
-  // through its bindings rather than looking only at the call site. URLs are built in
-  // urls.ts and used unaltered, or they are not built at all.
+  // What holds instead: in a module that can make requests, a URL may not be CONSTRUCTED,
+  // INVENTED or EDITED — where "edited" follows the value through its bindings, its imports
+  // and its statement, rather than looking only at the call site.
   const registered = Object.keys(CLI_ENDPOINTS);
-  const EDIT = '(?:\\.\\s*(?:replace|replaceAll|concat|slice|substring|substr|split|padStart|padEnd|trim)\\b|\\s*\\+)';
   const offenders: string[] = [];
   for (const file of sourceFiles()) {
     const base = rel(file);
     if (URL_MODULES.includes(base)) continue; // where URLs are legitimately written down
     const src = codeWithStrings(readFileSync(file, 'utf8'));
-    const holders = [...registered, ...urlBindings(src, registered)];
-    const held = holders.join('|');
-
-    // 1. Editing a URL, at the call or through any number of bindings.
-    if (new RegExp(`\\b(?:${held})\\b\\s*(?:\\([^)]*\\))?\\s*${EDIT}`).test(src)) {
-      offenders.push(`${base} edits a URL`);
-    }
-    // 2. Interpolating one in front of a path.
-    if (new RegExp(`\\$\\{[^}]*\\b(?:${held})\\b[^}]*\\}\\s*/`).test(src)) {
-      offenders.push(`${base} interpolates a URL in front of a path`);
-    }
-    // 3. Inventing one, ANYWHERE. ⚠ This was scoped to modules that can fetch, and an
-    //    outside read parked `export const COVERAGE_ENDPOINT = 'https://…'` in `version.ts`
-    //    and imported it into one. Where a URL is WRITTEN and where it is REQUESTED need
-    //    not be the same file, so the ban follows the writing. The exceptions are named
-    //    below, which is the point: a hardcoded address has to be argued for.
+    // Inventing one, ANYWHERE. ⚠ This was scoped to modules that can fetch, and an outside
+    // read parked `export const COVERAGE_ENDPOINT = 'https://…'` in `version.ts` and
+    // imported it into one. Where a URL is WRITTEN and where it is REQUESTED need not be the
+    // same file, so the ban follows the writing; the exceptions are named, which is the
+    // point — a hardcoded address has to be argued for.
     if (!LINK_EXEMPT.has(base) && /['"`]https?:\/\//.test(src)) {
       offenders.push(`${base} hardcodes a URL`);
     }
-    if (!NETWORK_MODULES.has(base)) continue;
-
-    // 4. Constructing one at all, in a module that can request it.
-    if (/new URL\s*\(/.test(src)) offenders.push(`${base} constructs a URL`);
-    // 5. Reaching for ANY origin, including the app origin, in front of a path. The app
-    //    origin is off the fetch-side ban elsewhere because it is a link people print — but
-    //    `app.backthread.dev` really does serve `/api/*`, so inside a fetcher it is an
-    //    endpoint like any other.
-    if (/\b(?:appBaseUrl\s*\(|DEFAULT_APP_URL|BACKTHREAD_APP_URL)[^;\n]*\//.test(src)) {
-      offenders.push(`${base} builds a path on the app origin`);
+    for (const o of urlTraceOffences(src, registered, NETWORK_MODULES.has(base))) {
+      offenders.push(`${base} ${o}`);
     }
   }
   assert.deepEqual(offenders, [], 'build it in urls.ts and register it instead');
 });
 
 test('the URL-trace rule is not vacuous — it catches every shape that got past it', () => {
-  // The eight spellings that were measured green, as fixtures. If the rule stops matching
-  // one of them it has quietly become the pattern-matcher it replaced.
+  // Every spelling measured green against some earlier version of this rule, as fixtures,
+  // run through the SAME function the check above uses. If one stops matching, the rule has
+  // quietly become the pattern-matcher it replaced.
   const registered = ['buildLessonStartUrl', 'buildGroundedAskUrl'];
-  const EDIT = '(?:\\.\\s*(?:replace|replaceAll|concat|slice|substring|substr|split|padStart|padEnd|trim)\\b|\\s*\\+)';
-  const catches = (src: string): boolean => {
-    const holders = [...registered, ...urlBindings(src, registered)].join('|');
-    return (
-      new RegExp(`\\b(?:${holders})\\b\\s*(?:\\([^)]*\\))?\\s*${EDIT}`).test(src) ||
-      new RegExp(`\\$\\{[^}]*\\b(?:${holders})\\b[^}]*\\}\\s*/`).test(src) ||
-      /new URL\s*\(/.test(src) ||
-      /['"`]https?:\/\//.test(src) ||
-      /\b(?:appBaseUrl\s*\(|DEFAULT_APP_URL|BACKTHREAD_APP_URL)[^;\n]*\//.test(src)
-    );
-  };
+  const catches = (src: string): boolean =>
+    urlTraceOffences(src, registered, true).length > 0 || /['"`]https?:\/\//.test(src);
   for (const shape of [
     "new URL('/lesson/next', buildLessonStartUrl(env)).toString()",
     "buildLessonStartUrl(env).replaceAll('/lesson/start', '/lesson/next')",
@@ -886,6 +931,16 @@ test('the URL-trace rule is not vacuous — it catches every shape that got past
     "fetch('https://api.backthread.dev/coverage')",
     'const origin = workerBaseUrl(env);\nfetch(`${origin}/lesson/next`);',
     "buildGroundedAskUrl(env) + '/next'",
+    // …and the round that said "one property access, one wrapper call, one pair of
+    // parentheses, or one renamed import breaks the adjacency". Each of these was measured
+    // green against the version before this one.
+    "String(buildLessonStartUrl(env)).replace('/a', '/b')",
+    "(buildLessonStartUrl(env)).replace('/a', '/b')",
+    "(buildLessonStartUrl(env) ?? '').replace('/a', '/b')",
+    "const ENDPOINTS = { start: buildLessonStartUrl };\nENDPOINTS.start(env).replace('/a', '/b');",
+    "const base = buildLessonStartUrl(env);\nconst url = `${base}${'/lesson/next'}`;",
+    'new globalThis.URL(buildLessonStartUrl(env))',
+    "function origin() { return buildLessonStartUrl(env); }\nconst u = origin().replace('/a', '/b');",
   ]) {
     assert.ok(catches(shape), `not caught: ${shape}`);
   }

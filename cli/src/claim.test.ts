@@ -151,7 +151,7 @@ test('a 5xx `message` is a relayed diagnostic here too, and is not printed', asy
   // string> }`, so relaying `message` unconditionally printed
   // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
   await withTempEnv(async (env) => {
-    const { impl } = fetchStub(500, { error: 'mint_failed', message: 'permission denied for schema private' });
+    const { impl } = fetchStub(500, { error: 'exchange_failed', message: 'permission denied for schema private' });
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.equal(result.ok, false);
     assert.match(result.message, /HTTP 500/);
@@ -199,5 +199,35 @@ test('a server sentence that already ends in a stop is not chased with ours', ()
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.match(result.message, /Upgrade to connect a capture device\.$/);
     assert.doesNotMatch(result.message, /\.\./);
+  });
+});
+
+test('the 500 that carries deliberate recovery copy keeps it', async () => {
+  // ⚠ TWO 500 ARMS, OPPOSITE KINDS. `mint_failed` ships `… — the claim code is spent;
+  // generate a fresh one.`, written on purpose, and by then the code really is burned — a
+  // fresh one is the only recovery there is. A draft that sent every 5xx through the
+  // shared renderer replaced it with "retry and file a bug", which is both useless and
+  // wrong. The discriminator is the slug, not the status.
+  await withTempEnv(async (env) => {
+    const { impl } = fetchStub(500, {
+      error: 'mint_failed',
+      message: 'could not allocate token — the claim code is spent; generate a fresh one.',
+    });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /the claim code is spent; generate a fresh one\./);
+    assert.doesNotMatch(result.message, /issues/);
+  });
+});
+
+test('the OTHER 500 arm, which pairs its slug with raw upstream text, still says nothing', async () => {
+  await withTempEnv(async (env) => {
+    const { impl } = fetchStub(500, {
+      error: 'exchange_failed',
+      message: 'permission denied for schema private',
+    });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.doesNotMatch(result.message, /permission denied/);
+    assert.match(result.message, /issues/);
   });
 });

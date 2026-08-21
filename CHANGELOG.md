@@ -72,8 +72,9 @@ error)` logic — two as a named helper, five inlined at the call site — which
 the reported one would have left six. There is one renderer now, plus a registry of every
 endpoint this package can reach and what a person sees when it fails. Endpoints can only be
 born in one module; that module cannot make requests; every export of it must be in the
-registry; and no request anywhere may be pointed at a URL that was invented or edited rather
-than built there. So an endpoint joins the package red until somebody answers that question.
+registry; only two named files may write an address down; and no URL a builder returned may
+be edited — followed through its bindings, its imports and the function it was returned
+from. So an endpoint joins the package red until somebody answers that question.
 
 ## 0.20.0
 

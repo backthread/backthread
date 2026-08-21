@@ -122,13 +122,16 @@ function exchangeErrorMessage(
       // <the caught upstream string> }`, so relaying `message` unconditionally printed
       // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
       // Same rule as the shared renderer: nobody writes reader-facing copy for a 500.
-      // ⚠ A 5xx IS NOT THE READER'S FAULT AND A FRESH CODE WILL NOT FIX IT. An earlier draft
-      // of this arm answered every unmapped status with "generate a fresh code and try
-      // again", which on `{ error: 'exchange_failed', message: <pg text> }` @ 500 pointed
-      // the reader at their own code as the cause of a server fault, told them to do work
-      // that cannot help, and lost the diagnostic for the operator too. The shared renderer
-      // already knows how to say all of that — including putting the withheld string behind
-      // `--verbose` — so it says it here.
+      // ⚠ THE DISCRIMINATOR IS THE SLUG, NOT THE STATUS, AND GENERALISING IT COST A REAL
+      // SENTENCE. This endpoint has TWO 500 arms and they are opposites: `exchange_failed`
+      // pairs its slug with the raw upstream string, while `mint_failed` pairs it with copy
+      // somebody wrote on purpose — `… — the claim code is spent; generate a fresh one.` —
+      // and by then the code really is burned, so a fresh one is the ONLY recovery. A first
+      // draft sent every 5xx through the renderer on the grounds that nobody writes
+      // reader-facing copy for a 500. This endpoint does, on one of its two arms.
+      if (slug === 'mint_failed' && typeof body?.message === 'string') {
+        return `Exchange failed (HTTP ${status}) — ${body.message}`;
+      }
       if (status >= 500) {
         return describeFailure({
           lead: 'this device could not be authorized',
