@@ -42,7 +42,7 @@ import { readConfig, type BackthreadConfig } from './config.js';
 import { type RemoteReader, type RepoHandle } from './repo.js';
 import { resolveQueryRepo } from './query.js';
 import { buildInflowAskUrl, buildInflowAnswerUrl } from './urls.js';
-import { describeFailure } from './failureCopy.js';
+import { describeFailure, withOperatorDetail } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import { normalizeAnswer, formatAnswerResult, type LessonRung } from './lesson.js';
 
@@ -341,7 +341,7 @@ function expiryAwareDetail(
   payload: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
 ): string {
-  if (status === 410) return ASK_EXPIRED_COPY;
+  if (status === 410) return withOperatorDetail(ASK_EXPIRED_COPY, { status, payload, env });
   return describeFailure({
     lead: "your answer wasn't recorded",
     status,

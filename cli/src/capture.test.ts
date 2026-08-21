@@ -518,7 +518,7 @@ test('a plan-limit rejection tells the reader what to do about it', async () => 
     ingest: () => ({ status: 402, body: { error: 'plan_limit' } }),
   });
   const out = await runCapture(HOOK, deps({ fetchImpl }));
-  assert.match(out.detail, /decision limit is reached/);
+  assert.match(out.detail, /used its capture allowance for now/);
   assert.doesNotMatch(out.detail, /plan_limit/);
 });
 

@@ -41,7 +41,7 @@ import { readConfig, type BackthreadConfig } from './config.js';
 import { type RemoteReader, type RepoHandle } from './repo.js';
 import { resolveQueryRepo } from './query.js';
 import { buildLessonStartUrl, buildLessonAnswerUrl } from './urls.js';
-import { describeFailure, readServerMessage } from './failureCopy.js';
+import { describeFailure, readServerMessage, withOperatorDetail } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // The server races its own build against a ~55s ceiling (three model phases on a
@@ -241,9 +241,11 @@ export async function startLesson(
         // The 409 body carries a worker-AUTHORED sentence, not a relayed diagnostic —
         // render it verbatim. Reading only `message` (never the `error` slug) is the
         // point: the old helper fell back to the slug and printed `lesson_in_progress`.
-        detail:
+        detail: withOperatorDetail(
           readServerMessage(rec) ??
-          'a lesson is already being prepared for this repo — try again in a moment.',
+            'a lesson is already being prepared for this repo — try again in a moment.',
+          { status: res.status, payload: rec, env },
+        ),
         repo,
         ...(upgrade ? { upgrade } : {}),
       };

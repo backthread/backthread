@@ -179,8 +179,10 @@ test('syncDecisions surfaces a rejected read as read-failed (cache untouched)', 
     },
   );
   assert.equal(out.status, 'read-failed');
-  // A refusal, told as a refusal: what it is and who can undo it, never the slug.
-  assert.match(out.detail, /ask one of its owners to invite you/);
+  // `forbidden` is not on the slug table — no route this package calls sends it — so it
+  // degrades to the honest status line. The point pinned here is that it never degrades to
+  // ITSELF, which is what the old relay did.
+  assert.match(out.detail, /The server rejected it \(HTTP 403\)/);
   assert.doesNotMatch(out.detail, /forbidden/);
   assert.equal(await readCache(repo), null, 'nothing written on a rejected read');
   rmSync(repo, { recursive: true, force: true });

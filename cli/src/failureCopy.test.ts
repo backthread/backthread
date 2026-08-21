@@ -704,10 +704,19 @@ const NETWORK_MODULES = new Set([
   'query.ts',
 ]);
 
+/**
+ * ⚠ THE IDENTIFIER, NOT A CALL SHAPE. The first version matched `doFetch(` / `fetch(`, and
+ * an outside read walked past it with `const send = deps.fetchImpl ?? globalThis.fetch;`
+ * followed by `await send(url, …)` — an ordinary alias. Chasing call spellings is the same
+ * mistake this file already made twice with URL spellings. A module that cannot NAME fetch
+ * cannot call it, however it spells the call, so the token itself is the allow-list.
+ */
+const TOUCHES_FETCH = /\bfetch\b/i;
+
 test('only declared modules put a request on the wire', () => {
   const offenders = sourceFiles()
     .filter((f) => !NETWORK_MODULES.has(rel(f)))
-    .filter((f) => /\b(?:doFetch|fetch)\s*\(/.test(stripComments(readFileSync(f, 'utf8'))))
+    .filter((f) => TOUCHES_FETCH.test(codeOnly(readFileSync(f, 'utf8'))))
     .map(rel);
   assert.deepEqual(
     offenders,
@@ -716,13 +725,41 @@ test('only declared modules put a request on the wire', () => {
   );
 });
 
+test('a not-a-fetch-target really is never fetched', () => {
+  // ⚠ THE LAST UNCHECKED CATEGORY. `not-a-fetch-target` was exempt from even the prose bar,
+  // so an outside read registered a real worker endpoint as one ("just a link we print"),
+  // fetched it from `query.ts` and printed the raw slug — entirely green. A link is a claim
+  // about behaviour like any other, so it is asked as one: the builder's name must not
+  // appear inside a request in any module that makes them.
+  const links = (Object.entries(CLI_ENDPOINTS) as Array<[string, EndpointDisposition]>)
+    .filter(([, d]) => d.renders === 'not-a-fetch-target')
+    .map(([n]) => n);
+  assert.ok(links.length > 0, 'nothing is a link any more — delete the category, do not leave it vacuous');
+  const offenders: string[] = [];
+  for (const base of NETWORK_MODULES) {
+    const src = codeOnly(readFileSync(join(SRC_DIR, base), 'utf8'));
+    for (const link of links) {
+      // The builder appearing anywhere inside a request expression, in any of the spellings
+      // a request is written in.
+      if (new RegExp(`(?:fetch|send|doFetch)\\w*\\s*\\(\\s*[^)]{0,120}\\b${link}\\s*\\(`).test(src)) {
+        offenders.push(`${base} fetches ${link}`);
+      }
+      // …and via a local binding: `const u = buildXUrl(env); … fetch(u`.
+      const bound = src.match(new RegExp(`const\\s+(\\w+)\\s*=\\s*${link}\\s*\\(`))?.[1];
+      if (bound && new RegExp(`(?:fetch|send|doFetch)\\w*\\s*\\(\\s*${bound}\\b`).test(src)) {
+        offenders.push(`${base} fetches ${link} via ${bound}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], 'an endpoint is registered as a link and is being requested');
+});
+
 test('every declared network module really does fetch', () => {
   // Otherwise the list rots into permission nobody needs, and a stale entry is a hole
   // somebody can move a new endpoint into without touching this file.
   const idle: string[] = [];
   for (const base of NETWORK_MODULES) {
-    const src = stripComments(readFileSync(join(SRC_DIR, base), 'utf8'));
-    if (!/\b(?:doFetch|fetch)\s*\(/.test(src)) idle.push(base);
+    if (!TOUCHES_FETCH.test(codeOnly(readFileSync(join(SRC_DIR, base), 'utf8')))) idle.push(base);
   }
   assert.deepEqual(idle, [], 'these are on the network allow-list but make no network call');
 });
@@ -866,6 +903,21 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 }
 
+/**
+ * Comments AND string literals removed — CODE only.
+ *
+ * A token inside quotes is data. `renders: 'not-a-fetch-target'` and a log line reading
+ * `'state fetch failed (swallowed)'` both contain the word and neither can send a request;
+ * flagging them would teach the next author that the ban is noise, which is how a guard
+ * gets deleted.
+ */
+function codeOnly(src: string): string {
+  return stripComments(src)
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``');
+}
+
 /** The non-test modules that call a given builder. */
 function callersOf(builder: string): string[] {
   const callers: string[] = [];
@@ -890,12 +942,17 @@ test('a never-shown endpoint does not even READ the server diagnostic', () => {
   // which is the honest limit here — but it is checkable, and a promise is not.
   // ⚠ ANY identifier, and bracket notation too. Pinning it to a list of variable names in
   // dot notation meant `rec['error']` — or one variable renamed — walked straight past.
-  const READS_DIAGNOSTIC = /\.\s*(?:error|message)\b|\[\s*['"](?:error|message)['"]\s*\]/;
+  // Dot, bracket AND destructuring. `const { error: slug } = rec` reads the diagnostic as
+  // surely as `rec.error` does, and walked past the first two forms.
+  const READS_DIAGNOSTIC =
+    /\.\s*(?:error|message)\b|\[\s*['"](?:error|message)['"]\s*\]|\{[^{}]*\b(?:error|message)\s*:/;
   const offenders: string[] = [];
   for (const [builder, d] of Object.entries(CLI_ENDPOINTS) as Array<[string, EndpointDisposition]>) {
     if (d.renders !== 'never-shown') continue;
     for (const caller of callersOf(builder)) {
-      if (READS_DIAGNOSTIC.test(readFileSync(join(SRC_DIR, caller), 'utf8'))) {
+      // Comments stripped: the guard once fired on a doc comment quoting `String(rec.error)`,
+      // which is a mention, not a read.
+      if (READS_DIAGNOSTIC.test(stripComments(readFileSync(join(SRC_DIR, caller), 'utf8')))) {
         offenders.push(`${builder} -> ${caller}`);
       }
     }
@@ -1064,19 +1121,61 @@ test('the caller-written lead survives every branch, not just the fallback', () 
   }
 });
 
-test('each route names its own thing, so two commands never claim the same one failed', async () => {
-  const leads = new Map<string, string>();
+/**
+ * The lead each route writes. ⚠ NAMED, NOT COUNTED. The earlier version asserted that at
+ * least 6 of 9 were distinct, so three routes could quietly collapse onto another's lead
+ * while the test's own comment claimed "a lead deleted anywhere collapses this set". Four
+ * such mutants survived. `answerLesson` and `answerAsk` share one deliberately — somebody
+ * who just answered a question does not care which surface carried it.
+ */
+const EXPECTED_LEADS: Readonly<Record<string, string>> = {
+  buildGroundedAskUrl: "the answer didn't come back",
+  buildLessonStartUrl: "the lesson didn't start",
+  buildLessonAnswerUrl: "your answer wasn't recorded",
+  buildInflowAskUrl: 'no question came back',
+  buildInflowAnswerUrl: "your answer wasn't recorded",
+  buildInferDecisionsUrl: "this session wasn't written up",
+  buildReadDecisionsUrl: "the decision log didn't sync",
+  buildIngestDecisionsUrl: "the decisions weren't saved",
+  buildOnboardingStateUrl: "your setup status didn't load",
+};
+
+test('each route names its own thing, by name', async () => {
+  assert.deepEqual(Object.keys(EXPECTED_LEADS).sort(), failureBodyEndpoints());
   for (const name of failureBodyEndpoints()) {
-    leads.set(name, await DRIVERS[name](502, UNAVAILABLE, PLAIN_ENV));
+    const detail = await DRIVERS[name](502, UNAVAILABLE, PLAIN_ENV);
+    assert.ok(
+      detail.startsWith(EXPECTED_LEADS[name]),
+      `${name}: expected to open with "${EXPECTED_LEADS[name]}", got "${detail}"`,
+    );
   }
-  // `answerLesson` and `answerAsk` deliberately share "your answer wasn't recorded" — the
-  // reader answered a question and does not care which surface carried it. Everything else
-  // is distinct, and a lead deleted anywhere collapses this set.
-  const distinct = new Set([...leads.values()].map((d) => d.split('.')[0]));
-  assert.ok(distinct.size >= 6, `only ${distinct.size} distinct leads across 9 routes`);
 });
 
 // --- a refusal is not a bug report ------------------------------------------------------
+
+test("a 4xx carrying reason:'unavailable' is still not a bug report", () => {
+  // ⚠ THE GATE THE CODE COMMENT DEFENDS, UNASSERTED UNTIL A MUTANT SURVIVED DROPPING IT.
+  // No server sends this combination today, which is exactly why the claim "a 4xx never
+  // does" was true by accident rather than by construction.
+  const out = describeFailure({
+    lead: 'x',
+    status: 403,
+    payload: { error: 'zzz_unmapped', reason: 'unavailable' },
+    env: PLAIN_ENV,
+  });
+  assert.match(out, /retrying will not help/);
+  assert.doesNotMatch(out, /issues/, out);
+});
+
+test('a 5xx carrying the same reason IS', () => {
+  const out = describeFailure({
+    lead: 'x',
+    status: 502,
+    payload: { error: 'zzz_unmapped', reason: 'unavailable' },
+    env: PLAIN_ENV,
+  });
+  assert.match(out, /github\.com\/backthread\/backthread\/issues/);
+});
 
 test('a 4xx refusal is NOT sent to the issue tracker', () => {
   // ⚠ THE FIRST DRAFT APPENDED THE BUG-REPORT TAIL UNCONDITIONALLY, so a lesson rate limit,
@@ -1174,11 +1273,9 @@ test('every sentence in the table is reachable through the renderer', () => {
 const REACHABLE_SLUGS = [
   // worker resolveRepoGate + read/ingest-decisions authz
   'repo_not_found',
-  'repo_not_connected',
   'not_a_member',
   'not_readable',
   'repo_not_writable',
-  'forbidden',
   // deliberate refusals
   'plan_limit',
   'lesson_retry_too_soon',
@@ -1186,6 +1283,7 @@ const REACHABLE_SLUGS = [
   'ask_not_yours',
   'ask_malformed',
   'ask_bad_signature',
+  'ask_material_moved',
   // our bug, said as ours
   'invalid_body',
   'invalid_payload',
@@ -1195,7 +1293,6 @@ const REACHABLE_SLUGS = [
   'persist_failed',
   'inference_failed',
   // deviceAuth (worker) and every Function share this vocabulary
-  'unauthorized',
   'invalid token',
   'token expired',
   'invalid session',
@@ -1211,6 +1308,65 @@ test('the table covers exactly the vocabulary the reachable routes send', () => 
   );
 });
 
+/**
+ * The sentence itself, per slug. ⚠ SPELLED OUT, NOT DESCRIBED. Fifteen of these were pinned
+ * only by "longer than twenty characters, doesn't name itself, isn't the fallback" — so
+ * rewriting one to say something wrong stayed green, and two mutants that reverted the
+ * previous commit's headline fix (telling a reader to contact owners of a repo that by
+ * definition has none) were invisible. Copy is the product here; it gets asserted like one.
+ */
+const EXPECTED_COPY: Readonly<Record<string, string>> = {
+  repo_not_found: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
+  not_a_member:
+    "you're not a member of the account that owns that repo — ask one of its owners to invite you.",
+  not_readable:
+    "that repo has no owning Backthread account, so there is nothing to read — run `backthread` to connect it.",
+  repo_not_writable:
+    "that repo has no owning Backthread account, so nothing can be saved against it — run `backthread` to connect it.",
+  plan_limit:
+    'this account has used its capture allowance for now — open Billing in the web app to raise it.',
+  lesson_retry_too_soon:
+    'the last few attempts for this repo found nothing worth asking about, so no more are being built for now — try again later.',
+  lesson_in_progress: 'a lesson is already being prepared for this repo — try again in a moment.',
+  ask_not_yours: 'that question belongs to somebody else, so it cannot be answered here.',
+  ask_malformed: 'that answer token is not one this client recognises — ask for a fresh question.',
+  ask_material_moved:
+    'the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.',
+  ask_bad_signature:
+    'that answer token could not be verified, so nothing was recorded — ask for a fresh question.',
+  invalid_body: 'nothing is wrong with what you did — it failed on our side.',
+  invalid_payload: 'nothing is wrong with what you did — it failed on our side.',
+  invalid_field: 'nothing is wrong with what you did — it failed on our side.',
+  'method not allowed': 'nothing is wrong with what you did — it failed on our side.',
+  persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
+  inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
+  'invalid token': 'this device is no longer authorized — run `backthread login` again.',
+  'token expired': 'this device is no longer authorized — run `backthread login` again.',
+  'invalid session': 'this device is no longer authorized — run `backthread login` again.',
+  'insufficient scope': 'this device is no longer authorized — run `backthread login` again.',
+  'missing authorization': 'this device is no longer authorized — run `backthread login` again.',
+};
+
+test('every slug renders the exact sentence it is meant to', () => {
+  assert.deepEqual(Object.keys(EXPECTED_COPY).sort(), REACHABLE_SLUGS);
+  for (const [slug, want] of Object.entries(EXPECTED_COPY)) {
+    const out = describeFailure({ lead: 'zzlead', status: 500, payload: { error: slug }, env: PLAIN_ENV });
+    assert.equal(out, want, `${slug} does not say what it is meant to say`);
+  }
+});
+
+test('the four sentences that were once wrong about their own condition stay right', () => {
+  // Each of these described a condition the producer does not have. Named individually so
+  // a revert is a named failure rather than a diff nobody reads.
+  assert.doesNotMatch(EXPECTED_COPY.not_readable, /ask one of its owners/);
+  assert.doesNotMatch(EXPECTED_COPY.repo_not_writable, /ask one of its owners/);
+  assert.doesNotMatch(EXPECTED_COPY.plan_limit, /decision limit/);
+  assert.doesNotMatch(EXPECTED_COPY.lesson_retry_too_soon, /was built very recently/);
+  assert.doesNotMatch(EXPECTED_COPY.ask_bad_signature, /issued to this device/);
+  // …and "our bug" must not invite the reader to look for their own mistake.
+  assert.match(EXPECTED_COPY.invalid_body, /nothing is wrong with what you did/);
+});
+
 test('every one of those names what to do, and none names itself', () => {
   for (const slug of REACHABLE_SLUGS) {
     const out = describeFailure({ lead: 'zzlead', status: 500, payload: { error: slug }, env: PLAIN_ENV });
@@ -1223,4 +1379,70 @@ test('every one of those names what to do, and none names itself', () => {
     // A mapped slug replaces the whole sentence, so the generic fallback must not show.
     assert.doesNotMatch(out, /The server rejected it/, `${slug} fell through to the fallback`);
   }
+});
+
+// --- a 5xx `error` string is a diagnostic, not copy ---------------------------------------
+
+test('a raw upstream string in `error` on a 5xx never reaches the reader', () => {
+  // ⚠ THREE EDGE FUNCTIONS DO `json({ error: message }, 500)` WITH THE CAUGHT UPSTREAM
+  // STRING. Measured before the status gate: `backthread sync: read-failed — the decision
+  // log didn't sync — could not serialize access due to concurrent update`. Nobody writes
+  // reader-facing copy for a 500, so on a 5xx the field is treated as the diagnostic it is.
+  for (const raw of [
+    'could not serialize access due to concurrent update',
+    'permission denied for schema private',
+    'canceling statement due to statement timeout',
+  ]) {
+    const out = describeFailure({ lead: 'zzlead', status: 500, payload: { error: raw }, env: PLAIN_ENV });
+    assert.doesNotMatch(out, /serialize|permission denied|canceling statement/, out);
+    assert.match(out, /^zzlead\. The server rejected it \(HTTP 500\)\./);
+    assert.match(out, /issues/, 'a 5xx dead end still names where to take it');
+  }
+});
+
+test('the operator still gets that string, because nobody else will', () => {
+  const out = describeFailure({
+    lead: 'zzlead',
+    status: 500,
+    payload: { error: 'permission denied for schema private' },
+    env: VERBOSE_ENV,
+  });
+  assert.match(out, /error=permission denied for schema private/);
+});
+
+test('the SAME string on a 4xx is worker-authored copy and still renders', () => {
+  // The gate must not swallow the sentences the previous round restored: a 4xx `error`
+  // string is the server answering the caller's own request.
+  const out = describeFailure({
+    lead: 'zzlead',
+    status: 404,
+    payload: { error: 'repo not found or not connected to Backthread' },
+    env: PLAIN_ENV,
+  });
+  assert.match(out, /repo not found or not connected to Backthread/);
+});
+
+test('--verbose means something on the two paths that answer before the renderer', async () => {
+  // The 409 "already being prepared" and the bare-410 expired-ask are both RIGHT to write
+  // their own sentence — but the switch stopped meaning anything on exactly the two paths
+  // somebody is most likely to re-run.
+  const { startLesson } = await import('./lesson.js');
+  const started = await startLesson(
+    { repo: 'acme/widgets' },
+    {
+      env: VERBOSE_ENV,
+      fetchImpl: stubFetch(409, { error: 'lesson_in_progress' }),
+      readConfigImpl,
+      readRemoteImpl,
+    },
+  );
+  assert.match(started.detail, /\[status=409 error=lesson_in_progress\]/, started.detail);
+
+  const { answerAsk } = await import('./inflow.js');
+  const answered = await answerAsk(
+    { token: 'tok', answer: 'x' },
+    { env: VERBOSE_ENV, fetchImpl: stubFetch(410, {}), readConfigImpl, readRemoteImpl },
+  );
+  assert.match(answered.detail, /nothing is owed/);
+  assert.match(answered.detail, /\[status=410\]/, answered.detail);
 });

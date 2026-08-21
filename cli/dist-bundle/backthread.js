@@ -8090,7 +8090,8 @@ function readFailureSlug(payload) {
   const raw = readErrorField(payload);
   return raw !== null && isMachineCode(raw) ? raw : null;
 }
-function readAuthoredError(payload) {
+function readAuthoredError(payload, status) {
+  if (status >= 500) return null;
   const raw = readErrorField(payload);
   return raw !== null && !isMachineCode(raw) ? raw : null;
 }
@@ -8108,13 +8109,17 @@ function verboseEnabled(env = process.env) {
 }
 function operatorSuffix(status, payload) {
   const parts = [`status=${status}`];
-  const slug = readFailureSlug(payload);
+  const slug = readFailureSlug(payload) ?? (status >= 500 ? readErrorField(payload) : null);
   if (slug) parts.push(`error=${slug}`);
   const reason = readFailureReason(payload);
   if (reason) parts.push(`reason=${reason}`);
   const code = readFailureCode(payload);
   if (code) parts.push(`code=${code}`);
   return ` [${parts.join(" ")}]`;
+}
+function withOperatorDetail(sentence, ctx) {
+  if (!verboseEnabled(ctx.env ?? process.env)) return sentence;
+  return `${sentence}${operatorSuffix(ctx.status, ctx.payload)}`;
 }
 function lookupSlugCopy(raw, overrides) {
   if (overrides && Object.prototype.hasOwnProperty.call(overrides, raw)) {
@@ -8141,7 +8146,7 @@ function describeFailure(input) {
     const tail2 = reason === "unavailable" && looksLikeABug(status) ? nextStep(verbose) : "";
     return `${lead}. ${REASON_CLAUSE[reason]}${tail2}${suffix}`;
   }
-  const authored = readServerMessage(payload) ?? readAuthoredError(payload);
+  const authored = readServerMessage(payload) ?? readAuthoredError(payload, status);
   if (authored) return `${lead} \u2014 ${authored}${suffix}`;
   const tail = looksLikeABug(status) ? nextStep(verbose) : "";
   return `${lead}. The server rejected it (HTTP ${status}).${tail}${suffix}`;
@@ -8152,25 +8157,35 @@ var RE_REPORT = "nothing is wrong with what you did \u2014 it failed on our side
 var SLUG_COPY = Object.freeze({
   // --- the repo gate: worker's resolveRepoGate + read/ingest-decisions authz ---------
   repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
-  repo_not_connected: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
   not_a_member: RE_INVITE,
   // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
   // exactly one condition in every producer: `!repo.account_id`. The first draft told the
   // reader to ask one of its owners for an invite, which is advice about people who do not
   // exist. Read the producer before writing the sentence.
-  not_readable: "that repo has no owning Backthread account, so there is nothing to read.",
+  // Fires on the IDENTICAL condition as `repo_not_writable` (`!repo.account_id`), so it
+  // gets the identical remedy. An earlier draft named the fix on one and left the other
+  // with nothing to do.
+  not_readable: "that repo has no owning Backthread account, so there is nothing to read \u2014 run `backthread` to connect it.",
   repo_not_writable: "that repo has no owning Backthread account, so nothing can be saved against it \u2014 run `backthread` to connect it.",
-  forbidden: RE_INVITE,
   // --- deliberate refusals, not outages ---------------------------------------------
-  plan_limit: "your plan's decision limit is reached \u2014 open Billing in the web app to raise it.",
-  lesson_retry_too_soon: "a lesson for this repo was built very recently \u2014 give it a while before asking for another.",
+  // `decideSessionAdmission` on `sessionAllowance` — a CAPTURE-SESSION allowance, not a
+  // decision count. "Decision limit" also echoed a pricing model that was retired.
+  plan_limit: "this account has used its capture allowance for now \u2014 open Billing in the web app to raise it.",
+  // NOT "one was built recently" — the opposite. It fires when the last few paid builds
+  // left NO lesson behind and there is no cached one to serve, so the server refuses to
+  // spend again for a while. Read the producer before writing the sentence.
+  lesson_retry_too_soon: "the last few attempts for this repo found nothing worth asking about, so no more are being built for now \u2014 try again later.",
   lesson_in_progress: "a lesson is already being prepared for this repo \u2014 try again in a moment.",
   ask_not_yours: "that question belongs to somebody else, so it cannot be answered here.",
   // The token verifier has THREE verdicts and emits `ask_${reason}` for each. `expired` is
   // the 410 the inflow path catches by status; the other two land here, and mapping only
   // one of them left its identical sibling reading "the server rejected it (HTTP 400)".
   ask_malformed: "that answer token is not one this client recognises \u2014 ask for a fresh question.",
-  ask_bad_signature: "that answer token was not issued to this device \u2014 ask for a fresh question and answer that one.",
+  ask_material_moved: "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.",
+  // NOT "issued to another device" — that verifies fine and comes back as `ask_not_yours`.
+  // This is "we cannot establish this token is ours": forged, corrupted, or signed with a
+  // key that has since rotated. The two sentences described each other's conditions.
+  ask_bad_signature: "that answer token could not be verified, so nothing was recorded \u2014 ask for a fresh question.",
   // --- bad request: OUR bug, not the reader's -----------------------------------------
   // Named rather than left to the fallback because the fallback would say "the server
   // rejected it", which invites the reader to look for something they did wrong.
@@ -8187,8 +8202,13 @@ var SLUG_COPY = Object.freeze({
   // saved — duplicate key value violates unique constraint "decisions_pkey"`. Measured.
   persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
   inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
+  // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
+  // sends any of them — they belong to /ci/snapshot and the git-decisions routes. Dead
+  // entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
+  // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
+  // written to fix it.
+  //
   // --- the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
-  unauthorized: RE_AUTH,
   "invalid token": RE_AUTH,
   "token expired": RE_AUTH,
   "invalid session": RE_AUTH,
@@ -35561,7 +35581,10 @@ async function startLesson(input, deps = {}) {
         // The 409 body carries a worker-AUTHORED sentence, not a relayed diagnostic —
         // render it verbatim. Reading only `message` (never the `error` slug) is the
         // point: the old helper fell back to the slug and printed `lesson_in_progress`.
-        detail: readServerMessage(rec) ?? "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+        detail: withOperatorDetail(
+          readServerMessage(rec) ?? "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+          { status: res.status, payload: rec, env }
+        ),
         repo,
         ...upgrade ? { upgrade } : {}
       };
@@ -36017,7 +36040,7 @@ var INFLOW_ANSWER_OVERRIDES = Object.freeze({
   ask_material_moved: "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you."
 });
 function expiryAwareDetail(status, payload, env) {
-  if (status === 410) return ASK_EXPIRED_COPY;
+  if (status === 410) return withOperatorDetail(ASK_EXPIRED_COPY, { status, payload, env });
   return describeFailure({
     lead: "your answer wasn't recorded",
     status,
@@ -36323,10 +36346,9 @@ Manage
 
 Global flags
   --verbose               When something fails, also print the operator detail \u2014 the
-                          HTTP status, the internal error code and the database's own
-                          SQLSTATE. Off by default: those name our call sites, not
-                          anything you can act on. (Also BACKTHREAD_VERBOSE=1, which
-                          the MCP tools read too.)
+                          internal error code and the database's own SQLSTATE. Off by
+                          default: those name our call sites, not anything you can act
+                          on. (Also BACKTHREAD_VERBOSE=1, which the MCP tools read too.)
 
 Your source never leaves your machine unredacted \u2014 it's checkable in this OSS repo.
 Docs:     https://app.backthread.dev

@@ -19,20 +19,23 @@ or, when the server is not merely busy:
 
 ```
 the answer didn't come back. It failed on our side, so retrying will not help. If it keeps
-happening, run it again with --verbose and report what that prints at
+happening, set BACKTHREAD_VERBOSE=1 (or pass --verbose) and report what that prints at
 https://github.com/backthread/backthread/issues
 ```
 
-A dead end always names the next step. "Retrying will not help" on its own leaves you with
-nothing to do, which is the state this release exists to get you out of.
+A failure that is plausibly ours names where to take it. "Retrying will not help" on its own
+leaves you with nothing to do, which is the state this release exists to get you out of. A
+*refusal* — not a member, no allowance left, asked too soon — names its own remedy instead,
+and is never sent to the issue tracker.
 
 That distinction is not a guess on this end. The server has been sending it for a while —
 every relayed failure carries a `reason` saying which of the two it is — and the CLI simply
 never read it. Now it does, on **every** endpoint that sends one: `how` / the MCP `query`
 tool, `learn` (start and answer), and `ask-me` (ask and answer).
 
-**`sync`, `capture` and the setup check stop relaying slugs too.** Those were quietly
-printing things like `read-decisions rejected (403): not_a_member` and
+**`sync` and `capture` stop relaying slugs too** (and so does the setup check, whose one
+caller happens to discard the line — a fact about the caller, not about the string). Those
+were quietly printing things like `read-decisions rejected (403): not_a_member` and
 `ingest rejected (500): persist_failed`. The codes both the worker and that older service
 send now map to the action they imply — an expired credential says to run `backthread
 login`, a repo with no owning account says to connect it, a reached plan limit
@@ -44,16 +47,19 @@ the failure is plausibly ours: a 5xx sends you to the issue tracker, a 4xx never
 Telling somebody to file a bug about a working permission check is worse than telling them
 nothing.
 
-**And no raw database text.** Two of these routes pair a code with the upstream error
-string, so `duplicate key value violates unique constraint "decisions_pkey"` used to arrive
-as product copy. It does not any more.
+**And no raw database text.** Some of these routes pair a code with the upstream error
+string, and three put the string in the code's own field on a 500 — so
+`duplicate key value violates unique constraint "decisions_pkey"` and
+`permission denied for schema private` used to arrive as product copy. Nobody writes
+reader-facing copy for a 500, so on a 5xx that field is treated as the diagnostic it is:
+you get "it failed on our side" and where to report it, and `--verbose` still has the
+string for whoever is fixing it.
 
 **`--verbose` is new, and it is where the machine detail went.** The internal error code and
 the database's own SQLSTATE are operator fields, not something to put in front of somebody
 who just wanted an answer. Pass `--verbose` (or set `BACKTHREAD_VERBOSE=1`, which the MCP
 tools read too, having no command line of their own) and the line gains
-`[status=502 error=retrieval_failed reason=overloaded code=57014]` on the end. Nothing is
-removed by asking — verbose adds.
+`[status=502 error=retrieval_failed reason=overloaded code=57014]` on the end.
 
 **Sentences the server wrote for you still reach you.** `error` carries two different kinds
 of thing — a machine code like `retrieval_failed`, and plain English like `repo not found or

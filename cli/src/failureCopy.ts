@@ -159,10 +159,27 @@ export function readFailureSlug(payload: Record<string, unknown>): string | null
 }
 
 /**
- * Read `error` when it is PROSE rather than a slug — a sentence the server wrote for this
- * reader. Rendered like `message`, because that is what it is.
+ * Read `error` when it is a sentence the server wrote FOR THIS READER, rather than a slug.
+ *
+ * ⚠ GATED ON THE STATUS, AND THAT GATE IS THE WHOLE POINT. "Not a machine code" is not the
+ * same as "written for a person". A 4xx `error` string is the server answering the caller's
+ * own request — `repo not found or not connected to Backthread`, `no repo given and none
+ * connected — pass repo:"owner/name"` — and rendering those verbatim is right; hiding them
+ * was a measured regression. But three Edge Functions this package calls do
+ * `json({ error: message }, 500)` with the caught upstream string, so on a 5xx the same
+ * field carries `could not serialize access due to concurrent update` and
+ * `permission denied for schema private`. Both fail the machine-code test, and an earlier
+ * draft therefore printed them as product copy.
+ *
+ * Nobody writes reader-facing copy for a 500. A 5xx `error` string is a relayed diagnostic,
+ * so it is treated as one: operator field, `--verbose` only, and the reader gets the honest
+ * "it failed on our side" with a next step instead.
  */
-export function readAuthoredError(payload: Record<string, unknown>): string | null {
+export function readAuthoredError(
+  payload: Record<string, unknown>,
+  status: number,
+): string | null {
+  if (status >= 500) return null;
   const raw = readErrorField(payload);
   return raw !== null && !isMachineCode(raw) ? raw : null;
 }
@@ -223,7 +240,9 @@ function operatorSuffix(status: number, payload: Record<string, unknown>): strin
   // Only a MACHINE code goes here. Prose in `error` has already been rendered as the
   // sentence it is; repeating it as `error=repo not found or not connected to Backthread`
   // dresses a readable sentence up as a diagnostic, which is the inverse of the job.
-  const slug = readFailureSlug(payload);
+  // A machine code always; a 5xx prose string too, because that is the one case where the
+  // reader is deliberately NOT shown it and the operator is the only one who can use it.
+  const slug = readFailureSlug(payload) ?? (status >= 500 ? readErrorField(payload) : null);
   if (slug) parts.push(`error=${slug}`);
   const reason = readFailureReason(payload);
   if (reason) parts.push(`reason=${reason}`);
@@ -249,6 +268,23 @@ function operatorSuffix(status: number, payload: Record<string, unknown>): strin
  * NEVER THROWS and never returns an empty string: this runs on the failure path, where a
  * second failure has nowhere to go.
  */
+/**
+ * A complete sentence, plus the operator suffix if one was asked for.
+ *
+ * Two paths answer with copy of their own before `describeFailure` is reached — the 409
+ * "a lesson is already being prepared" and the bare-410 expired-ask reassurance — and both
+ * are RIGHT to: the server wrote the first, and the second is the design working rather
+ * than a failure. But `--verbose` stopped meaning anything on them, which makes the switch
+ * a lie on exactly the two paths a person is most likely to re-run.
+ */
+export function withOperatorDetail(
+  sentence: string,
+  ctx: { status: number; payload: Record<string, unknown>; env?: NodeJS.ProcessEnv },
+): string {
+  if (!verboseEnabled(ctx.env ?? process.env)) return sentence;
+  return `${sentence}${operatorSuffix(ctx.status, ctx.payload)}`;
+}
+
 /**
  * The slug tables, consulted safely. `overrides` wins over the global table — a slug whose
  * meaning is local to one route is more specific than one that means the same everywhere —
@@ -299,7 +335,7 @@ export function describeFailure(input: FailureCopyInput): string {
   // 3. A sentence somebody wrote for this reader, in either field it can arrive in. Joined
   //    with a dash rather than a full stop because it is an appositive and is not
   //    guaranteed to start with a capital.
-  const authored = readServerMessage(payload) ?? readAuthoredError(payload);
+  const authored = readServerMessage(payload) ?? readAuthoredError(payload, status);
   if (authored) return `${lead} — ${authored}${suffix}`;
 
   // 4. Nothing recognisable. Say the status and refuse to guess — plus a next step, but
@@ -337,30 +373,42 @@ const RE_REPORT = 'nothing is wrong with what you did — it failed on our side.
 export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
   // --- the repo gate: worker's resolveRepoGate + read/ingest-decisions authz ---------
   repo_not_found: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
-  repo_not_connected: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
   not_a_member: RE_INVITE,
   // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
   // exactly one condition in every producer: `!repo.account_id`. The first draft told the
   // reader to ask one of its owners for an invite, which is advice about people who do not
   // exist. Read the producer before writing the sentence.
-  not_readable: 'that repo has no owning Backthread account, so there is nothing to read.',
+  // Fires on the IDENTICAL condition as `repo_not_writable` (`!repo.account_id`), so it
+  // gets the identical remedy. An earlier draft named the fix on one and left the other
+  // with nothing to do.
+  not_readable:
+    "that repo has no owning Backthread account, so there is nothing to read — run `backthread` to connect it.",
   repo_not_writable:
     "that repo has no owning Backthread account, so nothing can be saved against it — run `backthread` to connect it.",
-  forbidden: RE_INVITE,
 
   // --- deliberate refusals, not outages ---------------------------------------------
+  // `decideSessionAdmission` on `sessionAllowance` — a CAPTURE-SESSION allowance, not a
+  // decision count. "Decision limit" also echoed a pricing model that was retired.
   plan_limit:
-    "your plan's decision limit is reached — open Billing in the web app to raise it.",
+    'this account has used its capture allowance for now — open Billing in the web app to raise it.',
+  // NOT "one was built recently" — the opposite. It fires when the last few paid builds
+  // left NO lesson behind and there is no cached one to serve, so the server refuses to
+  // spend again for a while. Read the producer before writing the sentence.
   lesson_retry_too_soon:
-    'a lesson for this repo was built very recently — give it a while before asking for another.',
+    'the last few attempts for this repo found nothing worth asking about, so no more are being built for now — try again later.',
   lesson_in_progress: 'a lesson is already being prepared for this repo — try again in a moment.',
   ask_not_yours: 'that question belongs to somebody else, so it cannot be answered here.',
   // The token verifier has THREE verdicts and emits `ask_${reason}` for each. `expired` is
   // the 410 the inflow path catches by status; the other two land here, and mapping only
   // one of them left its identical sibling reading "the server rejected it (HTTP 400)".
   ask_malformed: 'that answer token is not one this client recognises — ask for a fresh question.',
+  ask_material_moved:
+    'the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.',
+  // NOT "issued to another device" — that verifies fine and comes back as `ask_not_yours`.
+  // This is "we cannot establish this token is ours": forged, corrupted, or signed with a
+  // key that has since rotated. The two sentences described each other's conditions.
   ask_bad_signature:
-    'that answer token was not issued to this device — ask for a fresh question and answer that one.',
+    'that answer token could not be verified, so nothing was recorded — ask for a fresh question.',
 
   // --- bad request: OUR bug, not the reader's -----------------------------------------
   // Named rather than left to the fallback because the fallback would say "the server
@@ -380,8 +428,13 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
   persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
   inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
 
+  // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
+  // sends any of them — they belong to /ci/snapshot and the git-decisions routes. Dead
+  // entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
+  // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
+  // written to fix it.
+  //
   // --- the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
-  unauthorized: RE_AUTH,
   'invalid token': RE_AUTH,
   'token expired': RE_AUTH,
   'invalid session': RE_AUTH,
