@@ -48,7 +48,7 @@ Telling somebody to file a bug about a working permission check is worse than te
 nothing.
 
 **And no raw database text on any of them.** Some of these routes pair a code with the
-upstream error string, and three put the string in the code's own field on a 500 — so
+upstream error string, and several put the string in the code's own field on a 500 — so
 `duplicate key value violates unique constraint "decisions_pkey"` and
 `permission denied for schema private` used to arrive as product copy. Nobody writes
 reader-facing copy for a 500, so on a 5xx that field is treated as the diagnostic it is:
@@ -72,7 +72,8 @@ error)` logic — two as a named helper, five inlined at the call site — which
 the reported one would have left six. There is one renderer now, plus a registry of every
 endpoint this package can reach and what a person sees when it fails. Endpoints can only be
 born in one module; that module cannot make requests; every export of it must be in the
-registry; an address may be written down in only three named files; and no URL a builder
+registry, its origin helpers aside; an address may be written down in only three named
+files; and no URL a builder
 returned may be edited — followed through its bindings, its imports and the function it was
 returned from. So the ordinary ways to add an endpoint are red until somebody answers that
 question. It is a source-level trace rather than a type system, so it stops forgetting, not

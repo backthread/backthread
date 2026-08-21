@@ -1865,3 +1865,23 @@ test('the verdict follows the lead as a SENTENCE, not as another dashed clause',
   const out = describeFailure({ lead: 'zzlead', status: 502, payload: OVERLOADED, env: PLAIN_ENV });
   assert.equal(out, 'zzlead. The database was busy — try again in a moment.');
 });
+
+test('the comment scanner stays in sync over every source file', () => {
+  // ⚠ THE SCANNER DOES NOT KNOW ABOUT REGEX LITERALS, and it cannot cheaply be taught to —
+  // telling `/['"]/g` from a division needs a parser. One unbalanced quote inside a regex
+  // and it treats the rest of the file as string content, which BLINDS the hardcoded-URL
+  // check for everything below that line. Measured: a literal address after such a regex in
+  // `lesson.ts` went green; the same address above it was caught.
+  //
+  // No file trips it today. This is what makes that a fact rather than a hope: append a
+  // sentinel address to each file's source in memory and assert the check still sees it. A
+  // future edit that desynchronises the scanner turns THIS red, wherever it happens, without
+  // anybody having to remember why.
+  const SENTINEL = "\nconst __probe = 'https://sentinel.example.com/x';\n";
+  const blind: string[] = [];
+  for (const file of sourceFiles()) {
+    const probed = codeWithStrings(readFileSync(file, 'utf8') + SENTINEL);
+    if (!/['"`]https?:\/\//.test(probed)) blind.push(rel(file));
+  }
+  assert.deepEqual(blind, [], 'the comment scanner lost sync in these files — a URL guard is blind below that point');
+});
