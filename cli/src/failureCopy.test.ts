@@ -588,7 +588,9 @@ function declaredBuilders(): string[] {
   for (const base of URL_MODULES) {
     const src = codeOnly(readFileSync(join(SRC_DIR, base), 'utf8'));
     for (const m of src.matchAll(
-      /\bexport\s+(?:async\s+)?(?:function\s+([A-Za-z0-9_]+)|const\s+([A-Za-z0-9_]+)\s*[:=])/g,
+      // `const` was the only binding form matched, so `export let buildLessonNextUrl = …`
+      // walked out of the registry. Every binding keyword, and `class` for good measure.
+      /\bexport\s+(?:async\s+)?(?:function\s+([A-Za-z0-9_]+)|(?:const|let|var|class)\s+([A-Za-z0-9_]+)\s*[:={(]?)/g,
     )) {
       const name = m[1] ?? m[2];
       if (ORIGIN_DECLS.has(name)) continue;
@@ -770,46 +772,125 @@ test('a not-a-fetch-target really is never fetched', () => {
   assert.deepEqual(offenders, [], 'an endpoint is registered as a link and is being requested');
 });
 
-test('a fetched URL traces to a registered builder — no literals, no surgery', () => {
-  // ⚠ NAMING THE FETCHERS ONLY STOPS A NEW MODULE. Inside one already on the list, nothing
-  // asked what the request was POINTED AT — so an outside read added, in `lesson.ts` and
-  // `query.ts`, a complete unregistered endpoint two ways: string surgery on a registered
-  // builder's result (`buildLessonStartUrl(env).replace('/lesson/start', '/lesson/next')`)
-  // and a hardcoded host on a domain the host pattern did not list. `/lesson/next` is a
-  // REAL worker route that emits the contract, so this was the ticket's own defect one
-  // ordinary line away.
+/**
+ * Every identifier in a file that holds a URL — bound from a registered builder, or from an
+ * origin helper. Following the binding is what makes this a trace rather than a pattern: an
+ * outside read defeated the adjacent-only version with one hop,
+ * `const base = buildLessonStartUrl(env); const url = base.replace(…)`, which is the most
+ * ordinary line in this codebase's own house style.
+ */
+function urlBindings(src: string, registered: string[]): string[] {
+  const bound = new Set<string>();
+  const sources = [...registered, ...ORIGIN_DECLS].join('|');
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const from = [...bound, ...registered, ...ORIGIN_DECLS].join('|');
+    for (const m of src.matchAll(
+      new RegExp(`(?:const|let|var)\\s+([A-Za-z0-9_]+)\\s*(?::[^=;]+)?=\\s*[^;\\n]*\\b(?:${from})\\b`, 'g'),
+    )) {
+      if (!bound.has(m[1])) {
+        bound.add(m[1]);
+        changed = true;
+      }
+    }
+    void sources;
+  }
+  return [...bound];
+}
+
+/**
+ * Files that may hold a literal address because it is a LINK, not an endpoint — nothing
+ * fetches it, it is printed for a person or handed to git. Named one by one so a new one is
+ * a decision somebody makes rather than a side effect of where they happened to type it.
+ */
+const LINK_EXEMPT = new Set([
+  'failureCopy.ts', // the issue tracker a dead end points a reader at
+  'sweep.ts', // the GitHub clone URL for a repo being swept
+]);
+
+test('a fetched URL traces to a registered builder — nothing invented, nothing edited', () => {
+  // ⚠ THE PROPERTY, NOT A LIST OF SHAPES — and it took four rounds of being told that. Every
+  // previous version banned a syntax: a method name, adjacency to the call, one spelling of
+  // an origin. Each was walked past by ordinary TypeScript — `replaceAll`, a `const` hop,
+  // `new URL(path, base)`, an interpolated binding, `export let`. `/lesson/next` is a REAL
+  // worker route emitting the contract, so each of those was the ticket's own defect one
+  // line away.
   //
-  // The property is "every URL a request is handed traces to a registered builder call".
-  // Two things break that trace and both are banned here: inventing a URL, and editing one.
-  const registered = Object.keys(CLI_ENDPOINTS).join('|');
-  const SURGERY = new RegExp(`\\b(?:${registered})\\s*\\([^)]*\\)\\s*(?:\\.\\s*(?:replace|concat|slice|substring|split)\\b|\\+)`);
-  const LITERAL_URL = /['"`]https?:\/\//;
+  // What holds instead: in a module that can make requests, a URL may not be CONSTRUCTED
+  // (`new URL`), INVENTED (a literal address) or EDITED — where "edited" follows the value
+  // through its bindings rather than looking only at the call site. URLs are built in
+  // urls.ts and used unaltered, or they are not built at all.
+  const registered = Object.keys(CLI_ENDPOINTS);
+  const EDIT = '(?:\\.\\s*(?:replace|replaceAll|concat|slice|substring|substr|split|padStart|padEnd|trim)\\b|\\s*\\+)';
   const offenders: string[] = [];
   for (const file of sourceFiles()) {
     const base = rel(file);
     if (URL_MODULES.includes(base)) continue; // where URLs are legitimately written down
     const src = codeWithStrings(readFileSync(file, 'utf8'));
-    // Surgery on a builder's result is banned EVERYWHERE — the edited URL only has to reach
-    // a network module to be requested, and it does not have to be edited in one.
-    if (SURGERY.test(src)) offenders.push(`${base} edits a builder's URL`);
-    // A literal URL is banned only where a request can be made. Elsewhere a hardcoded
-    // address is a LINK — the issue tracker this module points a reader at, the GitHub
-    // clone URL `sweep` builds — and banning those would be a vocabulary rule, not a safety
-    // one, which is how a guard earns the reputation that gets it deleted.
-    if (NETWORK_MODULES.has(base) && LITERAL_URL.test(src)) offenders.push(`${base} hardcodes a URL`);
+    const holders = [...registered, ...urlBindings(src, registered)];
+    const held = holders.join('|');
+
+    // 1. Editing a URL, at the call or through any number of bindings.
+    if (new RegExp(`\\b(?:${held})\\b\\s*(?:\\([^)]*\\))?\\s*${EDIT}`).test(src)) {
+      offenders.push(`${base} edits a URL`);
+    }
+    // 2. Interpolating one in front of a path.
+    if (new RegExp(`\\$\\{[^}]*\\b(?:${held})\\b[^}]*\\}\\s*/`).test(src)) {
+      offenders.push(`${base} interpolates a URL in front of a path`);
+    }
+    // 3. Inventing one, ANYWHERE. ⚠ This was scoped to modules that can fetch, and an
+    //    outside read parked `export const COVERAGE_ENDPOINT = 'https://…'` in `version.ts`
+    //    and imported it into one. Where a URL is WRITTEN and where it is REQUESTED need
+    //    not be the same file, so the ban follows the writing. The exceptions are named
+    //    below, which is the point: a hardcoded address has to be argued for.
+    if (!LINK_EXEMPT.has(base) && /['"`]https?:\/\//.test(src)) {
+      offenders.push(`${base} hardcodes a URL`);
+    }
+    if (!NETWORK_MODULES.has(base)) continue;
+
+    // 4. Constructing one at all, in a module that can request it.
+    if (/new URL\s*\(/.test(src)) offenders.push(`${base} constructs a URL`);
+    // 5. Reaching for ANY origin, including the app origin, in front of a path. The app
+    //    origin is off the fetch-side ban elsewhere because it is a link people print — but
+    //    `app.backthread.dev` really does serve `/api/*`, so inside a fetcher it is an
+    //    endpoint like any other.
+    if (/\b(?:appBaseUrl\s*\(|DEFAULT_APP_URL|BACKTHREAD_APP_URL)[^;\n]*\//.test(src)) {
+      offenders.push(`${base} builds a path on the app origin`);
+    }
   }
   assert.deepEqual(offenders, [], 'build it in urls.ts and register it instead');
 });
 
-test('the URL-trace rules are not vacuous', () => {
-  // Both patterns must match the thing they ban, or the test above passes in silence.
-  const registered = Object.keys(CLI_ENDPOINTS).join('|');
-  const SURGERY = new RegExp(`\\b(?:${registered})\\s*\\([^)]*\\)\\s*(?:\\.\\s*(?:replace|concat|slice|substring|split)\\b|\\+)`);
-  assert.ok(SURGERY.test("buildLessonStartUrl(env).replace('/lesson/start', '/lesson/next')"));
-  assert.ok(SURGERY.test('buildGroundedAskUrl(env) + "/next"'));
-  assert.ok(/['"`]https?:\/\//.test("fetch('https://api.backthread.dev/coverage')"));
-  // …and urls.ts, which is exempt, really does contain one.
-  assert.ok(/['"`]https?:\/\//.test(codeWithStrings(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8'))));
+test('the URL-trace rule is not vacuous — it catches every shape that got past it', () => {
+  // The eight spellings that were measured green, as fixtures. If the rule stops matching
+  // one of them it has quietly become the pattern-matcher it replaced.
+  const registered = ['buildLessonStartUrl', 'buildGroundedAskUrl'];
+  const EDIT = '(?:\\.\\s*(?:replace|replaceAll|concat|slice|substring|substr|split|padStart|padEnd|trim)\\b|\\s*\\+)';
+  const catches = (src: string): boolean => {
+    const holders = [...registered, ...urlBindings(src, registered)].join('|');
+    return (
+      new RegExp(`\\b(?:${holders})\\b\\s*(?:\\([^)]*\\))?\\s*${EDIT}`).test(src) ||
+      new RegExp(`\\$\\{[^}]*\\b(?:${holders})\\b[^}]*\\}\\s*/`).test(src) ||
+      /new URL\s*\(/.test(src) ||
+      /['"`]https?:\/\//.test(src) ||
+      /\b(?:appBaseUrl\s*\(|DEFAULT_APP_URL|BACKTHREAD_APP_URL)[^;\n]*\//.test(src)
+    );
+  };
+  for (const shape of [
+    "new URL('/lesson/next', buildLessonStartUrl(env)).toString()",
+    "buildLessonStartUrl(env).replaceAll('/lesson/start', '/lesson/next')",
+    "const base = buildLessonStartUrl(env);\nconst url = base.replace('/a', '/b');",
+    "const u = new URL(buildLessonStartUrl(env)); u.pathname = '/lesson/next';",
+    'fetch(`${appBaseUrl(env)}/api/coverage`)',
+    "fetch('https://api.backthread.dev/coverage')",
+    'const origin = workerBaseUrl(env);\nfetch(`${origin}/lesson/next`);',
+    "buildGroundedAskUrl(env) + '/next'",
+  ]) {
+    assert.ok(catches(shape), `not caught: ${shape}`);
+  }
+  // …and it does NOT fire on the honest form, or this is a ban on the codebase.
+  assert.equal(catches('const res = await doFetch(buildGroundedAskUrl(env), init);'), false);
 });
 
 test('every declared network module really does fetch', () => {
@@ -1620,4 +1701,94 @@ test('a 4xx `message` is the reader\'s, so it is not repeated as a diagnostic', 
   });
   assert.match(out, /please update backthread/);
   assert.doesNotMatch(out, /message=/, out);
+});
+
+// --- the last unpinned copy table, and two invariants that rested on habit --------------
+
+/** Every scope-skip sentence, spelled out — the same rigor `SLUG_COPY` gets. */
+const EXPECTED_SCOPE_COPY: Readonly<Record<string, string>> = {
+  connected: 'this repo is connected',
+  not_connected: "this repo isn't connected to Backthread yet, so nothing was read or sent",
+  repo_not_writable: 'this repo has no owning Backthread account, so nothing was read or sent',
+  not_a_member:
+    "you're not a member of the account that owns this repo, so nothing was read or sent",
+  capture_paused: 'capture is paused for this repo, so nothing was read or sent',
+  unknown: 'the scope check could not be reached, so nothing was read or sent',
+  other: 'this repo is out of capture scope, so nothing was read or sent',
+};
+
+test('every scope-skip sentence is the sentence it is meant to be', async () => {
+  // ⚠ FOUR MUTANTS SURVIVED HERE. The guard checked non-empty and not-self-mapping, so
+  // replacing three of these with each other's copy — on a table `capture --manual` prints —
+  // was green. `SLUG_COPY` is asserted sentence by sentence; this is the same product.
+  const { SCOPE_REASON_COPY } = await import('./captureScope.js');
+  assert.deepEqual(Object.keys(SCOPE_REASON_COPY).sort(), Object.keys(EXPECTED_SCOPE_COPY).sort());
+  for (const [reason, want] of Object.entries(EXPECTED_SCOPE_COPY)) {
+    assert.equal(
+      (SCOPE_REASON_COPY as Record<string, string>)[reason],
+      want,
+      `${reason} does not say what it is meant to say`,
+    );
+  }
+});
+
+test('a server-authored sentence is joined as an appositive, not as a new sentence', () => {
+  // The dash is argued for in failureCopy.ts — somebody else's words, no guaranteed capital
+  // — and nothing pinned it, so swapping it for a full stop was invisible.
+  const out = describeFailure({
+    lead: 'zzlead',
+    status: 426,
+    payload: { error: 'client_too_old', message: 'please update backthread' },
+    env: PLAIN_ENV,
+  });
+  assert.equal(out, 'zzlead — please update backthread');
+});
+
+test('a wire verdict of `unavailable` outranks the GLOBAL table, but not a route-local one', () => {
+  // Two global sentences end "try again"; saying that over a server which has just said
+  // retrying will not help is the CLI overruling the wire about the one thing it knows
+  // better. A route-local override still wins — it exists because that route knows more.
+  const global = describeFailure({
+    lead: 'zzlead',
+    status: 503,
+    payload: { error: 'persist_failed', reason: 'unavailable' },
+    env: PLAIN_ENV,
+  });
+  assert.match(global, /retrying will not help/);
+  assert.doesNotMatch(global, /try again/);
+
+  const local = describeFailure({
+    lead: 'zzlead',
+    status: 503,
+    payload: { error: 'ask_expired', reason: 'unavailable' },
+    env: PLAIN_ENV,
+    overrides: { ask_expired: 'that ask has expired.' },
+  });
+  assert.match(local, /^that ask has expired\./);
+});
+
+test('a 5xx `message` never renders, whatever slug it arrives with', () => {
+  // ⚠ THE INVARIANT USED TO REST ON `SLUG_COPY` STAYING EXHAUSTIVE. `readAuthoredError` was
+  // status-gated and `message` was not, so one new 5xx slug on any Function re-opened the
+  // raw-database-text path. Measured through `login --claim` before the gate.
+  const out = describeFailure({
+    lead: 'zzlead',
+    status: 500,
+    payload: { error: 'a_slug_nothing_maps', message: 'duplicate key value violates unique constraint "lessons_pkey"' },
+    env: PLAIN_ENV,
+  });
+  assert.doesNotMatch(out, /duplicate key|lessons_pkey/, out);
+  assert.match(out, /The server rejected it \(HTTP 500\)/);
+  assert.match(describeFailure({
+    lead: 'zzlead',
+    status: 500,
+    payload: { error: 'a_slug_nothing_maps', message: 'duplicate key' },
+    env: VERBOSE_ENV,
+  }), /message=duplicate key/);
+});
+
+test('a single word is not a sentence somebody wrote for you', () => {
+  const out = describeFailure({ lead: 'zzlead', status: 400, payload: { error: 'hasOwnProperty' }, env: PLAIN_ENV });
+  assert.doesNotMatch(out, /hasOwnProperty/, out);
+  assert.match(out, /HTTP 400/);
 });

@@ -17,6 +17,7 @@
 import { updateConfig } from './config.js';
 import { appBaseUrl, buildExchangeClaimUrl } from './urls.js';
 import { versionHeaders } from './version.js';
+import { describeFailure } from './failureCopy.js';
 
 // Plaintext prefix of every claim code (lockstep with the mint-claim /
 // exchange-claim Edge Functions). A code is NOT a token — visually distinct from
@@ -121,7 +122,22 @@ function exchangeErrorMessage(
       // <the caught upstream string> }`, so relaying `message` unconditionally printed
       // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
       // Same rule as the shared renderer: nobody writes reader-facing copy for a 500.
-      const authored = status < 500 && typeof body?.message === 'string' ? body.message : '';
+      // ⚠ A 5xx IS NOT THE READER'S FAULT AND A FRESH CODE WILL NOT FIX IT. An earlier draft
+      // of this arm answered every unmapped status with "generate a fresh code and try
+      // again", which on `{ error: 'exchange_failed', message: <pg text> }` @ 500 pointed
+      // the reader at their own code as the cause of a server fault, told them to do work
+      // that cannot help, and lost the diagnostic for the operator too. The shared renderer
+      // already knows how to say all of that — including putting the withheld string behind
+      // `--verbose` — so it says it here.
+      if (status >= 500) {
+        return describeFailure({
+          lead: 'this device could not be authorized',
+          status,
+          payload: (body ?? {}) as Record<string, unknown>,
+          env,
+        });
+      }
+      const authored = typeof body?.message === 'string' ? body.message : '';
       // The server's own sentence already ends in a stop and often already says "try
       // again", so appending ours produced `…then try again.. Generate a fresh code … and
       // try again.` When it speaks, it speaks alone.

@@ -156,8 +156,13 @@ test('a 5xx `message` is a relayed diagnostic here too, and is not printed', asy
     assert.equal(result.ok, false);
     assert.match(result.message, /HTTP 500/);
     assert.doesNotMatch(result.message, /permission denied/);
-    // …and it still says what to do, which the bare status line did not.
-    assert.match(result.message, /fresh code/i);
+    // ⚠ AND IT MUST NOT SAY "GENERATE A FRESH CODE". A 500 is not the reader's fault and a
+    // new code cannot fix it — pointing them at their own code as the cause of a server
+    // fault is telling them to do work that cannot help. The shared renderer says the true
+    // thing instead, and puts the withheld string behind --verbose.
+    assert.doesNotMatch(result.message, /fresh code/i);
+    assert.match(result.message, /failed on our side|The server rejected it/);
+    assert.match(result.message, /issues/);
   });
 });
 

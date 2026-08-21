@@ -331,9 +331,10 @@ const ASK_EXPIRED_COPY =
   'that ask has expired — it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.';
 
 const INFLOW_ANSWER_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
+  // ONE entry. `ask_material_moved` was here too, byte-identical to its entry on the global
+  // table — and this module's own doc argues that two copies of a sentence are free to
+  // disagree. It means the same thing wherever it arrives, so it lives in one place.
   ask_expired: ASK_EXPIRED_COPY,
-  ask_material_moved:
-    'the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.',
 });
 
 function expiryAwareDetail(

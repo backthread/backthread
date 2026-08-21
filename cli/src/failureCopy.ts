@@ -183,7 +183,10 @@ export function readAuthoredError(
 ): string | null {
   if (status >= 500) return null;
   const raw = readErrorField(payload);
-  return raw !== null && !isMachineCode(raw) ? raw : null;
+  // A SPACE, because a sentence has one. Without it any camelCase or hyphenated token that
+  // fails the machine-code test — `hasOwnProperty`, `not-a-thing` — was printed to a reader
+  // as though somebody had written it for them.
+  return raw !== null && !isMachineCode(raw) && raw.includes(' ') ? raw : null;
 }
 
 /** Read the SQLSTATE (`code`), or null. An OPERATOR field — never rendered by default. */
@@ -265,7 +268,7 @@ function operatorSuffix(status: number, payload: Record<string, unknown>): strin
  *   1. a per-slug override — the advice genuinely differs from the retry verdict;
  *   2. `reason` — the contract; this is the case the whole ticket is about;
  *   3. a server-authored `message` — NOT a relayed diagnostic. A relayed failure body has
- *      no `message` at all (the worker's allow-list drops it), so the only bodies that
+ *      no `message` at all (the worker's deny-list drops it), so the only bodies that
  *      reach here with one are worker-AUTHORED copy about the caller's own request, and the
  *      clearest example is the 426 "please update backthread…" soft-block. Rendering that
  *      verbatim is correct; replacing it with a generic sentence would lose the upgrade
@@ -297,16 +300,10 @@ export function withOperatorDetail(
  * meaning is local to one route is more specific than one that means the same everywhere —
  * and only OWN properties count, on both.
  */
-function lookupSlugCopy(raw: string, overrides?: Readonly<Record<string, string>>): string | null {
-  if (overrides && Object.prototype.hasOwnProperty.call(overrides, raw)) {
-    const v = overrides[raw];
-    if (typeof v === 'string' && v.length > 0) return v;
-  }
-  if (Object.prototype.hasOwnProperty.call(SLUG_COPY, raw)) {
-    const v = SLUG_COPY[raw];
-    if (typeof v === 'string' && v.length > 0) return v;
-  }
-  return null;
+function lookupIn(table: Readonly<Record<string, string>>, raw: string): string | null {
+  if (!Object.prototype.hasOwnProperty.call(table, raw)) return null;
+  const v = table[raw];
+  return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
 export function describeFailure(input: FailureCopyInput): string {
@@ -317,20 +314,31 @@ export function describeFailure(input: FailureCopyInput): string {
   // 1. A known code, mapped to the action it implies. Looked up on the RAW field, not on
   //    the slug-filtered one: half this table's keys ('token expired') are two words and
   //    would fail the machine-code test they are not being asked to pass.
+  const wireVerdict = readFailureReason(payload);
   const raw = payload.error;
   if (typeof raw === 'string' && raw.length > 0) {
+    // A ROUTE-LOCAL override wins outright — it exists because that one route knows
+    // something the wire does not, which is the whole reason the argument exists.
+    const local = overrides ? lookupIn(overrides, raw) : null;
+    if (local !== null) return `${local}${suffix}`;
+  }
+  // The GLOBAL table yields to `unavailable`, and only to that. A mapped sentence is more
+  // specific than a retry verdict and wins in general — but two of these end "try again",
+  // and saying that over a server which has just said retrying will not help is the CLI
+  // overruling the wire about the one thing the wire knows better.
+  if (wireVerdict !== 'unavailable' && typeof raw === 'string' && raw.length > 0) {
     // ⚠ `hasOwn`, NOT A BARE INDEX. The lookup used to be `{ ...SLUG_COPY, ...overrides }[raw]`
     // on an object literal, which carries `Object.prototype` — so a server sending
     // `error: "toString"` made the ENTIRE user-facing line
     // `function toString() { [native code] }`, losing the lead, the verdict and the next
     // step. Eight `error` values did that. This module's own doc promises it never trusts
     // the payload's shape; an inherited property is exactly the shape it forgot.
-    const mapped = lookupSlugCopy(raw, overrides);
+    const mapped = lookupIn(SLUG_COPY, raw);
     if (mapped !== null) return `${mapped}${suffix}`;
   }
 
   // 2. The contract. The only branch that can honestly promise a retry.
-  const reason = readFailureReason(payload);
+  const reason = wireVerdict;
   if (reason) {
     // Both conditions, so "a 5xx sends you to the tracker, a 4xx never does" is simply
     // true rather than true-because-no-server-does-that-yet. `unavailable` only rides a
@@ -342,7 +350,16 @@ export function describeFailure(input: FailureCopyInput): string {
   // 3. A sentence somebody wrote for this reader, in either field it can arrive in. Joined
   //    with a dash rather than a full stop because it is an appositive and is not
   //    guaranteed to start with a capital.
-  const authored = readServerMessage(payload) ?? readAuthoredError(payload, status);
+  // ⚠ THE STATUS GATE APPLIES TO BOTH FIELDS, NOT JUST TO `error`. `readAuthoredError` was
+  // gated and `message` was not, so the invariant "no raw database text" rested entirely on
+  // SLUG_COPY staying exhaustive over every 5xx slug that pairs itself with an upstream
+  // string — which is the convention this ticket forbids, one new server slug from failing.
+  // Measured through `login --claim`: `permission denied for schema private`.
+  //
+  // Nobody writes reader-facing copy for a 500, in either field. Below it, both are the
+  // server answering the caller's own request and both render.
+  const authored =
+    status >= 500 ? null : (readServerMessage(payload) ?? readAuthoredError(payload, status));
   if (authored) return `${lead} — ${authored}${suffix}`;
 
   // 4. Nothing recognisable. Say the status and refuse to guess — plus a next step, but
@@ -437,8 +454,8 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
   inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
 
   // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
-  // sends any of them — they are emitted only by routes this package never calls — /ci/snapshot, the git-decisions and billing routes. Dead
-  // entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
+  // sends any of them — they are emitted only by routes this package never calls:
+  // /ci/snapshot, the git-decisions and the billing routes. Dead entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
   // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
   // written to fix it.
   //
@@ -464,9 +481,11 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
 // ⚠ IT ASKS NOTHING ABOUT HOW THE BUILDER IS SPELLED, AND THAT IS THE POINT. Earlier
 // versions tested the declaration's name, then its return type, then whether an origin
 // appeared in its body — and each version was walked past by an ordinary spelling: an
-// `export const`, a name not ending in `Url`, a return type of `URL`, an origin routed
-// through a one-line private helper. Chasing shapes was the mistake. Every export here is
-// a builder because there is nothing else this module is for.
+// `export const`, an `export let`, a name not ending in `Url`, a return type of `URL`, an
+// origin routed through a one-line private helper, `replaceAll` where `replace` was banned,
+// one `const` hop before the edit, `new URL(path, base)`, an address parked in another file
+// and imported. Chasing shapes was the mistake, four rounds running. Every export here is a
+// builder because there is nothing else this module is for.
 //
 // The same test then DRIVES every `failure-body` entry through a stubbed rejection —
 // checking the injected fetch was really called, so a driver cannot merely claim to have

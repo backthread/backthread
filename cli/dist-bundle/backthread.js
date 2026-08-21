@@ -7169,6 +7169,212 @@ function versionHeaders() {
   };
 }
 
+// src/failureCopy.ts
+var REASONS = ["overloaded", "unavailable"];
+var REASON_CLAUSE = Object.freeze({
+  overloaded: "The database was busy \u2014 try again in a moment.",
+  unavailable: "It failed on our side, so retrying will not help."
+});
+var ISSUES_URL = "https://github.com/backthread/backthread/issues";
+function nextStep(verbose) {
+  return verbose ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}` : ` If it keeps happening, set BACKTHREAD_VERBOSE=1 (or pass --verbose) and report what that prints at ${ISSUES_URL}`;
+}
+function looksLikeABug(status) {
+  return status >= 500;
+}
+function readFailureReason(payload) {
+  const raw = payload.reason;
+  return typeof raw === "string" && REASONS.includes(raw) ? raw : null;
+}
+var MACHINE_CODE = /^[a-z][a-z0-9_]*$/;
+function isMachineCode(raw) {
+  return MACHINE_CODE.test(raw);
+}
+function readErrorField(payload) {
+  const raw = payload.error;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function readFailureSlug(payload) {
+  const raw = readErrorField(payload);
+  return raw !== null && isMachineCode(raw) ? raw : null;
+}
+function readAuthoredError(payload, status) {
+  if (status >= 500) return null;
+  const raw = readErrorField(payload);
+  return raw !== null && !isMachineCode(raw) && raw.includes(" ") ? raw : null;
+}
+function readFailureCode(payload) {
+  const raw = payload.code;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function readServerMessage(payload) {
+  const raw = payload.message;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function verboseEnabled(env = process.env) {
+  const raw = (env.BACKTHREAD_VERBOSE ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+function operatorSuffix(status, payload) {
+  const parts = [`status=${status}`];
+  const slug = readFailureSlug(payload) ?? (status >= 500 ? readErrorField(payload) : null);
+  if (slug) parts.push(`error=${slug}`);
+  const reason = readFailureReason(payload);
+  if (reason) parts.push(`reason=${reason}`);
+  const code = readFailureCode(payload);
+  if (code) parts.push(`code=${code}`);
+  const msg = status >= 500 ? readServerMessage(payload) : null;
+  if (msg) parts.push(`message=${msg}`);
+  return ` [${parts.join(" ")}]`;
+}
+function withOperatorDetail(sentence, ctx) {
+  if (!verboseEnabled(ctx.env ?? process.env)) return sentence;
+  return `${sentence}${operatorSuffix(ctx.status, ctx.payload)}`;
+}
+function lookupIn(table, raw) {
+  if (!Object.prototype.hasOwnProperty.call(table, raw)) return null;
+  const v = table[raw];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+function describeFailure(input) {
+  const { lead, status, payload, overrides } = input;
+  const verbose = verboseEnabled(input.env ?? process.env);
+  const suffix = verbose ? operatorSuffix(status, payload) : "";
+  const wireVerdict = readFailureReason(payload);
+  const raw = payload.error;
+  if (typeof raw === "string" && raw.length > 0) {
+    const local = overrides ? lookupIn(overrides, raw) : null;
+    if (local !== null) return `${local}${suffix}`;
+  }
+  if (wireVerdict !== "unavailable" && typeof raw === "string" && raw.length > 0) {
+    const mapped = lookupIn(SLUG_COPY, raw);
+    if (mapped !== null) return `${mapped}${suffix}`;
+  }
+  const reason = wireVerdict;
+  if (reason) {
+    const tail2 = reason === "unavailable" && looksLikeABug(status) ? nextStep(verbose) : "";
+    return `${lead}. ${REASON_CLAUSE[reason]}${tail2}${suffix}`;
+  }
+  const authored = status >= 500 ? null : readServerMessage(payload) ?? readAuthoredError(payload, status);
+  if (authored) return `${lead} \u2014 ${authored}${suffix}`;
+  const tail = looksLikeABug(status) ? nextStep(verbose) : "";
+  return `${lead}. The server rejected it (HTTP ${status}).${tail}${suffix}`;
+}
+var RE_AUTH = "this device is no longer authorized \u2014 run `backthread login` again.";
+var RE_INVITE = "you're not a member of the account that owns that repo \u2014 ask one of its owners to invite you.";
+var RE_REPORT = "nothing is wrong with what you did \u2014 it failed on our side.";
+var SLUG_COPY = Object.freeze({
+  // --- the repo gate: worker's resolveRepoGate + read/ingest-decisions authz ---------
+  repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
+  not_a_member: RE_INVITE,
+  // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
+  // `!repo.account_id` — the read side reaching it only for a private repo, since a public
+  // one short-circuits first. Never on a permission a reader could be granted, and the first
+  // draft told the reader to ask one of its owners for an invite — advice about people who
+  // do not exist. Read the producer before writing the sentence.
+  // Fires on the IDENTICAL condition as `repo_not_writable` (`!repo.account_id`), so it
+  // gets the identical remedy. An earlier draft named the fix on one and left the other
+  // with nothing to do.
+  not_readable: "that repo has no owning Backthread account, so there is nothing to read \u2014 run `backthread` to connect it.",
+  repo_not_writable: "that repo has no owning Backthread account, so nothing can be saved against it \u2014 run `backthread` to connect it.",
+  // --- deliberate refusals, not outages ---------------------------------------------
+  // `decideSessionAdmission` on `sessionAllowance` — a CAPTURE-SESSION allowance, not a
+  // decision count. "Decision limit" also echoed a pricing model that was retired.
+  plan_limit: "this account has used its capture allowance for now \u2014 open Billing in the web app to raise it.",
+  // NOT "one was built recently" — the opposite. It fires when the last few paid builds
+  // left NO lesson behind and there is no cached one to serve, so the server refuses to
+  // spend again for a while. Read the producer before writing the sentence.
+  lesson_retry_too_soon: "the last few attempts for this repo found nothing worth asking about, so no more are being built for now \u2014 try again later.",
+  lesson_in_progress: "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+  ask_not_yours: "that question belongs to somebody else, so it cannot be answered here.",
+  // The token verifier has THREE verdicts and emits `ask_${reason}` for each. `expired` is
+  // the 410 the inflow path catches by status; the other two land here, and mapping only
+  // one of them left its identical sibling reading "the server rejected it (HTTP 400)".
+  ask_malformed: "that answer token is not one this client recognises \u2014 ask for a fresh question.",
+  ask_material_moved: "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.",
+  // NOT "issued to another device" — that verifies fine and comes back as `ask_not_yours`.
+  // This is "we cannot establish this token is ours": forged, corrupted, or signed with a
+  // key that has since rotated. The two sentences described each other's conditions.
+  ask_bad_signature: "that answer token could not be verified, so nothing was recorded \u2014 ask for a fresh question.",
+  // --- bad request: OUR bug, not the reader's -----------------------------------------
+  // Named rather than left to the fallback because the fallback would say "the server
+  // rejected it", which invites the reader to look for something they did wrong.
+  // Only the ones a route THIS PACKAGE CALLS can emit. `ci_mode_not_enabled`,
+  // `invalid_state` and `invalid_checkpoint` were on the table and belong to /ci/snapshot
+  // and the git-decisions routes, which this package never calls — dead entries that no
+  // test could reach and that make "the table is exhaustive" quietly meaningless.
+  invalid_body: RE_REPORT,
+  invalid_payload: RE_REPORT,
+  invalid_field: RE_REPORT,
+  "method not allowed": RE_REPORT,
+  // ⚠ THESE TWO PAIR A SLUG WITH A RAW UPSTREAM STRING and are the reason the table is
+  // consulted BEFORE the `message` branch. Unmapped, a reader got `the decisions weren't
+  // saved — duplicate key value violates unique constraint "decisions_pkey"`. Measured.
+  persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
+  inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
+  // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
+  // sends any of them — they are emitted only by routes this package never calls:
+  // /ci/snapshot, the git-decisions and the billing routes. Dead entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
+  // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
+  // written to fix it.
+  //
+  // --- the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
+  "invalid token": RE_AUTH,
+  "token expired": RE_AUTH,
+  "invalid session": RE_AUTH,
+  "insufficient scope": RE_AUTH,
+  "missing authorization": RE_AUTH
+});
+var CLI_ENDPOINTS = Object.freeze({
+  // --- worker origin, relayed-failure contract ---------------------------------------
+  buildGroundedAskUrl: { renders: "failure-body", entryPoint: "queryDecisions" },
+  buildLessonStartUrl: { renders: "failure-body", entryPoint: "startLesson" },
+  buildLessonAnswerUrl: { renders: "failure-body", entryPoint: "answerLesson" },
+  buildInflowAskUrl: { renders: "failure-body", entryPoint: "requestAsk" },
+  buildInflowAnswerUrl: { renders: "failure-body", entryPoint: "answerAsk" },
+  // Not a `failureBody` route on the server TODAY — but it is a worker route whose failure
+  // is read by a human in the capture summary, and it carried its own inlined copy of the
+  // `message ?? String(error)` logic. Wiring it now costs nothing and means the route can
+  // start returning the contract without a second round of this ticket.
+  buildInferDecisionsUrl: { renders: "failure-body", entryPoint: "serverInfer" },
+  // --- worker origin, nothing shown ---------------------------------------------------
+  // The ONLY `never-shown` endpoint left, and the test below holds it to the strong reading
+  // of that word: its module must not read `error` / `message` off the response at all, so
+  // there is no sentence to leak rather than merely nobody printing one today.
+  buildCaptureScopeUrl: {
+    renders: "never-shown",
+    why: "the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else's session. It reads a verdict, never a diagnostic."
+  },
+  // --- Supabase Functions origin -------------------------------------------------------
+  // Same correction: `capture --manual` prints this detail under the summary, so
+  // `ingest rejected (502): persist_failed` was reaching a person. The detached
+  // SessionEnd hook does discard it — but "one of its two callers is silent" is not
+  // "never shown", and the loud one is the one somebody is watching.
+  buildIngestDecisionsUrl: { renders: "failure-body", entryPoint: "runCapture (persist leg)" },
+  // ⚠ CLASSIFIED `never-shown` IN THE FIRST DRAFT OF THIS REGISTRY, AND THAT WAS FALSE.
+  // `backthread sync` prints this outcome's detail, so a reader was getting
+  // `read-decisions rejected (403): not_a_member` — the very defect, on a route the
+  // registry claimed nobody ever saw. A registry whose justifications are unverified is
+  // the failure mode it was built to end, so the fix is the wiring, not the prose.
+  buildReadDecisionsUrl: { renders: "failure-body", entryPoint: "syncDecisions" },
+  // Its one caller discards the detail today — but that is a fact about the CALLER, and a
+  // second one would inherit a ready-made slug. Rendered, so the category below can mean
+  // "the string is never even built" rather than "nobody happens to print it".
+  buildOnboardingStateUrl: { renders: "failure-body", entryPoint: "fetchOnboardingState" },
+  buildCliAuthPollUrl: {
+    renders: "own-slug-map",
+    why: "the login poll owns a state machine (pending / expired / claimed), not a failure taxonomy \u2014 each state is its own instruction to the person waiting at the terminal."
+  },
+  buildExchangeClaimUrl: {
+    renders: "own-slug-map",
+    why: "the claim exchange already maps invalid_code / code_expired / code_used to specific recovery instructions naming where to get a fresh code. A generic retry verdict would be strictly less actionable, and this endpoint carries no `reason` field to key one off."
+  },
+  // --- links, not requests --------------------------------------------------------------
+  buildCliAuthUrl: { renders: "not-a-fetch-target", why: "opened in the browser during login." },
+  buildBillingUrl: { renders: "not-a-fetch-target", why: "printed in the upgrade nudge." },
+  buildRepoDeepLink: { renders: "not-a-fetch-target", why: "printed alongside an answer." }
+});
+
 // src/claim.ts
 var CLAIM_PREFIX = "backthread_claim_";
 function isClaimCode(code) {
@@ -7221,7 +7427,15 @@ function exchangeErrorMessage(status, body, env) {
     case "rate_limited":
       return "Too many attempts from this machine \u2014 wait a few minutes and try again.";
     default: {
-      const authored = status < 500 && typeof body?.message === "string" ? body.message : "";
+      if (status >= 500) {
+        return describeFailure({
+          lead: "this device could not be authorized",
+          status,
+          payload: body ?? {},
+          env
+        });
+      }
+      const authored = typeof body?.message === "string" ? body.message : "";
       if (authored) return `Exchange failed (HTTP ${status}) \u2014 ${authored}`;
       return `Exchange failed (HTTP ${status}). ${fresh}`;
     }
@@ -8061,213 +8275,6 @@ function resolveGitContext(cwd, run = defaultGitRunner) {
     gitUser
   };
 }
-
-// src/failureCopy.ts
-var REASONS = ["overloaded", "unavailable"];
-var REASON_CLAUSE = Object.freeze({
-  overloaded: "The database was busy \u2014 try again in a moment.",
-  unavailable: "It failed on our side, so retrying will not help."
-});
-var ISSUES_URL = "https://github.com/backthread/backthread/issues";
-function nextStep(verbose) {
-  return verbose ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}` : ` If it keeps happening, set BACKTHREAD_VERBOSE=1 (or pass --verbose) and report what that prints at ${ISSUES_URL}`;
-}
-function looksLikeABug(status) {
-  return status >= 500;
-}
-function readFailureReason(payload) {
-  const raw = payload.reason;
-  return typeof raw === "string" && REASONS.includes(raw) ? raw : null;
-}
-var MACHINE_CODE = /^[a-z][a-z0-9_]*$/;
-function isMachineCode(raw) {
-  return MACHINE_CODE.test(raw);
-}
-function readErrorField(payload) {
-  const raw = payload.error;
-  return typeof raw === "string" && raw.length > 0 ? raw : null;
-}
-function readFailureSlug(payload) {
-  const raw = readErrorField(payload);
-  return raw !== null && isMachineCode(raw) ? raw : null;
-}
-function readAuthoredError(payload, status) {
-  if (status >= 500) return null;
-  const raw = readErrorField(payload);
-  return raw !== null && !isMachineCode(raw) ? raw : null;
-}
-function readFailureCode(payload) {
-  const raw = payload.code;
-  return typeof raw === "string" && raw.length > 0 ? raw : null;
-}
-function readServerMessage(payload) {
-  const raw = payload.message;
-  return typeof raw === "string" && raw.length > 0 ? raw : null;
-}
-function verboseEnabled(env = process.env) {
-  const raw = (env.BACKTHREAD_VERBOSE ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
-function operatorSuffix(status, payload) {
-  const parts = [`status=${status}`];
-  const slug = readFailureSlug(payload) ?? (status >= 500 ? readErrorField(payload) : null);
-  if (slug) parts.push(`error=${slug}`);
-  const reason = readFailureReason(payload);
-  if (reason) parts.push(`reason=${reason}`);
-  const code = readFailureCode(payload);
-  if (code) parts.push(`code=${code}`);
-  const msg = status >= 500 ? readServerMessage(payload) : null;
-  if (msg) parts.push(`message=${msg}`);
-  return ` [${parts.join(" ")}]`;
-}
-function withOperatorDetail(sentence, ctx) {
-  if (!verboseEnabled(ctx.env ?? process.env)) return sentence;
-  return `${sentence}${operatorSuffix(ctx.status, ctx.payload)}`;
-}
-function lookupSlugCopy(raw, overrides) {
-  if (overrides && Object.prototype.hasOwnProperty.call(overrides, raw)) {
-    const v = overrides[raw];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  if (Object.prototype.hasOwnProperty.call(SLUG_COPY, raw)) {
-    const v = SLUG_COPY[raw];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
-function describeFailure(input) {
-  const { lead, status, payload, overrides } = input;
-  const verbose = verboseEnabled(input.env ?? process.env);
-  const suffix = verbose ? operatorSuffix(status, payload) : "";
-  const raw = payload.error;
-  if (typeof raw === "string" && raw.length > 0) {
-    const mapped = lookupSlugCopy(raw, overrides);
-    if (mapped !== null) return `${mapped}${suffix}`;
-  }
-  const reason = readFailureReason(payload);
-  if (reason) {
-    const tail2 = reason === "unavailable" && looksLikeABug(status) ? nextStep(verbose) : "";
-    return `${lead}. ${REASON_CLAUSE[reason]}${tail2}${suffix}`;
-  }
-  const authored = readServerMessage(payload) ?? readAuthoredError(payload, status);
-  if (authored) return `${lead} \u2014 ${authored}${suffix}`;
-  const tail = looksLikeABug(status) ? nextStep(verbose) : "";
-  return `${lead}. The server rejected it (HTTP ${status}).${tail}${suffix}`;
-}
-var RE_AUTH = "this device is no longer authorized \u2014 run `backthread login` again.";
-var RE_INVITE = "you're not a member of the account that owns that repo \u2014 ask one of its owners to invite you.";
-var RE_REPORT = "nothing is wrong with what you did \u2014 it failed on our side.";
-var SLUG_COPY = Object.freeze({
-  // --- the repo gate: worker's resolveRepoGate + read/ingest-decisions authz ---------
-  repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
-  not_a_member: RE_INVITE,
-  // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
-  // `!repo.account_id` — the read side reaching it only for a private repo, since a public
-  // one short-circuits first. Never on a permission a reader could be granted, and the first
-  // draft told the reader to ask one of its owners for an invite — advice about people who
-  // do not exist. Read the producer before writing the sentence.
-  // Fires on the IDENTICAL condition as `repo_not_writable` (`!repo.account_id`), so it
-  // gets the identical remedy. An earlier draft named the fix on one and left the other
-  // with nothing to do.
-  not_readable: "that repo has no owning Backthread account, so there is nothing to read \u2014 run `backthread` to connect it.",
-  repo_not_writable: "that repo has no owning Backthread account, so nothing can be saved against it \u2014 run `backthread` to connect it.",
-  // --- deliberate refusals, not outages ---------------------------------------------
-  // `decideSessionAdmission` on `sessionAllowance` — a CAPTURE-SESSION allowance, not a
-  // decision count. "Decision limit" also echoed a pricing model that was retired.
-  plan_limit: "this account has used its capture allowance for now \u2014 open Billing in the web app to raise it.",
-  // NOT "one was built recently" — the opposite. It fires when the last few paid builds
-  // left NO lesson behind and there is no cached one to serve, so the server refuses to
-  // spend again for a while. Read the producer before writing the sentence.
-  lesson_retry_too_soon: "the last few attempts for this repo found nothing worth asking about, so no more are being built for now \u2014 try again later.",
-  lesson_in_progress: "a lesson is already being prepared for this repo \u2014 try again in a moment.",
-  ask_not_yours: "that question belongs to somebody else, so it cannot be answered here.",
-  // The token verifier has THREE verdicts and emits `ask_${reason}` for each. `expired` is
-  // the 410 the inflow path catches by status; the other two land here, and mapping only
-  // one of them left its identical sibling reading "the server rejected it (HTTP 400)".
-  ask_malformed: "that answer token is not one this client recognises \u2014 ask for a fresh question.",
-  ask_material_moved: "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.",
-  // NOT "issued to another device" — that verifies fine and comes back as `ask_not_yours`.
-  // This is "we cannot establish this token is ours": forged, corrupted, or signed with a
-  // key that has since rotated. The two sentences described each other's conditions.
-  ask_bad_signature: "that answer token could not be verified, so nothing was recorded \u2014 ask for a fresh question.",
-  // --- bad request: OUR bug, not the reader's -----------------------------------------
-  // Named rather than left to the fallback because the fallback would say "the server
-  // rejected it", which invites the reader to look for something they did wrong.
-  // Only the ones a route THIS PACKAGE CALLS can emit. `ci_mode_not_enabled`,
-  // `invalid_state` and `invalid_checkpoint` were on the table and belong to /ci/snapshot
-  // and the git-decisions routes, which this package never calls — dead entries that no
-  // test could reach and that make "the table is exhaustive" quietly meaningless.
-  invalid_body: RE_REPORT,
-  invalid_payload: RE_REPORT,
-  invalid_field: RE_REPORT,
-  "method not allowed": RE_REPORT,
-  // ⚠ THESE TWO PAIR A SLUG WITH A RAW UPSTREAM STRING and are the reason the table is
-  // consulted BEFORE the `message` branch. Unmapped, a reader got `the decisions weren't
-  // saved — duplicate key value violates unique constraint "decisions_pkey"`. Measured.
-  persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
-  inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
-  // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
-  // sends any of them — they are emitted only by routes this package never calls — /ci/snapshot, the git-decisions and billing routes. Dead
-  // entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
-  // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
-  // written to fix it.
-  //
-  // --- the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
-  "invalid token": RE_AUTH,
-  "token expired": RE_AUTH,
-  "invalid session": RE_AUTH,
-  "insufficient scope": RE_AUTH,
-  "missing authorization": RE_AUTH
-});
-var CLI_ENDPOINTS = Object.freeze({
-  // --- worker origin, relayed-failure contract ---------------------------------------
-  buildGroundedAskUrl: { renders: "failure-body", entryPoint: "queryDecisions" },
-  buildLessonStartUrl: { renders: "failure-body", entryPoint: "startLesson" },
-  buildLessonAnswerUrl: { renders: "failure-body", entryPoint: "answerLesson" },
-  buildInflowAskUrl: { renders: "failure-body", entryPoint: "requestAsk" },
-  buildInflowAnswerUrl: { renders: "failure-body", entryPoint: "answerAsk" },
-  // Not a `failureBody` route on the server TODAY — but it is a worker route whose failure
-  // is read by a human in the capture summary, and it carried its own inlined copy of the
-  // `message ?? String(error)` logic. Wiring it now costs nothing and means the route can
-  // start returning the contract without a second round of this ticket.
-  buildInferDecisionsUrl: { renders: "failure-body", entryPoint: "serverInfer" },
-  // --- worker origin, nothing shown ---------------------------------------------------
-  // The ONLY `never-shown` endpoint left, and the test below holds it to the strong reading
-  // of that word: its module must not read `error` / `message` off the response at all, so
-  // there is no sentence to leak rather than merely nobody printing one today.
-  buildCaptureScopeUrl: {
-    renders: "never-shown",
-    why: "the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else's session. It reads a verdict, never a diagnostic."
-  },
-  // --- Supabase Functions origin -------------------------------------------------------
-  // Same correction: `capture --manual` prints this detail under the summary, so
-  // `ingest rejected (502): persist_failed` was reaching a person. The detached
-  // SessionEnd hook does discard it — but "one of its two callers is silent" is not
-  // "never shown", and the loud one is the one somebody is watching.
-  buildIngestDecisionsUrl: { renders: "failure-body", entryPoint: "runCapture (persist leg)" },
-  // ⚠ CLASSIFIED `never-shown` IN THE FIRST DRAFT OF THIS REGISTRY, AND THAT WAS FALSE.
-  // `backthread sync` prints this outcome's detail, so a reader was getting
-  // `read-decisions rejected (403): not_a_member` — the very defect, on a route the
-  // registry claimed nobody ever saw. A registry whose justifications are unverified is
-  // the failure mode it was built to end, so the fix is the wiring, not the prose.
-  buildReadDecisionsUrl: { renders: "failure-body", entryPoint: "syncDecisions" },
-  // Its one caller discards the detail today — but that is a fact about the CALLER, and a
-  // second one would inherit a ready-made slug. Rendered, so the category below can mean
-  // "the string is never even built" rather than "nobody happens to print it".
-  buildOnboardingStateUrl: { renders: "failure-body", entryPoint: "fetchOnboardingState" },
-  buildCliAuthPollUrl: {
-    renders: "own-slug-map",
-    why: "the login poll owns a state machine (pending / expired / claimed), not a failure taxonomy \u2014 each state is its own instruction to the person waiting at the terminal."
-  },
-  buildExchangeClaimUrl: {
-    renders: "own-slug-map",
-    why: "the claim exchange already maps invalid_code / code_expired / code_used to specific recovery instructions naming where to get a fresh code. A generic retry verdict would be strictly less actionable, and this endpoint carries no `reason` field to key one off."
-  },
-  // --- links, not requests --------------------------------------------------------------
-  buildCliAuthUrl: { renders: "not-a-fetch-target", why: "opened in the browser during login." },
-  buildBillingUrl: { renders: "not-a-fetch-target", why: "printed in the upgrade nudge." },
-  buildRepoDeepLink: { renders: "not-a-fetch-target", why: "printed alongside an answer." }
-});
 
 // src/infer.ts
 async function localByokInfer(_transcript, _config, _opts) {
@@ -36040,8 +36047,10 @@ async function answerAsk(input, deps = {}) {
 }
 var ASK_EXPIRED_COPY = "that ask has expired \u2014 it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.";
 var INFLOW_ANSWER_OVERRIDES = Object.freeze({
-  ask_expired: ASK_EXPIRED_COPY,
-  ask_material_moved: "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you."
+  // ONE entry. `ask_material_moved` was here too, byte-identical to its entry on the global
+  // table — and this module's own doc argues that two copies of a sentence are free to
+  // disagree. It means the same thing wherever it arrives, so it lives in one place.
+  ask_expired: ASK_EXPIRED_COPY
 });
 function expiryAwareDetail(status, payload, env) {
   if (status === 410) return withOperatorDetail(ASK_EXPIRED_COPY, { status, payload, env });
