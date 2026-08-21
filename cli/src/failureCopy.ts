@@ -52,21 +52,39 @@ const REASON_CLAUSE: Readonly<Record<FailureReason, string>> = Object.freeze({
   unavailable: 'It failed on our side, so retrying will not help.',
 });
 
-/** Where a dead end goes next. Empty when the reader is already an operator. */
 const ISSUES_URL = 'https://github.com/backthread/backthread/issues';
 
 /**
  * ⚠ "RETRYING WILL NOT HELP" IS ONLY HALF A SENTENCE WITHOUT THIS. Telling somebody their
  * one available action is useless and then stopping leaves them with nothing to do, which
- * is the state the ticket asks us not to leave a reader in. Every dead end names the next
- * step — and the step is different depending on who is reading, which is exactly what the
- * verbose switch already knows: a reader is told how to GET the detail, an operator
- * already has it and is told where to send it.
+ * is the state the ticket asks us not to leave a reader in. The step differs by reader,
+ * which is exactly what the verbose switch already knows: a reader is told how to GET the
+ * detail, an operator already has it and is told where to send it.
+ *
+ * ⚠ AND IT IS FOR BUGS ONLY — see `looksLikeABug`. The first draft appended it to the
+ * step-4 fallback unconditionally, which sent every unmapped 4xx to the issue tracker: a
+ * lesson rate limit, an authorization refusal, a repo somebody cannot write to. Telling a
+ * person to file a bug about a working permission check is worse than telling them
+ * nothing, because it is confidently wrong.
+ *
+ * ("the detail above" was also a lie — the operator suffix is appended to the END of this
+ * same line, not above it.)
  */
 function nextStep(verbose: boolean): string {
   return verbose
-    ? ` If it keeps happening, report the detail above at ${ISSUES_URL}`
+    ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}`
     : ` If it keeps happening, run it again with --verbose and report what that prints at ${ISSUES_URL}`;
+}
+
+/**
+ * Is this plausibly OUR fault rather than an answer to the request?
+ *
+ * A 4xx is the server answering: not connected, not a member, too soon, not yours. Those
+ * are the system working. A 5xx — and `reason: 'unavailable'`, which only ever rides one —
+ * is the system not working, and that is the only case worth a stranger's time to report.
+ */
+function looksLikeABug(status: number): boolean {
+  return status >= 500 || status === 0;
 }
 
 export interface FailureCopyInput {
@@ -86,10 +104,13 @@ export interface FailureCopyInput {
   /** Where `BACKTHREAD_VERBOSE` is read from. Defaults to the real environment. */
   env?: NodeJS.ProcessEnv;
   /**
-   * Sentences for specific slugs whose right ADVICE differs from their `reason` — an
-   * expired in-flow ask is the design working, not an outage, and saying "the database was
-   * busy" about it would be false. Deliberately per-call-site rather than a global table:
-   * a slug means something only in the route that emits it.
+   * ROUTE-SPECIFIC sentences, layered over the global {@link SLUG_COPY}.
+   *
+   * The global table is where a slug that means the same thing everywhere belongs, and it
+   * is applied by default precisely so no call site has to remember it. This argument is
+   * for the remainder: a slug whose meaning is genuinely local to one route. `ask_expired`
+   * is the case — on `/inflow/answer` it means the design working, and there is no sentence
+   * about it that would be true anywhere else.
    */
   overrides?: Readonly<Record<string, string>>;
 }
@@ -154,12 +175,20 @@ export function readFailureCode(payload: Record<string, unknown>): string | null
 /**
  * Read a SERVER-AUTHORED sentence (`message`), or null.
  *
- * ⚠ This is NOT the relayed-diagnostic field, and the distinction is the whole point of the
- * contract above: a relayed failure body has no `message` at all — the worker's output allow-list
- * drops it precisely so a Postgres string can never be refilled into one. What survives in
- * `message` is worker-authored copy about the caller's own request: the 426 "please update
- * backthread…" soft-block, the 409 "a lesson is already being prepared". Those are already
- * complete, correct sentences and are rendered verbatim.
+ * On a body built by the worker's `failureBody` there is no `message` at all — its output
+ * allow-list drops the key precisely so a Postgres string cannot be refilled into one — and
+ * what arrives instead is worker-AUTHORED copy about the caller's own request: the 426
+ * "please update backthread…" soft-block, the 409 "a lesson is already being prepared".
+ * Those are complete, correct sentences and are rendered verbatim.
+ *
+ * ⚠ THAT ALLOW-LIST IS NOT UNIVERSAL, AND AN EARLIER DRAFT OF THIS COMMENT CLAIMED IT WAS.
+ * Two routes this module renders do not go through `failureBody` at all and DO pair a slug
+ * with a raw upstream string — `persist_failed` on ingest-decisions and `inference_failed`
+ * on /infer-decisions, both carrying `(e as Error).message`. Measured, that reached a
+ * person as `the decisions weren't saved — duplicate key value violates unique constraint
+ * "decisions_pkey"`. The fix is not a cleverer reader: both slugs are on {@link SLUG_COPY},
+ * which is consulted FIRST, so neither body ever reaches this branch. A slug that pairs
+ * itself with a raw diagnostic must be mapped, not sniffed.
  *
  * It exists as its own reader so a caller that wants ONLY that can ask for only that. The
  * helper it replaced was `message ?? String(error)`, which quietly degraded to printing the
@@ -246,8 +275,10 @@ export function describeFailure(input: FailureCopyInput): string {
   const authored = readServerMessage(payload) ?? readAuthoredError(payload);
   if (authored) return `${lead} — ${authored}${suffix}`;
 
-  // 4. Nothing recognisable. Say the status, refuse to guess, and still name a next step.
-  return `${lead}. The server rejected it (HTTP ${status}).${nextStep(verbose)}${suffix}`;
+  // 4. Nothing recognisable. Say the status and refuse to guess — plus a next step, but
+  //    only when the status says the fault is plausibly ours.
+  const tail = looksLikeABug(status) ? nextStep(verbose) : '';
+  return `${lead}. The server rejected it (HTTP ${status}).${tail}${suffix}`;
 }
 
 /**
@@ -272,16 +303,50 @@ export function describeFailure(input: FailureCopyInput): string {
  */
 const RE_AUTH = 'this device is no longer authorized — run `backthread login` again.';
 
+const RE_INVITE =
+  "you're not a member of the account that owns that repo — ask one of its owners to invite you.";
+const RE_REPORT = 'nothing is wrong with what you did — it failed on our side.';
+
 export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
-  // read-decisions/authz.ts — and the worker's repo gate says the same things
+  // --- the repo gate: worker's resolveRepoGate + read/ingest-decisions authz ---------
   repo_not_found: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
-  not_a_member:
-    "you're not a member of the account that owns that repo — ask one of its owners to invite you.",
-  not_readable: "that repo is private and this account can't read it.",
-  // ingest-decisions
+  repo_not_connected: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
+  not_a_member: RE_INVITE,
+  not_readable:
+    "that repo is private and this account can't read it — ask one of its owners to invite you.",
+  repo_not_writable:
+    "this repo is connected to an account this device can't write to — ask one of its owners to invite you.",
+  forbidden: RE_INVITE,
+
+  // --- deliberate refusals, not outages ---------------------------------------------
   plan_limit:
-    "your plan's decision limit is reached, so nothing was saved — open Billing in the web app to raise it.",
-  // the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
+    "your plan's decision limit is reached — open Billing in the web app to raise it.",
+  lesson_retry_too_soon:
+    'a lesson for this repo was built very recently — give it a while before asking for another.',
+  lesson_in_progress: 'a lesson is already being prepared for this repo — try again in a moment.',
+  ask_not_yours: 'that question belongs to somebody else, so it cannot be answered here.',
+  ask_malformed: 'that answer token is not one this client recognises — ask for a fresh question.',
+  upgrade_required: 'your plan does not include that — open Billing in the web app to change it.',
+  ci_mode_not_enabled: 'CI mode is not turned on for this account.',
+
+  // --- bad request: OUR bug, not the reader's -----------------------------------------
+  // Named rather than left to the fallback because the fallback would say "the server
+  // rejected it", which invites the reader to look for something they did wrong.
+  invalid_body: RE_REPORT,
+  invalid_payload: RE_REPORT,
+  invalid_field: RE_REPORT,
+  invalid_state: RE_REPORT,
+  invalid_checkpoint: RE_REPORT,
+  'method not allowed': RE_REPORT,
+
+  // ⚠ THESE TWO PAIR A SLUG WITH A RAW UPSTREAM STRING and are the reason the table is
+  // consulted BEFORE the `message` branch. Unmapped, a reader got `the decisions weren't
+  // saved — duplicate key value violates unique constraint "decisions_pkey"`. Measured.
+  persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
+  inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
+
+  // --- the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
+  unauthorized: RE_AUTH,
   'invalid token': RE_AUTH,
   'token expired': RE_AUTH,
   'invalid session': RE_AUTH,

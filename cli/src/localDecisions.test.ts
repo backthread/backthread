@@ -179,7 +179,9 @@ test('syncDecisions surfaces a rejected read as read-failed (cache untouched)', 
     },
   );
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /403/);
+  // A refusal, told as a refusal: what it is and who can undo it, never the slug.
+  assert.match(out.detail, /ask one of its owners to invite you/);
+  assert.doesNotMatch(out.detail, /forbidden/);
   assert.equal(await readCache(repo), null, 'nothing written on a rejected read');
   rmSync(repo, { recursive: true, force: true });
 });

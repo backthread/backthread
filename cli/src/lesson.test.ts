@@ -100,6 +100,20 @@ test('a build already in flight is its own status, not a failure', async () => {
   assert.match(outcome.detail, /already being prepared/);
 });
 
+test('a 409 carrying only its slug falls back to OUR sentence, never to the slug', async () => {
+  // ⚠ A MUTANT SURVIVED HERE. The test above sends `message` AND `error`, so reverting this
+  // line to the old `message ?? String(error)` helper still picked the message and stayed
+  // green — while a 409 without a message printed `backthread learn: lesson_in_progress`
+  // to a person. The whole reason this path reads ONLY `message` is that its fallback must
+  // be the client's own copy, and that is only observable when `message` is absent.
+  const impl = (async () =>
+    jsonResponse({ error: 'lesson_in_progress' }, 409)) as unknown as typeof fetch;
+  const outcome = await startLesson({ cwd: '/repo' }, deps(impl));
+  assert.equal(outcome.status, 'in-progress');
+  assert.match(outcome.detail, /already being prepared for this repo/);
+  assert.doesNotMatch(outcome.detail, /lesson_in_progress/);
+});
+
 test('a network failure resolves rather than throwing', async () => {
   const impl = (async () => {
     throw new Error('socket hang up');

@@ -488,9 +488,28 @@ test('ingest persist failure → persist-failed (swallowed)', async () => {
   assert.equal(out.status, 'persist-failed');
   // `capture --manual` PRINTS this detail, so it is product copy: the reader learns their
   // decisions were not saved, and does not read `persist_failed`.
-  assert.match(out.detail, /the decisions weren't saved/);
-  assert.match(out.detail, /HTTP 500/);
+  assert.match(out.detail, /the write didn't complete on our side/);
   assert.doesNotMatch(out.detail, /persist_failed/);
+});
+
+test('a raw upstream diagnostic never reaches the reader as product copy', async () => {
+  // ⚠ MEASURED LEAK. ingest-decisions pairs the slug with `rpcErr.message`, so before this
+  // slug was mapped a person read: "the decisions weren't saved — duplicate key value
+  // violates unique constraint \"decisions_pkey\"". The `failureBody` allow-list that
+  // normally makes this impossible does not run on this route.
+  const { fetch: fetchImpl } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }] } }),
+    ingest: () => ({
+      status: 500,
+      body: {
+        error: 'persist_failed',
+        message: 'duplicate key value violates unique constraint "decisions_pkey"',
+      },
+    }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.doesNotMatch(out.detail, /duplicate key|constraint|decisions_pkey/);
+  assert.match(out.detail, /the write didn't complete on our side/);
 });
 
 test('a plan-limit rejection tells the reader what to do about it', async () => {

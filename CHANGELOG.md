@@ -31,13 +31,22 @@ every relayed failure carries a `reason` saying which of the two it is — and t
 never read it. Now it does, on **every** endpoint that sends one: `how` / the MCP `query`
 tool, `learn` (start and answer), and `ask-me` (ask and answer).
 
-**`sync`, `capture` and the setup check stop relaying slugs too.** Those talk to a different, older service
-that has no `reason` to send, so they were quietly printing things like
-`read-decisions rejected (403): not_a_member` and `ingest rejected (500): persist_failed`.
-Every code that service actually emits now maps to the action it implies — an expired
-credential says to run `backthread login`, a repo you cannot read says to ask its owner for
-an invite, a reached plan limit says where to raise it — and a code that is not on that list
-degrades to the plain HTTP status rather than to itself.
+**`sync`, `capture` and the setup check stop relaying slugs too.** Those were quietly
+printing things like `read-decisions rejected (403): not_a_member` and
+`ingest rejected (500): persist_failed`. The codes both the worker and that older service
+send now map to the action they imply — an expired credential says to run `backthread
+login`, a repo you cannot write to says to ask its owner for an invite, a reached plan limit
+says where to raise it, a lesson asked for too soon says to wait. A code that is not on that
+list degrades to the plain HTTP status rather than to itself.
+
+**A refusal is not a bug report.** "Retrying will not help" names a next step, but only when
+the failure is plausibly ours: a 5xx sends you to the issue tracker, a 4xx never does.
+Telling somebody to file a bug about a working permission check is worse than telling them
+nothing.
+
+**And no raw database text.** Two of these routes pair a code with the upstream error
+string, so `duplicate key value violates unique constraint "decisions_pkey"` used to arrive
+as product copy. It does not any more.
 
 **`--verbose` is new, and it is where the machine detail went.** The internal error code and
 the database's own SQLSTATE are operator fields, not something to put in front of somebody

@@ -82,8 +82,12 @@ test('an operator at a dead end is told where to SEND the detail, not how to get
     payload: UNAVAILABLE,
     env: VERBOSE_ENV,
   });
-  assert.match(out, /report the detail above at/);
+  assert.match(out, /report the detail at the end of this line at/);
   assert.doesNotMatch(out, /run it again with --verbose/);
+  // ⚠ IT USED TO SAY "the detail above", WHICH WAS FALSE: the operator suffix is appended
+  // to the END of this same line. The sentence has to be true about its own layout.
+  assert.doesNotMatch(out, /detail above/);
+  assert.ok(out.indexOf('[status=502') > out.indexOf('report the detail'));
 });
 
 test('a busy database is NOT sent to the issue tracker', () => {
@@ -475,22 +479,35 @@ function sourceFiles(): string[] {
     .map((f) => join(SRC_DIR, f));
 }
 
-/** The two modules allowed to turn an origin into an endpoint. */
-const URL_MODULES = ['urls.ts', 'claim.ts'];
+/**
+ * The modules allowed to name an origin. `urls.ts` and `claim.ts` build endpoints from
+ * them; `doctor.ts` probes the bare hosts for reachability and constructs no path.
+ *
+ * ⚠ ALL THREE ARE SCANNED FOR BUILDERS, not just the first two. An outside read put a
+ * complete unregistered endpoint in `doctor.ts` and it went green: the module was on the
+ * origin allow-list, so it could name an origin, and it was outside the builder scan, so
+ * nothing looked for what it did with one. Permission to name an origin is not permission
+ * to skip the registry.
+ */
+const ORIGIN_MODULES = ['urls.ts', 'claim.ts', 'doctor.ts'];
+
+/** The subset that may also FETCH. `urls.ts` may not — see the test below. */
+const URL_MODULES = ORIGIN_MODULES;
 
 /**
  * The two origins a FETCH can go to. Deliberately excludes the app origin: that one is a
  * browser link and is printed all over the package, so banning it would be a vocabulary
  * rule rather than a safety one.
  */
-const ORIGIN_TOKEN = /\b(?:workerBaseUrl|functionsBaseUrl|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL)\b/;
+const ORIGIN_TOKEN =
+  /\b(?:workerBaseUrl|functionsBaseUrl|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL|BACKTHREAD_WORKER_URL|BACKTHREAD_FUNCTIONS_URL)\b/;
 
 /** The literal hosts, for the author who pastes a URL out of a curl command. */
 const ORIGIN_HOST = /\b(?:workers\.dev|supabase\.co)\b/;
 
 /** Any origin at all — what makes an exported function a URL builder, fetched or linked. */
 const ANY_ORIGIN =
-  /\b(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL|DEFAULT_APP_URL)\b|\b(?:workers\.dev|supabase\.co)\b/;
+  /\b(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL|DEFAULT_APP_URL|BACKTHREAD_WORKER_URL|BACKTHREAD_FUNCTIONS_URL|BACKTHREAD_APP_URL)\b|\b(?:workers\.dev|supabase\.co)\b/;
 
 /** The origin declarations themselves are not builders — they are what builders reach for. */
 const IS_ORIGIN_DECL = /^(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_\w+_URL)$/;
@@ -521,13 +538,21 @@ function declaredBuilders(): string[] {
         ?? part.match(/^const ([A-Za-z0-9_]+)\s*[:=]/)?.[1];
       if (!name) continue;
       if (IS_ORIGIN_DECL.test(name)) continue;
-      // A BUILDER constructs a URL and hands it back; it never uses one. That is what
-      // separates `buildExchangeClaimUrl` from `exchangeClaim`, which sits beside it and
-      // names an origin only to print "generate a fresh code at …". The discriminator is
-      // behavioural rather than lexical on purpose — `export async function` and
-      // `export const` both have to keep working, because both walked past the previous,
-      // name-shaped version of this scan.
-      if (/\b(?:doFetch|fetch)\s*\(/.test(part)) continue;
+      // A BUILDER hands a URL STRING back; a consumer uses one. That is what separates
+      // `buildExchangeClaimUrl` from `exchangeClaim` beside it, which names an origin only
+      // to print "generate a fresh code at …" and returns a `Promise<ClaimResult>`.
+      //
+      // ⚠ THE TEST IS THE DECLARATION'S OWN RETURN TYPE, NOT A `fetch(` ANYWHERE IN THE
+      // PART. The earlier version skipped any part containing a fetch call — so appending
+      // a private, non-exported fetch helper AFTER a new builder hid the builder, because
+      // both landed in the same `\nexport `-delimited part. A return type belongs to one
+      // declaration and cannot be smuggled in from a neighbour.
+      // The RETURN type — the one after the parameter list's closing paren, not the first
+      // `: string` in the text. `isClaimCode(code: string): boolean` has a string parameter
+      // and is not a builder; `buildCliAuthUrl` wraps its parameters over five lines and
+      // is. Anchoring on `)` is what tells those apart.
+      const ret = part.match(/\)\s*:\s*([^{=]+?)\s*(?:\{|=>)/)?.[1] ?? '';
+      if (!/^(?:Promise<)?string\b/.test(ret)) continue;
       if (ANY_ORIGIN.test(part)) found.add(name);
     }
   }
@@ -597,7 +622,10 @@ test('endpoint construction is centralised, so nothing can dodge the registry', 
   for (const file of sourceFiles()) {
     const base = file.slice(SRC_DIR.length + 1);
     if (ORIGIN_ALLOWED.has(base)) continue;
-    const src = readFileSync(file, 'utf8');
+    // Comments stripped first. A module documenting its env-override seam ("Env override
+    // seam (BACKTHREAD_WORKER_URL)") is describing the behaviour, not reaching for it, and
+    // a ban that cannot tell those apart teaches the next author that it is noise.
+    const src = stripComments(readFileSync(file, 'utf8'));
     if (ORIGIN_TOKEN.test(src)) offenders.push(`${base} (names an origin)`);
     if (ORIGIN_HOST.test(src)) offenders.push(`${base} (hardcodes an origin host)`);
   }
@@ -630,9 +658,15 @@ test('each driver drives its REGISTERED entry point, not a convenient stand-in',
     if (d.renders !== 'failure-body') continue;
     const start = table.indexOf(`${builder}:`);
     assert.ok(start >= 0, `${builder}: no driver`);
-    const body = table.slice(start, start + 900);
+    // Comments stripped and a CALL required: a driver that faked it by calling the
+    // renderer directly, with the real function's name in a trailing comment, passed the
+    // earlier `includes()` form — so the guard's strength depended on comment placement.
+    const body = table
+      .slice(start, start + 900)
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
     const fn = d.entryPoint.split(' ')[0];
-    assert.ok(body.includes(fn), `${builder}: its driver never calls ${fn}`);
+    assert.match(body, new RegExp(`\\b${fn}\\s*\\(`), `${builder}: its driver never calls ${fn}`);
   }
 });
 
@@ -702,6 +736,11 @@ test('a Functions slug that is not on the table degrades, it does not leak', () 
 
 // --- "never shown" has to mean the string is never BUILT ----------------------------
 
+/** Source with comments removed — a mention in prose is not a use. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
 /** The non-test modules that call a given builder. */
 function callersOf(builder: string): string[] {
   const callers: string[] = [];
@@ -724,7 +763,9 @@ test('a never-shown endpoint does not even READ the server diagnostic', () => {
   // must not pull `error` or `message` off a response at all. Then there is no sentence to
   // leak, whoever prints what. It is a source-level property rather than a behavioural one,
   // which is the honest limit here — but it is checkable, and a promise is not.
-  const READS_DIAGNOSTIC = /\b(?:rec|obj|payload|body|json|data|res)\.(?:error|message)\b/;
+  // ⚠ ANY identifier, and bracket notation too. Pinning it to a list of variable names in
+  // dot notation meant `rec['error']` — or one variable renamed — walked straight past.
+  const READS_DIAGNOSTIC = /\.\s*(?:error|message)\b|\[\s*['"](?:error|message)['"]\s*\]/;
   const offenders: string[] = [];
   for (const [builder, d] of Object.entries(CLI_ENDPOINTS) as Array<[string, EndpointDisposition]>) {
     if (d.renders !== 'never-shown') continue;
@@ -773,6 +814,34 @@ test('a scope skip reads as a sentence, and every enum value has one', async () 
       `ScopeReason '${m[1]}' has no sentence`,
     );
   }
+  // ⚠ AND THE TWO CLIENT-SIDE SENTINELS, which are not in the enum and were therefore not
+  // checked. `'other'` is reachable — `interpretScopeResponse` maps any skip reason it does
+  // not recognise to it, which is exactly what a NEW server value looks like — and deleting
+  // it rendered `capture skipped — undefined.` with the whole suite green. TypeScript did
+  // catch it, but a type kill is not a test kill and this table is about what a person
+  // reads.
+  for (const sentinel of ['unknown', 'other'] as const) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(SCOPE_REASON_COPY, sentinel),
+      `the '${sentinel}' sentinel has no sentence`,
+    );
+    assert.ok(SCOPE_REASON_COPY[sentinel].length > 0);
+  }
+});
+
+test('an unrecognised server skip reason still reads as a sentence', async () => {
+  // The `'other'` sentinel, driven rather than asserted about: this is what today's client
+  // does when tomorrow's server adds a scope reason.
+  const { interpretScopeResponse } = await import('./captureScope.js');
+  const verdict = interpretScopeResponse(true, 200, {
+    decision: 'skip',
+    reason: 'some_future_reason',
+  });
+  assert.equal(verdict.send, false);
+  assert.equal(verdict.reason, 'other');
+  const { SCOPE_REASON_COPY: TBL } = await import('./captureScope.js');
+  assert.ok(TBL[verdict.reason].length > 0);
+  assert.doesNotMatch(TBL[verdict.reason], /some_future_reason|undefined/);
 });
 
 test('the inflow override table is reachable on every route it claims to cover', async () => {
@@ -797,5 +866,132 @@ test('the inflow override table is reachable on every route it claims to cover',
     );
     assert.match(out.detail, expected, `${slug} @ ${status}: ${out.detail}`);
     assert.doesNotMatch(out.detail, new RegExp(slug), out.detail);
+  }
+});
+
+// --- the other unchecked category ------------------------------------------------------
+
+/** Drive an `own-slug-map` endpoint with a slug nothing maps, and read what comes out. */
+const OWN_MAP_DRIVERS: Readonly<Record<string, (slug: string) => Promise<string>>> = {
+  buildExchangeClaimUrl: async (slug) => {
+    const { exchangeClaim } = await import('./claim.js');
+    const out = await exchangeClaim('backthread_claim_abcdefghijklmnop', {
+      env: PLAIN_ENV,
+      fetchImpl: stubFetch(403, { error: slug }),
+    });
+    return out.message;
+  },
+  buildCliAuthPollUrl: async (slug) => {
+    const { pollForToken } = await import('./cliAuthPoll.js');
+    const { generateEphemeralKeypair } = await import('./cliAuthCrypto.js');
+    // Clock and sleep are injected so the poll loop finishes rather than waiting out its
+    // five-minute budget in a unit test.
+    let t = 0;
+    const out = await pollForToken('sess', generateEphemeralKeypair(), {
+      env: PLAIN_ENV,
+      fetchImpl: stubFetch(403, { error: slug }),
+      timeoutMs: 10,
+      intervalMs: 1,
+      sleep: async () => {},
+      now: () => (t += 4),
+    });
+    return JSON.stringify(out);
+  },
+};
+
+test('every own-slug-map endpoint has a driver here', () => {
+  const declared = Object.entries(CLI_ENDPOINTS)
+    .filter(([, d]) => d.renders === 'own-slug-map')
+    .map(([n]) => n)
+    .sort();
+  assert.deepEqual(Object.keys(OWN_MAP_DRIVERS).sort(), declared);
+});
+
+for (const name of Object.keys(OWN_MAP_DRIVERS).sort()) {
+  test(`${name}: keeping its own map does not mean echoing an unmapped slug`, async () => {
+    // ⚠ THE LAST UNCHECKED CATEGORY. `own-slug-map` demanded a sentence of justification
+    // and verified nothing — exactly the hole that shipped two false `never-shown` claims
+    // before it was closed for that category. "It maps its own slugs" is a claim about
+    // behaviour, so it is asked as one: hand it a slug its map has never heard of and
+    // watch whether the slug comes back out.
+    const out = await OWN_MAP_DRIVERS[name]('some_slug_this_map_never_heard_of');
+    assert.doesNotMatch(out, /some_slug_this_map_never_heard_of/, out);
+  });
+}
+
+// --- the lead reaches the reader --------------------------------------------------------
+
+test('the caller-written lead survives every branch, not just the fallback', () => {
+  // ⚠ THREE MUTANTS SURVIVED HERE. Deleting `${lead}` from the reason branch and from the
+  // authored-prose branch changed nothing, because only the step-4 fallback pinned it —
+  // and the per-route lead is the entire mechanism behind different commands naming
+  // different things while agreeing on the verdict.
+  const LEAD = 'the zzz did not zzz';
+  for (const payload of [
+    OVERLOADED,
+    UNAVAILABLE,
+    { error: 'repo not found or not connected to Backthread' },
+    { error: 'client_too_old', message: 'please update backthread' },
+    {},
+  ] as Array<Record<string, unknown>>) {
+    const out = describeFailure({ lead: LEAD, status: 502, payload, env: PLAIN_ENV });
+    assert.ok(out.startsWith(LEAD), `lead lost: ${out}`);
+  }
+});
+
+test('each route names its own thing, so two commands never claim the same one failed', async () => {
+  const leads = new Map<string, string>();
+  for (const name of failureBodyEndpoints()) {
+    leads.set(name, await DRIVERS[name](502, UNAVAILABLE, PLAIN_ENV));
+  }
+  // `answerLesson` and `answerAsk` deliberately share "your answer wasn't recorded" — the
+  // reader answered a question and does not care which surface carried it. Everything else
+  // is distinct, and a lead deleted anywhere collapses this set.
+  const distinct = new Set([...leads.values()].map((d) => d.split('.')[0]));
+  assert.ok(distinct.size >= 6, `only ${distinct.size} distinct leads across 9 routes`);
+});
+
+// --- a refusal is not a bug report ------------------------------------------------------
+
+test('a 4xx refusal is NOT sent to the issue tracker', () => {
+  // ⚠ THE FIRST DRAFT APPENDED THE BUG-REPORT TAIL UNCONDITIONALLY, so a lesson rate limit,
+  // an authorization refusal and a repo you cannot write to all ended "report what that
+  // prints at github.com/…/issues". Telling somebody to file a bug about a working
+  // permission check is worse than telling them nothing, because it is confidently wrong.
+  for (const status of [400, 401, 403, 404, 409, 410, 429]) {
+    const out = describeFailure({ lead: 'x', status, payload: { error: 'zzz_unmapped' }, env: PLAIN_ENV });
+    assert.doesNotMatch(out, /issues/, `HTTP ${status}: ${out}`);
+  }
+});
+
+test('a 5xx with no contract IS worth reporting', () => {
+  for (const status of [500, 502, 503]) {
+    const out = describeFailure({ lead: 'x', status, payload: { error: 'zzz_unmapped' }, env: PLAIN_ENV });
+    assert.match(out, /github\.com\/backthread\/backthread\/issues/, `HTTP ${status}`);
+  }
+});
+
+test('the refusals the servers really send all name what to do', async () => {
+  // Enumerated from the worker's bare-slug 4xx sites and the two Functions. A slug on this
+  // list reaching the generic fallback means a reader is told "the server rejected it" for
+  // something the server was answering on purpose.
+  for (const slug of [
+    'repo_not_connected',
+    'repo_not_writable',
+    'not_a_member',
+    'not_readable',
+    'forbidden',
+    'unauthorized',
+    'plan_limit',
+    'lesson_retry_too_soon',
+    'lesson_in_progress',
+    'ask_not_yours',
+    'ask_malformed',
+    'upgrade_required',
+    'persist_failed',
+    'inference_failed',
+  ]) {
+    assert.ok(SLUG_COPY[slug], `${slug} has no sentence`);
+    assert.doesNotMatch(SLUG_COPY[slug], new RegExp(slug), `${slug} maps to itself`);
   }
 });

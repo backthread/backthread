@@ -8069,7 +8069,10 @@ var REASON_CLAUSE = Object.freeze({
 });
 var ISSUES_URL = "https://github.com/backthread/backthread/issues";
 function nextStep(verbose) {
-  return verbose ? ` If it keeps happening, report the detail above at ${ISSUES_URL}` : ` If it keeps happening, run it again with --verbose and report what that prints at ${ISSUES_URL}`;
+  return verbose ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}` : ` If it keeps happening, run it again with --verbose and report what that prints at ${ISSUES_URL}`;
+}
+function looksLikeABug(status) {
+  return status >= 500 || status === 0;
 }
 function readFailureReason(payload) {
   const raw = payload.reason;
@@ -8124,22 +8127,49 @@ function describeFailure(input) {
   }
   const reason = readFailureReason(payload);
   if (reason) {
-    const tail = reason === "unavailable" ? nextStep(verbose) : "";
-    return `${lead}. ${REASON_CLAUSE[reason]}${tail}${suffix}`;
+    const tail2 = reason === "unavailable" ? nextStep(verbose) : "";
+    return `${lead}. ${REASON_CLAUSE[reason]}${tail2}${suffix}`;
   }
   const authored = readServerMessage(payload) ?? readAuthoredError(payload);
   if (authored) return `${lead} \u2014 ${authored}${suffix}`;
-  return `${lead}. The server rejected it (HTTP ${status}).${nextStep(verbose)}${suffix}`;
+  const tail = looksLikeABug(status) ? nextStep(verbose) : "";
+  return `${lead}. The server rejected it (HTTP ${status}).${tail}${suffix}`;
 }
 var RE_AUTH = "this device is no longer authorized \u2014 run `backthread login` again.";
+var RE_INVITE = "you're not a member of the account that owns that repo \u2014 ask one of its owners to invite you.";
+var RE_REPORT = "nothing is wrong with what you did \u2014 it failed on our side.";
 var SLUG_COPY = Object.freeze({
-  // read-decisions/authz.ts — and the worker's repo gate says the same things
+  // --- the repo gate: worker's resolveRepoGate + read/ingest-decisions authz ---------
   repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
-  not_a_member: "you're not a member of the account that owns that repo \u2014 ask one of its owners to invite you.",
-  not_readable: "that repo is private and this account can't read it.",
-  // ingest-decisions
-  plan_limit: "your plan's decision limit is reached, so nothing was saved \u2014 open Billing in the web app to raise it.",
-  // the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
+  repo_not_connected: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
+  not_a_member: RE_INVITE,
+  not_readable: "that repo is private and this account can't read it \u2014 ask one of its owners to invite you.",
+  repo_not_writable: "this repo is connected to an account this device can't write to \u2014 ask one of its owners to invite you.",
+  forbidden: RE_INVITE,
+  // --- deliberate refusals, not outages ---------------------------------------------
+  plan_limit: "your plan's decision limit is reached \u2014 open Billing in the web app to raise it.",
+  lesson_retry_too_soon: "a lesson for this repo was built very recently \u2014 give it a while before asking for another.",
+  lesson_in_progress: "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+  ask_not_yours: "that question belongs to somebody else, so it cannot be answered here.",
+  ask_malformed: "that answer token is not one this client recognises \u2014 ask for a fresh question.",
+  upgrade_required: "your plan does not include that \u2014 open Billing in the web app to change it.",
+  ci_mode_not_enabled: "CI mode is not turned on for this account.",
+  // --- bad request: OUR bug, not the reader's -----------------------------------------
+  // Named rather than left to the fallback because the fallback would say "the server
+  // rejected it", which invites the reader to look for something they did wrong.
+  invalid_body: RE_REPORT,
+  invalid_payload: RE_REPORT,
+  invalid_field: RE_REPORT,
+  invalid_state: RE_REPORT,
+  invalid_checkpoint: RE_REPORT,
+  "method not allowed": RE_REPORT,
+  // ⚠ THESE TWO PAIR A SLUG WITH A RAW UPSTREAM STRING and are the reason the table is
+  // consulted BEFORE the `message` branch. Unmapped, a reader got `the decisions weren't
+  // saved — duplicate key value violates unique constraint "decisions_pkey"`. Measured.
+  persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
+  inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
+  // --- the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
+  unauthorized: RE_AUTH,
   "invalid token": RE_AUTH,
   "token expired": RE_AUTH,
   "invalid session": RE_AUTH,
