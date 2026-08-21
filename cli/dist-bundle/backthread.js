@@ -8069,10 +8069,10 @@ var REASON_CLAUSE = Object.freeze({
 });
 var ISSUES_URL = "https://github.com/backthread/backthread/issues";
 function nextStep(verbose) {
-  return verbose ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}` : ` If it keeps happening, run it again with --verbose and report what that prints at ${ISSUES_URL}`;
+  return verbose ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}` : ` If it keeps happening, set BACKTHREAD_VERBOSE=1 (or pass --verbose) and report what that prints at ${ISSUES_URL}`;
 }
 function looksLikeABug(status) {
-  return status >= 500 || status === 0;
+  return status >= 500;
 }
 function readFailureReason(payload) {
   const raw = payload.reason;
@@ -8116,18 +8116,29 @@ function operatorSuffix(status, payload) {
   if (code) parts.push(`code=${code}`);
   return ` [${parts.join(" ")}]`;
 }
+function lookupSlugCopy(raw, overrides) {
+  if (overrides && Object.prototype.hasOwnProperty.call(overrides, raw)) {
+    const v = overrides[raw];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  if (Object.prototype.hasOwnProperty.call(SLUG_COPY, raw)) {
+    const v = SLUG_COPY[raw];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return null;
+}
 function describeFailure(input) {
   const { lead, status, payload, overrides } = input;
   const verbose = verboseEnabled(input.env ?? process.env);
   const suffix = verbose ? operatorSuffix(status, payload) : "";
   const raw = payload.error;
   if (typeof raw === "string" && raw.length > 0) {
-    const mapped = { ...SLUG_COPY, ...overrides ?? {} }[raw];
-    if (mapped) return `${mapped}${suffix}`;
+    const mapped = lookupSlugCopy(raw, overrides);
+    if (mapped !== null) return `${mapped}${suffix}`;
   }
   const reason = readFailureReason(payload);
   if (reason) {
-    const tail2 = reason === "unavailable" ? nextStep(verbose) : "";
+    const tail2 = reason === "unavailable" && looksLikeABug(status) ? nextStep(verbose) : "";
     return `${lead}. ${REASON_CLAUSE[reason]}${tail2}${suffix}`;
   }
   const authored = readServerMessage(payload) ?? readAuthoredError(payload);
@@ -8143,25 +8154,33 @@ var SLUG_COPY = Object.freeze({
   repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
   repo_not_connected: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
   not_a_member: RE_INVITE,
-  not_readable: "that repo is private and this account can't read it \u2014 ask one of its owners to invite you.",
-  repo_not_writable: "this repo is connected to an account this device can't write to \u2014 ask one of its owners to invite you.",
+  // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
+  // exactly one condition in every producer: `!repo.account_id`. The first draft told the
+  // reader to ask one of its owners for an invite, which is advice about people who do not
+  // exist. Read the producer before writing the sentence.
+  not_readable: "that repo has no owning Backthread account, so there is nothing to read.",
+  repo_not_writable: "that repo has no owning Backthread account, so nothing can be saved against it \u2014 run `backthread` to connect it.",
   forbidden: RE_INVITE,
   // --- deliberate refusals, not outages ---------------------------------------------
   plan_limit: "your plan's decision limit is reached \u2014 open Billing in the web app to raise it.",
   lesson_retry_too_soon: "a lesson for this repo was built very recently \u2014 give it a while before asking for another.",
   lesson_in_progress: "a lesson is already being prepared for this repo \u2014 try again in a moment.",
   ask_not_yours: "that question belongs to somebody else, so it cannot be answered here.",
+  // The token verifier has THREE verdicts and emits `ask_${reason}` for each. `expired` is
+  // the 410 the inflow path catches by status; the other two land here, and mapping only
+  // one of them left its identical sibling reading "the server rejected it (HTTP 400)".
   ask_malformed: "that answer token is not one this client recognises \u2014 ask for a fresh question.",
-  upgrade_required: "your plan does not include that \u2014 open Billing in the web app to change it.",
-  ci_mode_not_enabled: "CI mode is not turned on for this account.",
+  ask_bad_signature: "that answer token was not issued to this device \u2014 ask for a fresh question and answer that one.",
   // --- bad request: OUR bug, not the reader's -----------------------------------------
   // Named rather than left to the fallback because the fallback would say "the server
   // rejected it", which invites the reader to look for something they did wrong.
+  // Only the ones a route THIS PACKAGE CALLS can emit. `ci_mode_not_enabled`,
+  // `invalid_state` and `invalid_checkpoint` were on the table and belong to /ci/snapshot
+  // and the git-decisions routes, which this package never calls — dead entries that no
+  // test could reach and that make "the table is exhaustive" quietly meaningless.
   invalid_body: RE_REPORT,
   invalid_payload: RE_REPORT,
   invalid_field: RE_REPORT,
-  invalid_state: RE_REPORT,
-  invalid_checkpoint: RE_REPORT,
   "method not allowed": RE_REPORT,
   // ⚠ THESE TWO PAIR A SLUG WITH A RAW UPSTREAM STRING and are the reason the table is
   // consulted BEFORE the `message` branch. Unmapped, a reader got `the decisions weren't
@@ -8184,8 +8203,8 @@ var CLI_ENDPOINTS = Object.freeze({
   buildInflowAskUrl: { renders: "failure-body", entryPoint: "requestAsk" },
   buildInflowAnswerUrl: { renders: "failure-body", entryPoint: "answerAsk" },
   // Not a `failureBody` route on the server TODAY — but it is a worker route whose failure
-  // is read by a human in the capture summary, and it carried a byte-identical copy of the
-  // `message ?? String(error)` helper. Wiring it now costs nothing and means the route can
+  // is read by a human in the capture summary, and it carried its own inlined copy of the
+  // `message ?? String(error)` logic. Wiring it now costs nothing and means the route can
   // start returning the contract without a second round of this ticket.
   buildInferDecisionsUrl: { renders: "failure-body", entryPoint: "serverInfer" },
   // --- worker origin, nothing shown ---------------------------------------------------
@@ -8345,7 +8364,9 @@ async function inferDecisions(transcript, config2, opts = {}) {
 var SCOPE_REASON_COPY = Object.freeze({
   connected: "this repo is connected",
   not_connected: "this repo isn't connected to Backthread yet, so nothing was read or sent",
-  repo_not_writable: "this repo is connected but this account can't write to it, so nothing was read or sent",
+  // The server's own note: "repo exists but has no owning account (public/seeded)". Not
+  // a permission the reader could be granted — there is nobody to grant it.
+  repo_not_writable: "this repo has no owning Backthread account, so nothing was read or sent",
   not_a_member: "you're not a member of the account that owns this repo, so nothing was read or sent",
   capture_paused: "capture is paused for this repo, so nothing was read or sent",
   unknown: "the scope check could not be reached, so nothing was read or sent",

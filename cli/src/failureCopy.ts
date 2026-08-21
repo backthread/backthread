@@ -17,11 +17,12 @@
 // means we do not know that, so promising a retry would be a lie.
 //
 // ⚠ WHAT WENT WRONG, AND WHY THIS IS A MODULE RATHER THAN A HABIT. The server half of that
-// contract shipped across five routes. The client half did not, so the wire got strictly
+// contract shipped across seven routes, five of which this package calls. The client half did not, so the wire got strictly
 // more actionable while the terminal still printed `grounded-ask rejected (502):
 // retrieval_failed` — a raw internal slug, from which a person can conclude nothing at all.
-// The reason it stayed broken across five routes is that each caller had its own private
-// copy of the same six-line `serverMessage()` helper (`message ?? String(error)`). Fixing
+// The reason it stayed broken is that SEVEN modules each had their own copy of the same
+// `message ?? String(error)` logic — two as a named `serverMessage()` helper, five inlined
+// as a nested ternary at the call site. Fixing
 // the one that was reported would have fixed one route and left four, which is exactly how
 // a defect recurs one endpoint at a time. There is now one renderer and one registry, and
 // failureCopy.test.ts fails when a new endpoint appears without a disposition.
@@ -73,7 +74,7 @@ const ISSUES_URL = 'https://github.com/backthread/backthread/issues';
 function nextStep(verbose: boolean): string {
   return verbose
     ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}`
-    : ` If it keeps happening, run it again with --verbose and report what that prints at ${ISSUES_URL}`;
+    : ` If it keeps happening, set BACKTHREAD_VERBOSE=1 (or pass --verbose) and report what that prints at ${ISSUES_URL}`;
 }
 
 /**
@@ -84,7 +85,7 @@ function nextStep(verbose: boolean): string {
  * is the system not working, and that is the only case worth a stranger's time to report.
  */
 function looksLikeABug(status: number): boolean {
-  return status >= 500 || status === 0;
+  return status >= 500;
 }
 
 export interface FailureCopyInput {
@@ -248,6 +249,23 @@ function operatorSuffix(status: number, payload: Record<string, unknown>): strin
  * NEVER THROWS and never returns an empty string: this runs on the failure path, where a
  * second failure has nowhere to go.
  */
+/**
+ * The slug tables, consulted safely. `overrides` wins over the global table — a slug whose
+ * meaning is local to one route is more specific than one that means the same everywhere —
+ * and only OWN properties count, on both.
+ */
+function lookupSlugCopy(raw: string, overrides?: Readonly<Record<string, string>>): string | null {
+  if (overrides && Object.prototype.hasOwnProperty.call(overrides, raw)) {
+    const v = overrides[raw];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  if (Object.prototype.hasOwnProperty.call(SLUG_COPY, raw)) {
+    const v = SLUG_COPY[raw];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return null;
+}
+
 export function describeFailure(input: FailureCopyInput): string {
   const { lead, status, payload, overrides } = input;
   const verbose = verboseEnabled(input.env ?? process.env);
@@ -258,14 +276,23 @@ export function describeFailure(input: FailureCopyInput): string {
   //    would fail the machine-code test they are not being asked to pass.
   const raw = payload.error;
   if (typeof raw === 'string' && raw.length > 0) {
-    const mapped = { ...SLUG_COPY, ...(overrides ?? {}) }[raw];
-    if (mapped) return `${mapped}${suffix}`;
+    // ⚠ `hasOwn`, NOT A BARE INDEX. The lookup used to be `{ ...SLUG_COPY, ...overrides }[raw]`
+    // on an object literal, which carries `Object.prototype` — so a server sending
+    // `error: "toString"` made the ENTIRE user-facing line
+    // `function toString() { [native code] }`, losing the lead, the verdict and the next
+    // step. Eight `error` values did that. This module's own doc promises it never trusts
+    // the payload's shape; an inherited property is exactly the shape it forgot.
+    const mapped = lookupSlugCopy(raw, overrides);
+    if (mapped !== null) return `${mapped}${suffix}`;
   }
 
   // 2. The contract. The only branch that can honestly promise a retry.
   const reason = readFailureReason(payload);
   if (reason) {
-    const tail = reason === 'unavailable' ? nextStep(verbose) : '';
+    // Both conditions, so "a 5xx sends you to the tracker, a 4xx never does" is simply
+    // true rather than true-because-no-server-does-that-yet. `unavailable` only rides a
+    // 5xx today; if one ever rides a 4xx, suppressing the bug report is still right.
+    const tail = reason === 'unavailable' && looksLikeABug(status) ? nextStep(verbose) : '';
     return `${lead}. ${REASON_CLAUSE[reason]}${tail}${suffix}`;
   }
 
@@ -312,10 +339,13 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
   repo_not_found: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
   repo_not_connected: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
   not_a_member: RE_INVITE,
-  not_readable:
-    "that repo is private and this account can't read it — ask one of its owners to invite you.",
+  // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
+  // exactly one condition in every producer: `!repo.account_id`. The first draft told the
+  // reader to ask one of its owners for an invite, which is advice about people who do not
+  // exist. Read the producer before writing the sentence.
+  not_readable: 'that repo has no owning Backthread account, so there is nothing to read.',
   repo_not_writable:
-    "this repo is connected to an account this device can't write to — ask one of its owners to invite you.",
+    "that repo has no owning Backthread account, so nothing can be saved against it — run `backthread` to connect it.",
   forbidden: RE_INVITE,
 
   // --- deliberate refusals, not outages ---------------------------------------------
@@ -325,18 +355,23 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
     'a lesson for this repo was built very recently — give it a while before asking for another.',
   lesson_in_progress: 'a lesson is already being prepared for this repo — try again in a moment.',
   ask_not_yours: 'that question belongs to somebody else, so it cannot be answered here.',
+  // The token verifier has THREE verdicts and emits `ask_${reason}` for each. `expired` is
+  // the 410 the inflow path catches by status; the other two land here, and mapping only
+  // one of them left its identical sibling reading "the server rejected it (HTTP 400)".
   ask_malformed: 'that answer token is not one this client recognises — ask for a fresh question.',
-  upgrade_required: 'your plan does not include that — open Billing in the web app to change it.',
-  ci_mode_not_enabled: 'CI mode is not turned on for this account.',
+  ask_bad_signature:
+    'that answer token was not issued to this device — ask for a fresh question and answer that one.',
 
   // --- bad request: OUR bug, not the reader's -----------------------------------------
   // Named rather than left to the fallback because the fallback would say "the server
   // rejected it", which invites the reader to look for something they did wrong.
+  // Only the ones a route THIS PACKAGE CALLS can emit. `ci_mode_not_enabled`,
+  // `invalid_state` and `invalid_checkpoint` were on the table and belong to /ci/snapshot
+  // and the git-decisions routes, which this package never calls — dead entries that no
+  // test could reach and that make "the table is exhaustive" quietly meaningless.
   invalid_body: RE_REPORT,
   invalid_payload: RE_REPORT,
   invalid_field: RE_REPORT,
-  invalid_state: RE_REPORT,
-  invalid_checkpoint: RE_REPORT,
   'method not allowed': RE_REPORT,
 
   // ⚠ THESE TWO PAIR A SLUG WITH A RAW UPSTREAM STRING and are the reason the table is
@@ -390,8 +425,8 @@ export const CLI_ENDPOINTS: Readonly<Record<string, EndpointDisposition>> = Obje
   buildInflowAskUrl: { renders: 'failure-body', entryPoint: 'requestAsk' },
   buildInflowAnswerUrl: { renders: 'failure-body', entryPoint: 'answerAsk' },
   // Not a `failureBody` route on the server TODAY — but it is a worker route whose failure
-  // is read by a human in the capture summary, and it carried a byte-identical copy of the
-  // `message ?? String(error)` helper. Wiring it now costs nothing and means the route can
+  // is read by a human in the capture summary, and it carried its own inlined copy of the
+  // `message ?? String(error)` logic. Wiring it now costs nothing and means the route can
   // start returning the contract without a second round of this ticket.
   buildInferDecisionsUrl: { renders: 'failure-body', entryPoint: 'serverInfer' },
 

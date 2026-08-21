@@ -71,7 +71,7 @@ test('unavailable refuses to promise a retry', () => {
   // ⚠ AND IT MUST NOT STOP THERE. "Your one available action is useless" with no next step
   // leaves the reader with nothing to do, which is the state this whole change exists to
   // get them out of. The dead end names where to take it.
-  assert.match(out, /run it again with --verbose/);
+  assert.match(out, /set BACKTHREAD_VERBOSE=1 \(or pass --verbose\)/);
   assert.match(out, /github\.com\/backthread\/backthread\/issues/);
 });
 
@@ -83,7 +83,7 @@ test('an operator at a dead end is told where to SEND the detail, not how to get
     env: VERBOSE_ENV,
   });
   assert.match(out, /report the detail at the end of this line at/);
-  assert.doesNotMatch(out, /run it again with --verbose/);
+  assert.doesNotMatch(out, /set BACKTHREAD_VERBOSE=1/);
   // ⚠ IT USED TO SAY "the detail above", WHICH WAS FALSE: the operator suffix is appended
   // to the END of this same line. The sentence has to be true about its own layout.
   assert.doesNotMatch(out, /detail above/);
@@ -293,14 +293,24 @@ test('readServerMessage reads message and NEVER falls back to the slug', () => {
 /** Drive one real entry point against a stubbed rejection; return what a person reads. */
 type Driver = (status: number, body: unknown, env: NodeJS.ProcessEnv) => Promise<string>;
 
+/**
+ * Every stubbed request in this file is counted, so a driver cannot merely CLAIM to have
+ * driven a route. Module-scoped rather than threaded through the driver signature because
+ * a driver may make several hops (capture infers before it persists) and the question is
+ * only ever "did anything reach the wire".
+ */
+let stubbedRequests = 0;
+
 function stubFetch(status: number, body: unknown): typeof fetch {
-  return (async () =>
-    ({
+  return (async () => {
+    stubbedRequests += 1;
+    return {
       ok: status >= 200 && status < 300,
       status,
       headers: { get: () => null },
       json: async () => body,
-    }) as unknown as Response) as unknown as typeof fetch;
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
 }
 
 const CONFIG = { device_token: 'dt_test', repo: 'acme/widgets' };
@@ -408,6 +418,7 @@ const DRIVERS: Readonly<Record<string, Driver>> = {
           firstCaptureConfirmImpl: async () => false,
           log: () => {},
           fetchImpl: (async (input: unknown) => {
+            stubbedRequests += 1; // counted like every other stub — see `stubbedRequests`
             const url = String(input);
             const reply =
               url.includes('/ingest-decisions')
@@ -473,10 +484,27 @@ for (const name of failureBodyEndpoints()) {
 
 // --- 3. the registry ------------------------------------------------------------------
 
-function sourceFiles(): string[] {
-  return readdirSync(SRC_DIR)
-    .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
-    .map((f) => join(SRC_DIR, f));
+/**
+ * Every non-test source file, RECURSIVELY.
+ *
+ * ⚠ IT USED TO BE A FLAT `readdirSync`, so everything under `cli/src/bin/` — and any
+ * subdirectory a future author creates — was invisible to every guard in this file. An
+ * outside read put a complete unregistered endpoint in a new `cli/src/net/` and the whole
+ * suite stayed green. A guard that cannot see half the package is not a guard.
+ */
+function sourceFiles(dir: string = SRC_DIR): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...sourceFiles(full));
+    else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) out.push(full);
+  }
+  return out;
+}
+
+/** A file's path relative to src/ — `bin/backthread.ts`, not just the basename. */
+function rel(file: string): string {
+  return file.slice(SRC_DIR.length + 1);
 }
 
 /**
@@ -527,33 +555,39 @@ const IS_ORIGIN_DECL = /^(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_\w
  * allow-listed to these two modules by the test below, so an endpoint has nowhere else to
  * be born.
  */
+/** The source of one top-level declaration, from `export` to its matching close brace. */
+function declarationExtent(src: string, from: number): string {
+  const open = src.indexOf('{', from);
+  const semi = src.indexOf(';', from);
+  if (open < 0 || (semi >= 0 && semi < open)) return src.slice(from, semi < 0 ? undefined : semi + 1);
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return src.slice(from, i + 1);
+  }
+  return src.slice(from);
+}
+
 function declaredBuilders(): string[] {
   const found = new Set<string>();
   for (const base of URL_MODULES) {
-    const src = readFileSync(join(SRC_DIR, base), 'utf8');
-    // Split on top-level `export`s and keep the ones whose body reaches for an origin.
-    const parts = src.split(/\nexport /);
-    for (const part of parts.slice(1)) {
-      const name = part.match(/^(?:async )?function ([A-Za-z0-9_]+)/)?.[1]
-        ?? part.match(/^const ([A-Za-z0-9_]+)\s*[:=]/)?.[1];
-      if (!name) continue;
+    const src = stripComments(readFileSync(join(SRC_DIR, base), 'utf8'));
+    for (const m of src.matchAll(
+      /\bexport\s+(?:async\s+)?(?:function\s+([A-Za-z0-9_]+)|const\s+([A-Za-z0-9_]+)\s*[:=])/g,
+    )) {
+      const name = m[1] ?? m[2];
       if (IS_ORIGIN_DECL.test(name)) continue;
-      // A BUILDER hands a URL STRING back; a consumer uses one. That is what separates
-      // `buildExchangeClaimUrl` from `exchangeClaim` beside it, which names an origin only
-      // to print "generate a fresh code at …" and returns a `Promise<ClaimResult>`.
-      //
-      // ⚠ THE TEST IS THE DECLARATION'S OWN RETURN TYPE, NOT A `fetch(` ANYWHERE IN THE
-      // PART. The earlier version skipped any part containing a fetch call — so appending
-      // a private, non-exported fetch helper AFTER a new builder hid the builder, because
-      // both landed in the same `\nexport `-delimited part. A return type belongs to one
-      // declaration and cannot be smuggled in from a neighbour.
-      // The RETURN type — the one after the parameter list's closing paren, not the first
-      // `: string` in the text. `isClaimCode(code: string): boolean` has a string parameter
-      // and is not a builder; `buildCliAuthUrl` wraps its parameters over five lines and
-      // is. Anchoring on `)` is what tells those apart.
-      const ret = part.match(/\)\s*:\s*([^{=]+?)\s*(?:\{|=>)/)?.[1] ?? '';
-      if (!/^(?:Promise<)?string\b/.test(ret)) continue;
-      if (ANY_ORIGIN.test(part)) found.add(name);
+      // ⚠ BRACE-MATCHED, AND THE DISCRIMINATOR IS "DOES IT FETCH", NOT ITS RETURN TYPE.
+      // Two earlier versions were walked past. A textual `: string` test missed a builder
+      // with no annotation at all, one returning a `URL`, and one returning an aliased
+      // type — all ordinary spellings. And an earlier `fetch(` test over a crudely split
+      // chunk was defeated by appending a private fetch helper AFTER the builder, since
+      // both landed in the same chunk. A brace-matched extent belongs to ONE declaration,
+      // so neither a neighbour nor a missing annotation can change the answer. A builder
+      // constructs a URL; a consumer uses one.
+      const body = declarationExtent(src, m.index ?? 0);
+      if (/\b(?:doFetch|fetch)\s*\(/.test(body)) continue;
+      if (ANY_ORIGIN.test(body)) found.add(name);
     }
   }
   return [...found].sort();
@@ -620,7 +654,7 @@ test('endpoint construction is centralised, so nothing can dodge the registry', 
   // path in a way I recognise": outside these three modules, do not name one.
   const offenders: string[] = [];
   for (const file of sourceFiles()) {
-    const base = file.slice(SRC_DIR.length + 1);
+    const base = rel(file);
     if (ORIGIN_ALLOWED.has(base)) continue;
     // Comments stripped first. A module documenting its env-override seam ("Env override
     // seam (BACKTHREAD_WORKER_URL)") is describing the behaviour, not reaching for it, and
@@ -639,12 +673,80 @@ test('urls.ts builds endpoints and never calls one', () => {
   assert.doesNotMatch(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8'), /\bfetch\s*\(/);
 });
 
+/**
+ * The modules allowed to put a request on the wire. Every one of them appears in the
+ * registry as the caller of a classified endpoint.
+ *
+ * ⚠ THE BAN ON ORIGINS WAS NOT ENOUGH, AND THIS IS WHY. An outside read added a new module
+ * that derived its endpoint from an existing builder —
+ * `buildLessonStartUrl(env).replace('/lesson/start', '/lesson/next')` — then fetched it and
+ * printed `String(rec.error)`. It names no origin, so the origin ban never fired; it is not
+ * a URL module, so the builder scan never looked at it. A complete unregistered endpoint,
+ * rendering a raw slug, entirely green. The same read got a second one past by inventing a
+ * host on a domain the host pattern did not list.
+ *
+ * Both start by CALLING FETCH, which is the property — a request leaving this package —
+ * rather than any of the shapes a URL can be spelled in. So the fetchers are named. Adding
+ * a module to this list is a deliberate act, and the thing to do next is register what it
+ * calls.
+ */
+const NETWORK_MODULES = new Set([
+  'capture.ts',
+  'captureScope.ts',
+  'claim.ts',
+  'cliAuthPoll.ts',
+  'doctor.ts',
+  'infer.ts',
+  'inflow.ts',
+  'lesson.ts',
+  'localDecisions.ts',
+  'onboardingState.ts',
+  'query.ts',
+]);
+
+test('only declared modules put a request on the wire', () => {
+  const offenders = sourceFiles()
+    .filter((f) => !NETWORK_MODULES.has(rel(f)))
+    .filter((f) => /\b(?:doFetch|fetch)\s*\(/.test(stripComments(readFileSync(f, 'utf8'))))
+    .map(rel);
+  assert.deepEqual(
+    offenders,
+    [],
+    'a new module makes network calls — add it above, and register the endpoint it calls in CLI_ENDPOINTS',
+  );
+});
+
+test('every declared network module really does fetch', () => {
+  // Otherwise the list rots into permission nobody needs, and a stale entry is a hole
+  // somebody can move a new endpoint into without touching this file.
+  const idle: string[] = [];
+  for (const base of NETWORK_MODULES) {
+    const src = stripComments(readFileSync(join(SRC_DIR, base), 'utf8'));
+    if (!/\b(?:doFetch|fetch)\s*\(/.test(src)) idle.push(base);
+  }
+  assert.deepEqual(idle, [], 'these are on the network allow-list but make no network call');
+});
+
 test('the centralisation ban is not vacuous — the allow-listed modules really do trip it', () => {
   // If the tokens ever stop matching, the test above passes over every file in silence.
   for (const base of URL_MODULES) {
     assert.ok(ORIGIN_TOKEN.test(readFileSync(join(SRC_DIR, base), 'utf8')), base);
   }
   assert.ok(ORIGIN_HOST.test(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8')));
+});
+
+test('each driver actually reaches the network', async () => {
+  // ⚠ THE NAME CHECK BELOW IS TEXT, AND TEXT IS ARGUABLE. It was first defeated by putting
+  // the entry point's name in a trailing comment, and then — after comments were stripped —
+  // by putting the real call behind `if (Number.isNaN(status))` and returning
+  // `describeFailure(...)` directly. Both times the battery went green while proving only
+  // that the renderer renders. A driver that never made a request cannot have driven a
+  // route, whatever its source says, so the fetch it is handed counts its own calls.
+  for (const name of failureBodyEndpoints()) {
+    stubbedRequests = 0;
+    await DRIVERS[name](502, OVERLOADED, PLAIN_ENV);
+    assert.ok(stubbedRequests > 0, `${name}: its driver never made a request`);
+  }
 });
 
 test('each driver drives its REGISTERED entry point, not a convenient stand-in', () => {
@@ -670,16 +772,39 @@ test('each driver drives its REGISTERED entry point, not a convenient stand-in',
   }
 });
 
-test('no module keeps a private copy of the helper this file replaced', () => {
-  // `message ?? String(error)` existed in three modules at once, which is why the defect
-  // survived a fix on one of them. One renderer, or this goes red.
+test('no module keeps a private copy of the logic this file replaced', () => {
+  // ⚠ IT USED TO LOOK FOR `function serverMessage(` AND NOTHING ELSE, which saw two of the
+  // seven modules that had this. The other five never named it — they inlined the same
+  // nested ternary at the call site, which is the form a future author is most likely to
+  // reach for, because it is the form six of the seven actually used. The SHAPE is what is
+  // banned, not the name.
+  const NAMED = /function serverMessage\s*\(/;
+  const INLINED = /typeof\s+\w+\.message\s*===\s*'string'[\s\S]{0,200}?String\(\s*\w+\.error\s*\)/;
+  const ALSO_INLINED = /\.message\s*(?:&&|\?)[\s\S]{0,160}?'error'\s+in\s+\w+/;
   const offenders: string[] = [];
   for (const file of sourceFiles()) {
-    const base = file.slice(SRC_DIR.length + 1);
+    const base = rel(file);
     if (base === 'failureCopy.ts') continue;
-    if (/function serverMessage\s*\(/.test(readFileSync(file, 'utf8'))) offenders.push(base);
+    const src = stripComments(readFileSync(file, 'utf8'));
+    if (NAMED.test(src) || INLINED.test(src) || ALSO_INLINED.test(src)) offenders.push(base);
   }
-  assert.deepEqual(offenders, []);
+  assert.deepEqual(offenders, [], 'this module reimplements `message ?? String(error)`');
+});
+
+test('the private-copy ban can see the shape it bans', () => {
+  // Measured against the real thing rather than trusted: this is the exact text that stood
+  // in seven modules before this change, so if the pattern stops matching it, the ban above
+  // has quietly become a no-op.
+  const WAS = `
+    const serverErr =
+      typeof obj.message === 'string' && obj.message.length > 0
+        ? obj.message
+        : 'error' in obj
+          ? String(obj.error)
+          : \`HTTP \${res.status}\`;
+  `;
+  const INLINED = /typeof\s+\w+\.message\s*===\s*'string'[\s\S]{0,200}?String\(\s*\w+\.error\s*\)/;
+  assert.ok(INLINED.test(WAS), 'the ban no longer recognises the code it exists to ban');
 });
 
 // --- the Functions vocabulary ---------------------------------------------------------
@@ -745,7 +870,7 @@ function stripComments(src: string): string {
 function callersOf(builder: string): string[] {
   const callers: string[] = [];
   for (const file of sourceFiles()) {
-    const base = file.slice(SRC_DIR.length + 1);
+    const base = rel(file);
     if (base === 'urls.ts' || base === 'failureCopy.ts') continue;
     if (new RegExp(`\\b${builder}\\s*\\(`).test(readFileSync(file, 'utf8'))) callers.push(base);
   }
@@ -971,27 +1096,131 @@ test('a 5xx with no contract IS worth reporting', () => {
   }
 });
 
-test('the refusals the servers really send all name what to do', async () => {
-  // Enumerated from the worker's bare-slug 4xx sites and the two Functions. A slug on this
-  // list reaching the generic fallback means a reader is told "the server rejected it" for
-  // something the server was answering on purpose.
-  for (const slug of [
-    'repo_not_connected',
-    'repo_not_writable',
-    'not_a_member',
-    'not_readable',
-    'forbidden',
-    'unauthorized',
-    'plan_limit',
-    'lesson_retry_too_soon',
-    'lesson_in_progress',
-    'ask_not_yours',
-    'ask_malformed',
-    'upgrade_required',
-    'persist_failed',
-    'inference_failed',
+test('a route-specific override BEATS the global table for the same slug', () => {
+  // ⚠ UNASSERTED UNTIL A MUTANT SURVIVED SWAPPING THE SPREAD ORDER. No key collides today,
+  // so the documented direction — local meaning wins over global — was a comment. It is the
+  // direction that matters the day a slug means something different on one route, which is
+  // the only reason the argument exists.
+  const out = describeFailure({
+    lead: 'x',
+    status: 403,
+    payload: { error: 'not_a_member' },
+    env: PLAIN_ENV,
+    overrides: { not_a_member: 'this one route says something else entirely.' },
+  });
+  assert.match(out, /this one route says something else entirely\./);
+  assert.doesNotMatch(out, /ask one of its owners/);
+});
+
+test('an inherited property is not a sentence', () => {
+  // ⚠ MEASURED USER-VISIBLE GARBAGE. The lookup was a bare index into an object literal, so
+  // `{"error":"toString"}` from the server made the whole line
+  // `function toString() { [native code] }` — no lead, no verdict, no status, no next step.
+  for (const key of [
+    'toString',
+    'constructor',
+    '__proto__',
+    'valueOf',
+    'hasOwnProperty',
+    'isPrototypeOf',
+    'toLocaleString',
+    'propertyIsEnumerable',
   ]) {
-    assert.ok(SLUG_COPY[slug], `${slug} has no sentence`);
-    assert.doesNotMatch(SLUG_COPY[slug], new RegExp(slug), `${slug} maps to itself`);
+    const out = describeFailure({ lead: 'zzlead', status: 500, payload: { error: key }, env: PLAIN_ENV });
+    assert.ok(out.startsWith('zzlead'), `${key}: ${out}`);
+    assert.doesNotMatch(out, /native code|\[object /, `${key}: ${out}`);
+  }
+  // …and the same on the overrides side, which is also a caller-supplied object.
+  const viaOverride = describeFailure({
+    lead: 'zzlead',
+    status: 500,
+    payload: { error: 'toString' },
+    env: PLAIN_ENV,
+    overrides: {},
+  });
+  assert.ok(viaOverride.startsWith('zzlead'), viaOverride);
+});
+
+test('every sentence in the table is reachable through the renderer', () => {
+  // ⚠ SEVEN ENTRIES WERE DELETABLE WITH THE SUITE GREEN. The list-based test below asserts
+  // the KEY exists, which is a restatement of the table rather than a check on it. This
+  // drives each one through `describeFailure` and reads the output, so an entry that stops
+  // being used stops passing.
+  for (const [slug, copy] of Object.entries(SLUG_COPY)) {
+    const out = describeFailure({ lead: 'zzlead', status: 500, payload: { error: slug }, env: PLAIN_ENV });
+    assert.equal(out, copy, `${slug} did not render its own sentence`);
+    assert.doesNotMatch(out, new RegExp(slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `${slug} maps to itself`);
+  }
+});
+
+/**
+ * The complete set of `error` values a route THIS PACKAGE CALLS can send, transcribed from
+ * the servers' source.
+ *
+ * ⚠ SET-EQUAL, NOT "EACH KEY EXISTS". The earlier version iterated the table and asserted
+ * things about what it found, which is a restatement rather than a check: seven entries
+ * were deletable with the suite green, because deleting one simply meant it was not
+ * iterated. The list has to come from OUTSIDE the table, and outside is all this package
+ * can reach for — it cannot import the server. So it is written down, and it is CLOSED in
+ * both directions: dropping a sentence fails, and adding one without saying which server
+ * line sends it fails too.
+ *
+ * Absent on purpose: `client_too_old` (ships a server-authored `message` with the exact
+ * upgrade instruction, which the message branch renders verbatim), `ask_expired` (a bare
+ * 410 the inflow path catches by status, plus a route-local override), `lesson_in_progress`
+ * on the 409 (the lesson path renders the server's own sentence there) — and every slug
+ * belonging to /ci/snapshot or the git-decisions routes, which this package never calls.
+ */
+const REACHABLE_SLUGS = [
+  // worker resolveRepoGate + read/ingest-decisions authz
+  'repo_not_found',
+  'repo_not_connected',
+  'not_a_member',
+  'not_readable',
+  'repo_not_writable',
+  'forbidden',
+  // deliberate refusals
+  'plan_limit',
+  'lesson_retry_too_soon',
+  'lesson_in_progress',
+  'ask_not_yours',
+  'ask_malformed',
+  'ask_bad_signature',
+  // our bug, said as ours
+  'invalid_body',
+  'invalid_payload',
+  'invalid_field',
+  'method not allowed',
+  // a slug paired with a raw upstream string — mapped so the string never renders
+  'persist_failed',
+  'inference_failed',
+  // deviceAuth (worker) and every Function share this vocabulary
+  'unauthorized',
+  'invalid token',
+  'token expired',
+  'invalid session',
+  'insufficient scope',
+  'missing authorization',
+].sort();
+
+test('the table covers exactly the vocabulary the reachable routes send', () => {
+  assert.deepEqual(
+    Object.keys(SLUG_COPY).sort(),
+    REACHABLE_SLUGS,
+    'a slug the servers send has no sentence, or a sentence exists for a slug nothing sends',
+  );
+});
+
+test('every one of those names what to do, and none names itself', () => {
+  for (const slug of REACHABLE_SLUGS) {
+    const out = describeFailure({ lead: 'zzlead', status: 500, payload: { error: slug }, env: PLAIN_ENV });
+    assert.ok(out.length > 20, `${slug}: ${out}`);
+    assert.doesNotMatch(
+      out,
+      new RegExp(slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      `${slug} maps to itself`,
+    );
+    // A mapped slug replaces the whole sentence, so the generic fallback must not show.
+    assert.doesNotMatch(out, /The server rejected it/, `${slug} fell through to the fallback`);
   }
 });

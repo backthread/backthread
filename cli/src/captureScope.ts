@@ -43,7 +43,9 @@ export const SCOPE_REASON_COPY: Readonly<Record<ScopeReason | 'unknown' | 'other
   Object.freeze({
     connected: 'this repo is connected',
     not_connected: "this repo isn't connected to Backthread yet, so nothing was read or sent",
-    repo_not_writable: "this repo is connected but this account can't write to it, so nothing was read or sent",
+    // The server's own note: "repo exists but has no owning account (public/seeded)". Not
+    // a permission the reader could be granted — there is nobody to grant it.
+    repo_not_writable: 'this repo has no owning Backthread account, so nothing was read or sent',
     not_a_member: "you're not a member of the account that owns this repo, so nothing was read or sent",
     capture_paused: 'capture is paused for this repo, so nothing was read or sent',
     unknown: 'the scope check could not be reached, so nothing was read or sent',

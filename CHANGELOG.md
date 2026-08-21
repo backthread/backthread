@@ -35,7 +35,7 @@ tool, `learn` (start and answer), and `ask-me` (ask and answer).
 printing things like `read-decisions rejected (403): not_a_member` and
 `ingest rejected (500): persist_failed`. The codes both the worker and that older service
 send now map to the action they imply — an expired credential says to run `backthread
-login`, a repo you cannot write to says to ask its owner for an invite, a reached plan limit
+login`, a repo with no owning account says to connect it, a reached plan limit
 says where to raise it, a lesson asked for too soon says to wait. A code that is not on that
 list degrades to the plain HTTP status rather than to itself.
 
@@ -60,8 +60,9 @@ of thing — a machine code like `retrieval_failed`, and plain English like `rep
 not connected to Backthread`. Only the first is hidden. The second is a sentence somebody
 wrote for a reader, and it is rendered as one.
 
-Under the hood: three modules each carried their own copy of the same six-line helper that
-produced the old string, which is why fixing the reported one would have left four. There is
+Under the hood: seven modules each carried their own copy of the same `message ?? String(
+error)` logic — two as a named helper, five inlined at the call site — which is why fixing
+the reported one would have left six. There is
 one renderer now, plus a registry of every endpoint this package can reach and what a person
 sees when it fails — and a test that goes red when an endpoint joins the package without an
 answer to that question.
