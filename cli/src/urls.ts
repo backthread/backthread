@@ -147,6 +147,18 @@ export function buildOnboardingStateUrl(env: NodeJS.ProcessEnv = process.env): s
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, '')}/onboarding-state`).toString();
 }
 
+// Build the exchange-claim URL on the Functions origin (same origin + override
+// seam as ingest/read — BACKTHREAD_FUNCTIONS_URL for local dev).
+//
+// It used to live in claim.ts beside its one caller, which read better but made claim.ts a
+// second place an endpoint could be born — and a declaration there that both BUILT and
+// FETCHED was classified a consumer and skipped by the registry scan. Endpoints are born
+// here now, in the one module that is forbidden to fetch, so "built here" and "used there"
+// cannot be the same declaration.
+export function buildExchangeClaimUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return new URL(`${functionsBaseUrl(env)}/exchange-claim`).toString();
+}
+
 // Build the cli-auth-poll URL the poll-flow login POSTs `{ session_id }` to (ARP-773).
 // PUBLIC endpoint (no device token yet — that's what we're fetching): confidentiality is
 // ECDH, so the CLI just posts the session id and decrypts the returned ciphertext locally.

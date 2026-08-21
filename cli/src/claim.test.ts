@@ -11,7 +11,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exchangeClaim, isClaimCode, buildExchangeClaimUrl, CLAIM_PREFIX } from './claim.js';
+import { exchangeClaim, isClaimCode, CLAIM_PREFIX } from './claim.js';
+import { buildExchangeClaimUrl } from './urls.js';
 import { configPath, parseConfig, writeConfig, CONFIG_MODE } from './config.js';
 
 const TOKEN = 'backthread_pat_test-token-value';
@@ -134,13 +135,34 @@ test('server error slugs map to actionable messages', async () => {
   });
 });
 
-test('an unknown error slug falls back to the HTTP status + server message', async () => {
+test('an unknown 4xx slug falls back to the HTTP status + the server sentence', async () => {
   await withTempEnv(async (env) => {
-    const { impl } = fetchStub(500, { error: 'mint_failed', message: 'boom' });
+    const { impl } = fetchStub(400, { error: 'a_slug_nothing_maps', message: 'that code is malformed' });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /HTTP 400/);
+    assert.match(result.message, /that code is malformed/);
+    assert.doesNotMatch(result.message, /a_slug_nothing_maps/);
+  });
+});
+
+test('a 5xx `message` is a relayed diagnostic here too, and is not printed', async () => {
+  // ⚠ MEASURED LEAK. This endpoint's 500 arm is `{ error, message: <the caught upstream
+  // string> }`, so relaying `message` unconditionally printed
+  // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
+  await withTempEnv(async (env) => {
+    const { impl } = fetchStub(500, { error: 'exchange_failed', message: 'permission denied for schema private' });
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.equal(result.ok, false);
     assert.match(result.message, /HTTP 500/);
-    assert.match(result.message, /boom/);
+    assert.doesNotMatch(result.message, /permission denied/);
+    // ⚠ AND IT MUST NOT SAY "GENERATE A FRESH CODE". A 500 is not the reader's fault and a
+    // new code cannot fix it — pointing them at their own code as the cause of a server
+    // fault is telling them to do work that cannot help. The shared renderer says the true
+    // thing instead, and puts the withheld string behind --verbose.
+    assert.doesNotMatch(result.message, /fresh code/i);
+    assert.match(result.message, /failed on our side|The server rejected it/);
+    assert.match(result.message, /issues/);
   });
 });
 
@@ -162,5 +184,68 @@ test('a non-JSON error response still yields a clean failure', async () => {
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.equal(result.ok, false);
     assert.match(result.message, /HTTP 502/);
+  });
+});
+
+test('a server sentence that already ends in a stop is not chased with ours', () => {
+  // Measured: `Exchange failed (HTTP 403) — …Upgrade to connect a capture device.. Generate
+  // a fresh code at … and try again.` — a double period and "try again" twice, with two
+  // different antecedents.
+  return withTempEnv(async (env) => {
+    const { impl } = fetchStub(403, {
+      error: 'plan_excluded',
+      message: 'Your plan does not include live capture. Upgrade to connect a capture device.',
+    });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.match(result.message, /Upgrade to connect a capture device\.$/);
+    assert.doesNotMatch(result.message, /\.\./);
+  });
+});
+
+test('the 500 that carries deliberate recovery copy keeps it', async () => {
+  // ⚠ TWO 500 ARMS, OPPOSITE KINDS. `mint_failed` ships `… — the claim code is spent;
+  // generate a fresh one.`, written on purpose, and by then the code really is burned — a
+  // fresh one is the only recovery there is. A draft that sent every 5xx through the
+  // shared renderer replaced it with "retry and file a bug", which is both useless and
+  // wrong. The discriminator is the slug, not the status.
+  await withTempEnv(async (env) => {
+    // ⚠ AND ONLY HALF OF THAT `message` IS AUTHORED. `lastFail` is `error.message` from the
+    // register RPC — a raw Postgres string on one of its two arms — so relaying the whole
+    // thing printed `permission denied for schema private — the claim code is spent…`. The
+    // recovery is the half that matters and it never varies, so the client writes it.
+    const { impl } = fetchStub(500, {
+      error: 'mint_failed',
+      message: 'permission denied for schema private — the claim code is spent; generate a fresh one.',
+    });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /That claim code is spent/);
+    assert.match(result.message, /Generate a fresh code at/);
+    assert.doesNotMatch(result.message, /permission denied/);
+    assert.doesNotMatch(result.message, /issues/);
+  });
+});
+
+test('the OTHER 500 arm, which pairs its slug with raw upstream text, still says nothing', async () => {
+  await withTempEnv(async (env) => {
+    const { impl } = fetchStub(500, {
+      error: 'exchange_failed',
+      message: 'permission denied for schema private',
+    });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.doesNotMatch(result.message, /permission denied/);
+    assert.match(result.message, /issues/);
+  });
+});
+
+test('an unmapped 4xx with no server sentence still names the one recovery there is', async () => {
+  // ⚠ A SURVIVING MUTANT. Deleting the "generate a fresh code" tail left the suite green
+  // while the line became `Exchange failed (HTTP 400).` and nothing else — a status and no
+  // next step, on the arm most likely to catch a slug nobody has mapped yet.
+  await withTempEnv(async (env) => {
+    const { impl } = fetchStub(400, { error: 'a_slug_nothing_maps' });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.match(result.message, /HTTP 400/);
+    assert.match(result.message, /Generate a fresh code at/);
   });
 });

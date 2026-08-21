@@ -6981,6 +6981,9 @@ function buildReadDecisionsUrl(env = process.env) {
 function buildOnboardingStateUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/onboarding-state`).toString();
 }
+function buildExchangeClaimUrl(env = process.env) {
+  return new URL(`${functionsBaseUrl(env)}/exchange-claim`).toString();
+}
 function buildCliAuthPollUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/cli-auth-poll`).toString();
 }
@@ -7166,13 +7169,228 @@ function versionHeaders() {
   };
 }
 
+// src/failureCopy.ts
+var REASONS = ["overloaded", "unavailable"];
+var REASON_CLAUSE = Object.freeze({
+  overloaded: "The database was busy \u2014 try again in a moment.",
+  unavailable: "It failed on our side, so retrying will not help."
+});
+var ISSUES_URL = "https://github.com/backthread/backthread/issues";
+function nextStep(verbose) {
+  return verbose ? ` If it keeps happening, report the detail at the end of this line at ${ISSUES_URL}` : ` If it keeps happening, set BACKTHREAD_VERBOSE=1 (or pass --verbose) and report what that prints at ${ISSUES_URL}`;
+}
+function looksLikeABug(status) {
+  return status >= 500;
+}
+function readFailureReason(payload) {
+  const raw = payload.reason;
+  return typeof raw === "string" && REASONS.includes(raw) ? raw : null;
+}
+var MACHINE_CODE = /^[a-z][a-z0-9_]*$/;
+function isMachineCode(raw) {
+  return MACHINE_CODE.test(raw);
+}
+function readErrorField(payload) {
+  const raw = payload.error;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function readFailureSlug(payload) {
+  const raw = readErrorField(payload);
+  return raw !== null && isMachineCode(raw) ? raw : null;
+}
+function readAuthoredError(payload, status) {
+  if (status >= 500) return null;
+  const raw = readErrorField(payload);
+  return raw !== null && !isMachineCode(raw) && raw.includes(" ") ? raw : null;
+}
+function readFailureCode(payload) {
+  const raw = payload.code;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function readServerMessage(payload) {
+  const raw = payload.message;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+function verboseEnabled(env = process.env) {
+  const raw = (env.BACKTHREAD_VERBOSE ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+function operatorSuffix(status, payload) {
+  const parts = [`status=${status}`];
+  const slug = readFailureSlug(payload) ?? (status >= 500 ? readErrorField(payload) : null);
+  if (slug) parts.push(`error=${slug}`);
+  const reason = readFailureReason(payload);
+  if (reason) parts.push(`reason=${reason}`);
+  const code = readFailureCode(payload);
+  if (code) parts.push(`code=${code}`);
+  const msg = status >= 500 ? readServerMessage(payload) : null;
+  if (msg) parts.push(`message=${msg}`);
+  return ` [${parts.join(" ")}]`;
+}
+function withOperatorDetail(sentence, ctx) {
+  if (!verboseEnabled(ctx.env ?? process.env)) return sentence;
+  return `${sentence}${operatorSuffix(ctx.status, ctx.payload)}`;
+}
+function lookupIn(table, raw) {
+  if (!Object.prototype.hasOwnProperty.call(table, raw)) return null;
+  const v = table[raw];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+function describeFailure(input) {
+  const { lead, status, payload, overrides } = input;
+  const verbose = verboseEnabled(input.env ?? process.env);
+  const suffix = verbose ? operatorSuffix(status, payload) : "";
+  const wireVerdict = readFailureReason(payload);
+  const raw = payload.error;
+  if (typeof raw === "string" && raw.length > 0) {
+    const local = overrides ? lookupIn(overrides, raw) : null;
+    if (local !== null) return `${local}${suffix}`;
+  }
+  if (wireVerdict !== "unavailable" && typeof raw === "string" && raw.length > 0) {
+    const mapped = lookupIn(SLUG_COPY, raw);
+    if (mapped !== null) return `${mapped}${suffix}`;
+  }
+  const reason = wireVerdict;
+  if (reason) {
+    const tail2 = reason === "unavailable" && looksLikeABug(status) ? nextStep(verbose) : "";
+    return `${lead}. ${REASON_CLAUSE[reason]}${tail2}${suffix}`;
+  }
+  const authored = status >= 500 ? null : readServerMessage(payload) ?? readAuthoredError(payload, status);
+  if (authored) return `${lead} \u2014 ${authored}${suffix}`;
+  const tail = looksLikeABug(status) ? nextStep(verbose) : "";
+  return `${lead}. The server rejected it (HTTP ${status}).${tail}${suffix}`;
+}
+var RE_AUTH = "this device is no longer authorized \u2014 run `backthread login` again.";
+var RE_INVITE = "you're not a member of the account that owns that repo \u2014 ask one of its owners to invite you.";
+var RE_REPORT = "nothing is wrong with what you did \u2014 it failed on our side.";
+var SLUG_COPY = Object.freeze({
+  // --- the repo gate: worker's resolveRepoGate + read/ingest-decisions authz ---------
+  repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
+  not_a_member: RE_INVITE,
+  // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
+  // `!repo.account_id` — the read side reaching it only for a private repo, since a public
+  // one short-circuits first. Never on a permission a reader could be granted, and the first
+  // draft told the reader to ask one of its owners for an invite — advice about people who
+  // do not exist. Read the producer before writing the sentence.
+  // Fires on the IDENTICAL condition as `repo_not_writable` (`!repo.account_id`), so it
+  // gets the identical remedy. An earlier draft named the fix on one and left the other
+  // with nothing to do.
+  not_readable: "that repo has no owning Backthread account, so there is nothing to read \u2014 run `backthread` to connect it.",
+  repo_not_writable: "that repo has no owning Backthread account, so nothing can be saved against it \u2014 run `backthread` to connect it.",
+  // --- deliberate refusals, not outages ---------------------------------------------
+  // `decideSessionAdmission` on `sessionAllowance` — a CAPTURE-SESSION allowance, not a
+  // decision count. "Decision limit" also echoed a pricing model that was retired.
+  plan_limit: "this account has used its capture allowance for now \u2014 open Billing in the web app to raise it.",
+  // NOT "one was built recently" — the opposite. It fires when the last few paid builds
+  // left NO lesson behind and there is no cached one to serve, so the server refuses to
+  // spend again for a while. Read the producer before writing the sentence.
+  lesson_retry_too_soon: "the last few attempts for this repo found nothing worth asking about, so no more are being built for now \u2014 try again later.",
+  lesson_in_progress: "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+  ask_not_yours: "that question belongs to somebody else, so it cannot be answered here.",
+  // The token verifier has THREE verdicts and emits `ask_${reason}` for each. `expired` is
+  // the 410 the inflow path catches by status; the other two land here, and mapping only
+  // one of them left its identical sibling reading "the server rejected it (HTTP 400)".
+  ask_malformed: "that answer token is not one this client recognises \u2014 ask for a fresh question.",
+  ask_material_moved: "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.",
+  // NOT "issued to another device" — that verifies fine and comes back as `ask_not_yours`.
+  // This is "we cannot establish this token is ours": forged, corrupted, or signed with a
+  // key that has since rotated. The two sentences described each other's conditions.
+  ask_bad_signature: "that answer token could not be verified, so nothing was recorded \u2014 ask for a fresh question.",
+  // --- bad request: OUR bug, not the reader's -----------------------------------------
+  // Named rather than left to the fallback because the fallback would say "the server
+  // rejected it", which invites the reader to look for something they did wrong.
+  // Only the ones a route THIS PACKAGE CALLS can emit. `ci_mode_not_enabled`,
+  // `invalid_state` and `invalid_checkpoint` were on the table and belong to /ci/snapshot
+  // and the git-decisions routes, which this package never calls — dead entries that no
+  // test could reach and that make "the table is exhaustive" quietly meaningless.
+  invalid_body: RE_REPORT,
+  invalid_payload: RE_REPORT,
+  invalid_field: RE_REPORT,
+  "method not allowed": RE_REPORT,
+  // ⚠ THESE TWO PAIR A SLUG WITH A RAW UPSTREAM STRING and are the reason the table is
+  // consulted BEFORE the `message` branch. Unmapped, a reader got `the decisions weren't
+  // saved — duplicate key value violates unique constraint "decisions_pkey"`. Measured.
+  persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
+  inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
+  // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
+  // sends any of them — they are emitted only by routes this package never calls:
+  // /ci/snapshot, the git-decisions and the billing routes. Dead entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
+  // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
+  // written to fix it.
+  //
+  // --- the auth vocabulary — emitted by BOTH the worker's deviceAuth and every Function
+  "invalid token": RE_AUTH,
+  "token expired": RE_AUTH,
+  "invalid session": RE_AUTH,
+  "insufficient scope": RE_AUTH,
+  "missing authorization": RE_AUTH
+});
+function describeTransportFailure(input) {
+  const verbose = verboseEnabled(input.env ?? process.env);
+  const parts = [`route=${input.route}`, `attempts=${input.attempts}`];
+  if (input.timeoutMs !== void 0) parts.push(`timeoutMs=${input.timeoutMs}`);
+  if (input.cause) parts.push(`cause=${input.cause}`);
+  const suffix = verbose ? ` [${parts.join(" ")}]` : "";
+  if (input.kind === "timeout") {
+    const secs = input.timeoutMs === void 0 ? null : Math.round(input.timeoutMs / 1e3);
+    return `${input.lead}. It took longer than ${secs === null ? "expected" : `${secs}s`} \u2014 try again.${suffix}`;
+  }
+  return `${input.lead}. Backthread could not be reached \u2014 check your connection and try again.${suffix}`;
+}
+var CLI_ENDPOINTS = Object.freeze({
+  // --- worker origin, relayed-failure contract ---------------------------------------
+  buildGroundedAskUrl: { renders: "failure-body", entryPoint: "queryDecisions" },
+  buildLessonStartUrl: { renders: "failure-body", entryPoint: "startLesson" },
+  buildLessonAnswerUrl: { renders: "failure-body", entryPoint: "answerLesson" },
+  buildInflowAskUrl: { renders: "failure-body", entryPoint: "requestAsk" },
+  buildInflowAnswerUrl: { renders: "failure-body", entryPoint: "answerAsk" },
+  // Not a `failureBody` route on the server TODAY — but it is a worker route whose failure
+  // is read by a human in the capture summary, and it carried its own inlined copy of the
+  // `message ?? String(error)` logic. Wiring it now costs nothing and means the route can
+  // start returning the contract without a second round of this ticket.
+  buildInferDecisionsUrl: { renders: "failure-body", entryPoint: "serverInfer" },
+  // --- worker origin, nothing shown ---------------------------------------------------
+  // The ONLY `never-shown` endpoint left, and the test below holds it to the strong reading
+  // of that word: its module must not read `error` / `message` off the response at all, so
+  // there is no sentence to leak rather than merely nobody printing one today.
+  buildCaptureScopeUrl: {
+    renders: "never-shown",
+    why: "the pre-send scope preflight is FAIL-OPEN and silent by design: a failure means the hook proceeds, and printing anything would turn a non-event into noise during somebody else's session. It reads a verdict, never a diagnostic."
+  },
+  // --- Supabase Functions origin -------------------------------------------------------
+  // Same correction: `capture --manual` prints this detail under the summary, so
+  // `ingest rejected (502): persist_failed` was reaching a person. The detached
+  // SessionEnd hook does discard it — but "one of its two callers is silent" is not
+  // "never shown", and the loud one is the one somebody is watching.
+  buildIngestDecisionsUrl: { renders: "failure-body", entryPoint: "runCapture (persist leg)" },
+  // ⚠ CLASSIFIED `never-shown` IN THE FIRST DRAFT OF THIS REGISTRY, AND THAT WAS FALSE.
+  // `backthread sync` prints this outcome's detail, so a reader was getting
+  // `read-decisions rejected (403): not_a_member` — the very defect, on a route the
+  // registry claimed nobody ever saw. A registry whose justifications are unverified is
+  // the failure mode it was built to end, so the fix is the wiring, not the prose.
+  buildReadDecisionsUrl: { renders: "failure-body", entryPoint: "syncDecisions" },
+  // Its one caller discards the detail today — but that is a fact about the CALLER, and a
+  // second one would inherit a ready-made slug. Rendered, so the category below can mean
+  // "the string is never even built" rather than "nobody happens to print it".
+  buildOnboardingStateUrl: { renders: "failure-body", entryPoint: "fetchOnboardingState" },
+  buildCliAuthPollUrl: {
+    renders: "own-slug-map",
+    why: "the login poll owns a state machine (pending / ready / expired / consumed), not a failure taxonomy \u2014 each state is its own instruction to the person waiting at the terminal."
+  },
+  buildExchangeClaimUrl: {
+    renders: "own-slug-map",
+    why: "the claim exchange already maps invalid_code / code_expired / code_used to specific recovery instructions naming where to get a fresh code. A generic retry verdict would be strictly less actionable, and this endpoint carries no `reason` field to key one off."
+  },
+  // --- links, not requests --------------------------------------------------------------
+  buildCliAuthUrl: { renders: "not-a-fetch-target", why: "opened in the browser during login." },
+  buildBillingUrl: { renders: "not-a-fetch-target", why: "printed in the upgrade nudge." },
+  buildRepoDeepLink: { renders: "not-a-fetch-target", why: "printed alongside an answer." }
+});
+
 // src/claim.ts
 var CLAIM_PREFIX = "backthread_claim_";
 function isClaimCode(code) {
   return code.startsWith(CLAIM_PREFIX) && code.length > CLAIM_PREFIX.length;
-}
-function buildExchangeClaimUrl(env = process.env) {
-  return new URL(`${functionsBaseUrl(env)}/exchange-claim`).toString();
 }
 async function exchangeClaim(rawCode, opts = {}) {
   const env = opts.env ?? process.env;
@@ -7221,8 +7439,23 @@ function exchangeErrorMessage(status, body, env) {
     case "rate_limited":
       return "Too many attempts from this machine \u2014 wait a few minutes and try again.";
     default: {
-      const detail = typeof body?.message === "string" ? ` \u2014 ${body.message}` : "";
-      return `Exchange failed (HTTP ${status})${detail}`;
+      if (slug === "mint_failed") {
+        return withOperatorDetail(
+          `That claim code is spent \u2014 it was consumed even though the device could not be authorized. ${fresh}`,
+          { status, payload: body ?? {}, env }
+        );
+      }
+      if (status >= 500) {
+        return describeFailure({
+          lead: "This device could not be authorized",
+          status,
+          payload: body ?? {},
+          env
+        });
+      }
+      const authored = typeof body?.message === "string" ? body.message : "";
+      if (authored) return `Exchange failed (HTTP ${status}) \u2014 ${authored}`;
+      return `Exchange failed (HTTP ${status}). ${fresh}`;
     }
   }
 }
@@ -8127,7 +8360,14 @@ async function serverInfer(transcript, config2, opts = {}) {
       decisions: [],
       persisted: false,
       sessionId: transcript.sessionId ?? null,
-      error: `inference request failed: ${e.message}`
+      error: describeTransportFailure({
+        lead: "this session wasn't written up",
+        kind: e.name === "AbortError" ? "timeout" : "unreachable",
+        route: "infer-decisions",
+        attempts: 1,
+        cause: e.message,
+        env
+      })
     };
   }
   let payload;
@@ -8138,14 +8378,18 @@ async function serverInfer(transcript, config2, opts = {}) {
   }
   if (!res.ok) {
     const obj = payload && typeof payload === "object" ? payload : {};
-    const serverErr = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : "error" in obj ? String(obj.error) : `HTTP ${res.status}`;
     return {
       ok: false,
       model: "server",
       decisions: [],
       persisted: false,
       sessionId: transcript.sessionId ?? null,
-      error: `inference rejected (${res.status}): ${serverErr}`
+      error: describeFailure({
+        lead: "this session wasn't written up",
+        status: res.status,
+        payload: obj,
+        env
+      })
     };
   }
   const rec = payload && typeof payload === "object" ? payload : {};
@@ -8173,6 +8417,17 @@ async function inferDecisions(transcript, config2, opts = {}) {
 }
 
 // src/captureScope.ts
+var SCOPE_REASON_COPY = Object.freeze({
+  connected: "this repo is connected",
+  not_connected: "this repo isn't connected to Backthread yet, so nothing was read or sent",
+  // The server's own note: "repo exists but has no owning account (public/seeded)". Not
+  // a permission the reader could be granted — there is nobody to grant it.
+  repo_not_writable: "this repo has no owning Backthread account, so nothing was read or sent",
+  not_a_member: "you're not a member of the account that owns this repo, so nothing was read or sent",
+  capture_paused: "capture is paused for this repo, so nothing was read or sent",
+  unknown: "the scope check could not be reached, so nothing was read or sent",
+  other: "this repo is out of capture scope, so nothing was read or sent"
+});
 var CAPTURE_SCOPE_TIMEOUT_MS = 1e4;
 function interpretScopeResponse(ok, status, payload) {
   if (!ok || status !== 200) return { send: true, reason: "unknown" };
@@ -8322,17 +8577,17 @@ async function maybeNudge(status, repo, sessionId, deps = {}) {
     if (!repo) return false;
     if (!sessionId || sessionId.trim().length === 0) return false;
     const rawNext = deps.nextStep;
-    const nextStep = rawNext === void 0 ? "absent" : rawNext;
+    const nextStep2 = rawNext === void 0 ? "absent" : rawNext;
     const env = deps.env ?? process.env;
     let line = null;
     if (deps.captureSkipped === FREE_LIMIT_REACHED) {
       line = freeLimitMessage(env);
     } else if (deps.captureSkipped === TRIAL_EXPIRED) {
       line = trialExpiredMessage(env);
-    } else if (nextStep === null) {
+    } else if (nextStep2 === null) {
       return false;
-    } else if (nextStep !== "absent") {
-      line = nextStepMessage(nextStep, repo, env);
+    } else if (nextStep2 !== "absent") {
+      line = nextStepMessage(nextStep2, repo, env);
     } else {
       if (status !== "not_connected" && status !== "disconnected") return false;
       line = nudgeMessage(status, repo, env);
@@ -9477,7 +9732,18 @@ async function fetchOnboardingState(input = {}, deps = {}) {
         body: JSON.stringify(repo ? { repo_slug: `${repo.owner}/${repo.name}` } : {})
       });
     } catch (e) {
-      return { status: "fetch-failed", detail: `onboarding request failed: ${e.message}`, repo: repo ?? void 0 };
+      return {
+        status: "fetch-failed",
+        detail: describeTransportFailure({
+          lead: "your setup status didn't load",
+          kind: e.name === "AbortError" ? "timeout" : "unreachable",
+          route: "onboarding-state",
+          attempts: 1,
+          cause: e.message,
+          env
+        }),
+        repo: repo ?? void 0
+      };
     }
     let payload;
     try {
@@ -9487,10 +9753,14 @@ async function fetchOnboardingState(input = {}, deps = {}) {
     }
     if (!res.ok) {
       const obj = payload && typeof payload === "object" ? payload : {};
-      const serverErr = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : "error" in obj ? String(obj.error) : `HTTP ${res.status}`;
       return {
         status: "fetch-failed",
-        detail: `onboarding rejected (${res.status}): ${serverErr}`,
+        detail: describeFailure({
+          lead: "your setup status didn't load",
+          status: res.status,
+          payload: obj,
+          env
+        }),
         repo: repo ?? void 0
       };
     }
@@ -9515,12 +9785,12 @@ function normalizeState(raw) {
     agentCapturing: sig.agentCapturing === true,
     anythingCaptured: sig.anythingCaptured === true
   };
-  let nextStep = null;
+  let nextStep2 = null;
   const ns = r.nextStep;
   if (ns && typeof ns === "object") {
     const o = ns;
     if (typeof o.slug === "string" && o.slug.trim().length > 0) {
-      nextStep = {
+      nextStep2 = {
         slug: o.slug,
         title: typeof o.title === "string" ? o.title : "",
         body: typeof o.body === "string" ? o.body : ""
@@ -9535,7 +9805,7 @@ function normalizeState(raw) {
   return {
     signals,
     cell: typeof r.cell === "string" ? r.cell : "",
-    nextStep,
+    nextStep: nextStep2,
     terminal,
     repoSyncStatus: typeof r.repoSyncStatus === "string" ? r.repoSyncStatus : null,
     repo
@@ -9769,7 +10039,10 @@ async function runCapture(input, deps = {}) {
         }
         return {
           status: "skipped-out-of-scope",
-          detail: `capture skipped (${scope.reason}) \u2014 repo not in capture scope; nothing read or sent.`,
+          // The reason is a closed enum, so it renders as the sentence it means. It used to
+          // print as `capture skipped (not_a_member) — repo not in capture scope`, which is
+          // a slug in front of a person however respectable its provenance.
+          detail: `capture skipped \u2014 ${SCOPE_REASON_COPY[scope.reason]}.`,
           count: 0
         };
       }
@@ -9913,8 +10186,15 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
   }
   if (!res.ok) {
     const obj = payload && typeof payload === "object" ? payload : {};
-    const serverErr = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : "error" in obj ? String(obj.error) : `HTTP ${res.status}`;
-    return { status: "persist-failed", detail: `ingest rejected (${res.status}): ${serverErr}` };
+    return {
+      status: "persist-failed",
+      detail: describeFailure({
+        lead: "the decisions weren't saved",
+        status: res.status,
+        payload: obj,
+        env: ctx.env
+      })
+    };
   }
   const rec = payload && typeof payload === "object" ? payload : {};
   const count = typeof rec.count === "number" ? rec.count : decisions.length;
@@ -34376,7 +34656,8 @@ async function queryDecisions(input, deps = {}) {
     const deepLink = buildRepoDeepLink(repo.owner, repo.name, env);
     const question = typeof input.question === "string" && input.question.trim().length > 0 ? input.question.trim() : DEFAULT_QUESTION;
     let res;
-    let failDetail = "";
+    let failKind = "unreachable";
+    let failCause = "";
     for (let attempt = 1; attempt <= GROUNDED_ASK_ATTEMPTS; attempt++) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), GROUNDED_ASK_TIMEOUT_MS);
@@ -34395,14 +34676,14 @@ async function queryDecisions(input, deps = {}) {
           signal: ac.signal
         });
         if (res.status >= 500 && attempt < GROUNDED_ASK_ATTEMPTS) {
-          failDetail = `grounded-ask rejected (${res.status})`;
           res = void 0;
           continue;
         }
         break;
       } catch (e) {
         const aborted2 = e.name === "AbortError";
-        failDetail = aborted2 ? `grounded-ask timed out after ${GROUNDED_ASK_TIMEOUT_MS / 1e3}s` : `grounded-ask request failed: ${e.message}`;
+        failKind = aborted2 ? "timeout" : "unreachable";
+        failCause = e.message;
         res = void 0;
       } finally {
         clearTimeout(timer);
@@ -34411,7 +34692,15 @@ async function queryDecisions(input, deps = {}) {
     if (!res) {
       return {
         status: "read-failed",
-        detail: `${failDetail} (after ${GROUNDED_ASK_ATTEMPTS} attempts) \u2014 try again.`,
+        detail: describeTransportFailure({
+          lead: "the answer didn't come back",
+          kind: failKind,
+          route: "grounded-ask",
+          attempts: GROUNDED_ASK_ATTEMPTS,
+          ...failKind === "timeout" ? { timeoutMs: GROUNDED_ASK_TIMEOUT_MS } : {},
+          ...failCause ? { cause: failCause } : {},
+          env
+        }),
         repo,
         deepLink
       };
@@ -34424,10 +34713,14 @@ async function queryDecisions(input, deps = {}) {
     }
     const rec = payload && typeof payload === "object" ? payload : {};
     if (!res.ok) {
-      const serverErr = typeof rec.message === "string" && rec.message.length > 0 ? rec.message : "error" in rec ? String(rec.error) : `HTTP ${res.status}`;
       return {
         status: "read-failed",
-        detail: `grounded-ask rejected (${res.status}): ${serverErr}`,
+        detail: describeFailure({
+          lead: "the answer didn't come back",
+          status: res.status,
+          payload: rec,
+          env
+        }),
         repo,
         deepLink
       };
@@ -34436,7 +34729,9 @@ async function queryDecisions(input, deps = {}) {
     if (!answer) {
       return {
         status: "read-failed",
-        detail: "grounded-ask returned no answer.",
+        // Shouldn't happen (the server never-refuses) — and if it does, the reader learns
+        // what did not happen, not which endpoint disappointed us.
+        detail: "the answer came back empty. It failed on our side, so retrying will not help.",
         repo,
         deepLink
       };
@@ -35029,7 +35324,8 @@ async function syncDecisions(opts = {}, deps = {}) {
       }
     }
     let res;
-    let failDetail = "";
+    let failKind = "unreachable";
+    let failCause = "";
     for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt++) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), READ_TIMEOUT_MS);
@@ -35047,20 +35343,32 @@ async function syncDecisions(opts = {}, deps = {}) {
           signal: ac.signal
         });
         if (res.status >= 500 && attempt < READ_ATTEMPTS) {
-          failDetail = `read-decisions rejected (${res.status})`;
           res = void 0;
           continue;
         }
         break;
       } catch (e) {
-        failDetail = e.name === "AbortError" ? `read-decisions timed out after ${READ_TIMEOUT_MS / 1e3}s` : `read-decisions request failed: ${e.message}`;
+        failKind = e.name === "AbortError" ? "timeout" : "unreachable";
+        failCause = e.message;
         res = void 0;
       } finally {
         clearTimeout(timer);
       }
     }
     if (!res) {
-      return { status: "read-failed", detail: `${failDetail} (after ${READ_ATTEMPTS} attempts).`, repo };
+      return {
+        status: "read-failed",
+        detail: describeTransportFailure({
+          lead: "the decision log didn't sync",
+          kind: failKind,
+          route: "read-decisions",
+          attempts: READ_ATTEMPTS,
+          ...failKind === "timeout" ? { timeoutMs: READ_TIMEOUT_MS } : {},
+          ...failCause ? { cause: failCause } : {},
+          env
+        }),
+        repo
+      };
     }
     let payload;
     try {
@@ -35070,8 +35378,16 @@ async function syncDecisions(opts = {}, deps = {}) {
     }
     const rec = payload && typeof payload === "object" ? payload : {};
     if (!res.ok) {
-      const serverErr = typeof rec.message === "string" && rec.message.length > 0 ? rec.message : "error" in rec ? String(rec.error) : `HTTP ${res.status}`;
-      return { status: "read-failed", detail: `read-decisions rejected (${res.status}): ${serverErr}`, repo };
+      return {
+        status: "read-failed",
+        detail: describeFailure({
+          lead: "the decision log didn't sync",
+          status: res.status,
+          payload: rec,
+          env
+        }),
+        repo
+      };
     }
     const flows = Array.isArray(rec.flows) ? rec.flows : [];
     const decisions = Array.isArray(rec.decisions) ? rec.decisions : [];
@@ -35333,7 +35649,13 @@ async function startLesson(input, deps = {}) {
     if (res.status === 409) {
       return {
         status: "in-progress",
-        detail: serverMessage(rec) ?? "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+        // The 409 body carries a worker-AUTHORED sentence, not a relayed diagnostic —
+        // render it verbatim. Reading only `message` (never the `error` slug) is the
+        // point: the old helper fell back to the slug and printed `lesson_in_progress`.
+        detail: withOperatorDetail(
+          readServerMessage(rec) ?? "a lesson is already being prepared for this repo \u2014 try again in a moment.",
+          { status: res.status, payload: rec, env }
+        ),
         repo,
         ...upgrade ? { upgrade } : {}
       };
@@ -35341,7 +35663,15 @@ async function startLesson(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: `lesson start rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ""}`,
+        // One renderer for every route that speaks the relayed-failure contract
+        // (failureCopy.ts). The reader gets the retry verdict the server sent in
+        // `reason`; the slug and the SQLSTATE stay behind `--verbose`.
+        detail: describeFailure({
+          lead: "the lesson didn't start",
+          status: res.status,
+          payload: rec,
+          env
+        }),
         repo,
         ...upgrade ? { upgrade } : {}
       };
@@ -35398,7 +35728,14 @@ async function answerLesson(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: `answer rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ""}`,
+        // "wasn't recorded" rather than "failed": the one thing somebody who just
+        // answered wants to know is whether their answer counted.
+        detail: describeFailure({
+          lead: "your answer wasn't recorded",
+          status: res.status,
+          payload: rec,
+          env
+        }),
         ...upgrade ? { upgrade } : {}
       };
     }
@@ -35455,11 +35792,6 @@ async function postJson(doFetch, url2, token, body, timeoutMs) {
   } finally {
     clearTimeout(timer);
   }
-}
-function serverMessage(rec) {
-  if (typeof rec.message === "string" && rec.message.length > 0) return rec.message;
-  if (typeof rec.error === "string" && rec.error.length > 0) return rec.error;
-  return null;
 }
 function readUpgrade(header, rec) {
   if (header && header.length > 0) return header;
@@ -35690,7 +36022,15 @@ async function requestAsk(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: `ask rejected (${res.status})${serverMessage2(res.payload) ? `: ${serverMessage2(res.payload)}` : ""}`,
+        // One renderer for every route that speaks the relayed-failure contract
+        // (failureCopy.ts). An ask that could not be fetched is a non-event for the
+        // person — the only thing worth saying is whether asking again is worth it.
+        detail: describeFailure({
+          lead: "no question came back",
+          status: res.status,
+          payload: res.payload,
+          env
+        }),
         repo,
         ...upgrade ? { upgrade } : {}
       };
@@ -35750,7 +36090,7 @@ async function answerAsk(input, deps = {}) {
     if (res.status < 200 || res.status >= 300) {
       return {
         status: "failed",
-        detail: expiryAwareDetail(res.status, res.payload),
+        detail: expiryAwareDetail(res.status, res.payload, env),
         ...upgrade ? { upgrade } : {}
       };
     }
@@ -35765,15 +36105,22 @@ async function answerAsk(input, deps = {}) {
     return { status: "error", detail: `answer failed (swallowed): ${e.message}` };
   }
 }
-function expiryAwareDetail(status, payload) {
-  const slug = serverMessage2(payload) ?? "";
-  if (status === 410 || slug === "ask_expired") {
-    return "that ask has expired \u2014 it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.";
-  }
-  if (slug === "ask_material_moved") {
-    return "the recorded material behind that question changed since it was asked, so it is not answerable any more. Nothing was recorded against you.";
-  }
-  return `answer rejected (${status})${slug ? `: ${slug}` : ""}`;
+var ASK_EXPIRED_COPY = "that ask has expired \u2014 it was never written down anywhere, so nothing is owed and nothing is missing. Ask for another whenever you like.";
+var INFLOW_ANSWER_OVERRIDES = Object.freeze({
+  // ONE entry. `ask_material_moved` was here too, byte-identical to its entry on the global
+  // table — and this module's own doc argues that two copies of a sentence are free to
+  // disagree. It means the same thing wherever it arrives, so it lives in one place.
+  ask_expired: ASK_EXPIRED_COPY
+});
+function expiryAwareDetail(status, payload, env) {
+  if (status === 410) return withOperatorDetail(ASK_EXPIRED_COPY, { status, payload, env });
+  return describeFailure({
+    lead: "your answer wasn't recorded",
+    status,
+    payload,
+    env,
+    overrides: INFLOW_ANSWER_OVERRIDES
+  });
 }
 async function postJson2(doFetch, url2, token, body, timeoutMs) {
   const ac = new AbortController();
@@ -35814,18 +36161,13 @@ async function postJson2(doFetch, url2, token, body, timeoutMs) {
     clearTimeout(timer);
   }
 }
-function serverMessage2(rec) {
-  if (typeof rec.message === "string" && rec.message.length > 0) return rec.message;
-  if (typeof rec.error === "string" && rec.error.length > 0) return rec.error;
-  return null;
-}
 function readUpgrade2(rec) {
   return typeof rec.upgrade === "string" && rec.upgrade.length > 0 ? rec.upgrade : void 0;
 }
 var RUNGS2 = ["teach", "recognise", "produce"];
-var REASONS = ["served", "nothing-banked", "nothing-new"];
+var REASONS2 = ["served", "nothing-banked", "nothing-new"];
 function normalizeReason(raw) {
-  return REASONS.includes(raw) ? raw : "nothing-new";
+  return REASONS2.includes(raw) ? raw : "nothing-new";
 }
 function normalizeAsk(raw) {
   if (!raw || typeof raw !== "object") return null;
@@ -36075,6 +36417,13 @@ Manage
   backthread version            Print the installed version (also --version, -v)
   backthread help               Show this message (also --help, -h)
 
+Global flags
+  --verbose               When something fails, also print the operator detail \u2014 the
+                          HTTP status, our internal error code, the retry reason and the
+                          database's own SQLSTATE. Off by default: those name our call
+                          sites, not anything you can act on. (Also BACKTHREAD_VERBOSE=1,
+                          which the MCP tools read too.)
+
 Your source never leaves your machine unredacted \u2014 it's checkable in this OSS repo.
 Docs:     https://app.backthread.dev
 Security: https://backthread.dev/security`;
@@ -36130,7 +36479,13 @@ async function runOnboarding(rest) {
   });
   return result.exitCode;
 }
-async function main(argv, deps = {}) {
+function consumeVerboseFlag(argv, env) {
+  if (!argv.includes("--verbose")) return argv;
+  env.BACKTHREAD_VERBOSE = "1";
+  return argv.filter((a) => a !== "--verbose");
+}
+async function main(rawArgv, deps = {}) {
+  const argv = consumeVerboseFlag(rawArgv, deps.env ?? process.env);
   const [command, ...rest] = argv;
   const onboarding = deps.runOnboardingImpl ?? runOnboarding;
   switch (command) {

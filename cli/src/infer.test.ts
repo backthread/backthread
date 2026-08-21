@@ -260,13 +260,38 @@ test('serverInfer fails clearly when no device token is configured', async () =>
   assert.equal(calls.length, 0);
 });
 
-test('serverInfer surfaces a non-2xx server error with status + message', async () => {
-  const { fetch: fetchImpl } = stubFetch(() => ({ status: 401, body: { error: 'token revoked' } }));
+test('serverInfer surfaces a non-2xx server error as a sentence, not a slug', async () => {
+  const { fetch: fetchImpl } = stubFetch(() => ({ status: 401, body: { error: 'token_revoked' } }));
   const res = await serverInfer(TRANSCRIPT, CONFIG, { fetchImpl, env: {} as NodeJS.ProcessEnv });
   assert.equal(res.ok, false);
-  assert.match(res.error ?? '', /401/);
-  assert.match(res.error ?? '', /token revoked/);
+  assert.match(res.error ?? '', /this session wasn't written up/);
+  assert.match(res.error ?? '', /The server rejected it \(HTTP 401\)/);
+  assert.doesNotMatch(res.error ?? '', /token_revoked/);
   assert.deepEqual(res.decisions, []);
+});
+
+test('serverInfer renders the retry verdict the server sent, and hides the SQLSTATE', async () => {
+  const { fetch: fetchImpl } = stubFetch(() => ({
+    status: 502,
+    body: { error: 'infer_failed', reason: 'overloaded', code: '57014' },
+  }));
+  const res = await serverInfer(TRANSCRIPT, CONFIG, { fetchImpl, env: {} as NodeJS.ProcessEnv });
+  assert.match(res.error ?? '', /The database was busy — try again in a moment\./);
+  assert.doesNotMatch(res.error ?? '', /57014/);
+  assert.doesNotMatch(res.error ?? '', /infer_failed/);
+});
+
+test('serverInfer hands the operator both fields under BACKTHREAD_VERBOSE', async () => {
+  const { fetch: fetchImpl } = stubFetch(() => ({
+    status: 502,
+    body: { error: 'infer_failed', reason: 'overloaded', code: '57014' },
+  }));
+  const res = await serverInfer(TRANSCRIPT, CONFIG, {
+    fetchImpl,
+    env: { BACKTHREAD_VERBOSE: '1' } as NodeJS.ProcessEnv,
+  });
+  assert.match(res.error ?? '', /The database was busy/);
+  assert.match(res.error ?? '', /\[status=502 error=infer_failed reason=overloaded code=57014\]/);
 });
 
 test('serverInfer surfaces a network failure without leaking the token', async () => {
@@ -275,7 +300,8 @@ test('serverInfer surfaces a network failure without leaking the token', async (
   }) as typeof fetch;
   const res = await serverInfer(TRANSCRIPT, CONFIG, { fetchImpl, env: {} as NodeJS.ProcessEnv });
   assert.equal(res.ok, false);
-  assert.match(res.error ?? '', /ECONNREFUSED/);
+  assert.match(res.error ?? '', /Backthread could not be reached/);
+  assert.doesNotMatch(res.error ?? '', /ECONNREFUSED/);
   assert.doesNotMatch(res.error ?? '', /backthread_pat_/);
 });
 

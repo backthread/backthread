@@ -15,8 +15,9 @@
 // $HOME.
 
 import { updateConfig } from './config.js';
-import { functionsBaseUrl, appBaseUrl } from './urls.js';
+import { appBaseUrl, buildExchangeClaimUrl } from './urls.js';
 import { versionHeaders } from './version.js';
+import { describeFailure, withOperatorDetail } from './failureCopy.js';
 
 // Plaintext prefix of every claim code (lockstep with the mint-claim /
 // exchange-claim Edge Functions). A code is NOT a token — visually distinct from
@@ -26,12 +27,6 @@ export const CLAIM_PREFIX = 'backthread_claim_';
 /** A string is claim-shaped iff it carries the prefix AND a non-empty body. */
 export function isClaimCode(code: string): boolean {
   return code.startsWith(CLAIM_PREFIX) && code.length > CLAIM_PREFIX.length;
-}
-
-// Build the exchange-claim URL on the Functions origin (same origin + override
-// seam as ingest/read — BACKTHREAD_FUNCTIONS_URL for local dev).
-export function buildExchangeClaimUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return new URL(`${functionsBaseUrl(env)}/exchange-claim`).toString();
 }
 
 export interface ClaimExchangeOptions {
@@ -123,8 +118,43 @@ function exchangeErrorMessage(
     case 'rate_limited':
       return 'Too many attempts from this machine — wait a few minutes and try again.';
     default: {
-      const detail = typeof body?.message === 'string' ? ` — ${body.message}` : '';
-      return `Exchange failed (HTTP ${status})${detail}`;
+      // ⚠ ON A 4xx ONLY. This endpoint's 500 arm is `{ error: 'exchange_failed', message:
+      // <the caught upstream string> }`, so relaying `message` unconditionally printed
+      // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
+      // Same rule as the shared renderer: nobody writes reader-facing copy for a 500.
+      // ⚠ THE DISCRIMINATOR IS THE SLUG, NOT THE STATUS, AND GENERALISING IT COST A REAL
+      // SENTENCE. This endpoint has TWO 500 arms and they are opposites: `exchange_failed`
+      // pairs its slug with the raw upstream string, while `mint_failed` pairs it with copy
+      // somebody wrote on purpose — `… — the claim code is spent; generate a fresh one.` —
+      // and by then the code really is burned, so a fresh one is the ONLY recovery. A first
+      // draft sent every 5xx through the renderer on the grounds that nobody writes
+      // reader-facing copy for a 500. This endpoint does, on one of its two arms.
+      if (slug === 'mint_failed') {
+        // ⚠ AND WE WRITE THE SENTENCE, NOT THE SERVER. Its `message` is
+        // `` `${lastFail} — the claim code is spent; generate a fresh one.` ``, and only the
+        // SUFFIX is authored — `lastFail` is `error.message` from the register RPC, i.e. a
+        // raw Postgres string on one of its two arms. Relaying the whole thing printed
+        // `permission denied for schema private — the claim code is spent…` to a person.
+        // The recovery is the half that matters and it is always the same, so it is ours.
+        return withOperatorDetail(
+          `That claim code is spent — it was consumed even though the device could not be authorized. ${fresh}`,
+          { status, payload: (body ?? {}) as Record<string, unknown>, env },
+        );
+      }
+      if (status >= 500) {
+        return describeFailure({
+          lead: 'This device could not be authorized',
+          status,
+          payload: (body ?? {}) as Record<string, unknown>,
+          env,
+        });
+      }
+      const authored = typeof body?.message === 'string' ? body.message : '';
+      // The server's own sentence already ends in a stop and often already says "try
+      // again", so appending ours produced `…then try again.. Generate a fresh code … and
+      // try again.` When it speaks, it speaks alone.
+      if (authored) return `Exchange failed (HTTP ${status}) — ${authored}`;
+      return `Exchange failed (HTTP ${status}). ${fresh}`;
     }
   }
 }

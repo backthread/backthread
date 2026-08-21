@@ -33,6 +33,7 @@
 // seam lets tests inject a stub without a live network or Worker.
 
 import { buildInferDecisionsUrl } from './urls.js';
+import { describeFailure, describeTransportFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import type { BackthreadConfig } from './config.js';
 
@@ -258,7 +259,14 @@ export async function serverInfer(
       decisions: [],
       persisted: false,
       sessionId: transcript.sessionId ?? null,
-      error: `inference request failed: ${(e as Error).message}`,
+      error: describeTransportFailure({
+        lead: "this session wasn't written up",
+        kind: (e as Error).name === 'AbortError' ? 'timeout' : 'unreachable',
+        route: 'infer-decisions',
+        attempts: 1,
+        cause: (e as Error).message,
+        env,
+      }),
     };
   }
 
@@ -270,22 +278,23 @@ export async function serverInfer(
   }
 
   if (!res.ok) {
-    // A 426 means the server soft-blocked this `backthread` as too old. Prefer
-    // the friendly `message` ("please update backthread …") over the machine error code.
+    // One renderer for every route that speaks the relayed-failure contract
+    // (failureCopy.ts). A 426 soft-block carries a worker-AUTHORED `message` ("please
+    // update backthread …") and still renders verbatim; anything carrying `reason`
+    // renders as the retry verdict; nothing renders the machine slug by default.
     const obj = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
-    const serverErr =
-      typeof obj.message === 'string' && obj.message.length > 0
-        ? obj.message
-        : 'error' in obj
-          ? String(obj.error)
-          : `HTTP ${res.status}`;
     return {
       ok: false,
       model: 'server',
       decisions: [],
       persisted: false,
       sessionId: transcript.sessionId ?? null,
-      error: `inference rejected (${res.status}): ${serverErr}`,
+      error: describeFailure({
+        lead: "this session wasn't written up",
+        status: res.status,
+        payload: obj,
+        env,
+      }),
     };
   }
 

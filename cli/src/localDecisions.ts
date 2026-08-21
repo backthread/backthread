@@ -23,6 +23,7 @@
 import { readConfig as defaultReadConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildReadDecisionsUrl } from './urls.js';
+import { describeFailure, describeTransportFailure, type TransportFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 import {
   resolveRepoRoot as defaultResolveRepoRoot,
@@ -222,7 +223,8 @@ export async function syncDecisions(
     // degrades gracefully (fewer local hints); the hosted `query`/grounded-ask
     // path bypasses the cap via direct PostgREST for the depth tier.
     let res: Response | undefined;
-    let failDetail = '';
+    let failKind: TransportFailure = 'unreachable';
+    let failCause = '';
     for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt++) {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), READ_TIMEOUT_MS);
@@ -240,23 +242,32 @@ export async function syncDecisions(
           signal: ac.signal,
         });
         if (res.status >= 500 && attempt < READ_ATTEMPTS) {
-          failDetail = `read-decisions rejected (${res.status})`;
           res = undefined;
           continue;
         }
         break;
       } catch (e) {
-        failDetail =
-          (e as Error).name === 'AbortError'
-            ? `read-decisions timed out after ${READ_TIMEOUT_MS / 1000}s`
-            : `read-decisions request failed: ${(e as Error).message}`;
+        failKind = (e as Error).name === 'AbortError' ? 'timeout' : 'unreachable';
+        failCause = (e as Error).message;
         res = undefined;
       } finally {
         clearTimeout(timer);
       }
     }
     if (!res) {
-      return { status: 'read-failed', detail: `${failDetail} (after ${READ_ATTEMPTS} attempts).`, repo };
+      return {
+        status: 'read-failed',
+        detail: describeTransportFailure({
+          lead: "the decision log didn't sync",
+          kind: failKind,
+          route: 'read-decisions',
+          attempts: READ_ATTEMPTS,
+          ...(failKind === 'timeout' ? { timeoutMs: READ_TIMEOUT_MS } : {}),
+          ...(failCause ? { cause: failCause } : {}),
+          env,
+        }),
+        repo,
+      };
     }
 
     let payload: unknown;
@@ -267,13 +278,19 @@ export async function syncDecisions(
     }
     const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
     if (!res.ok) {
-      const serverErr =
-        typeof rec.message === 'string' && rec.message.length > 0
-          ? rec.message
-          : 'error' in rec
-            ? String(rec.error)
-            : `HTTP ${res.status}`;
-      return { status: 'read-failed', detail: `read-decisions rejected (${res.status}): ${serverErr}`, repo };
+      // `backthread sync` PRINTS this, so it gets the same treatment as every other
+      // rejection: a sentence, and the machine detail only behind `--verbose`. It used to
+      // relay the Function's own `error` field, which reads `not_a_member` / `repo_not_found`.
+      return {
+        status: 'read-failed',
+        detail: describeFailure({
+          lead: "the decision log didn't sync",
+          status: res.status,
+          payload: rec,
+          env,
+        }),
+        repo,
+      };
     }
 
     const flows = (Array.isArray(rec.flows) ? rec.flows : []) as ReadFlow[];

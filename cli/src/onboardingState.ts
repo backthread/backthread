@@ -15,6 +15,7 @@
 import { readConfig, type BackthreadConfig } from './config.js';
 import { resolveRepo, type RemoteReader, type RepoHandle } from './repo.js';
 import { buildOnboardingStateUrl } from './urls.js';
+import { describeFailure, describeTransportFailure } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // --- response contract (mirrors supabase/functions/onboarding-state/state.ts) ---
@@ -175,7 +176,18 @@ export async function fetchOnboardingState(
         body: JSON.stringify(repo ? { repo_slug: `${repo.owner}/${repo.name}` } : {}),
       });
     } catch (e) {
-      return { status: 'fetch-failed', detail: `onboarding request failed: ${(e as Error).message}`, repo: repo ?? undefined };
+      return {
+        status: 'fetch-failed',
+        detail: describeTransportFailure({
+          lead: "your setup status didn't load",
+          kind: (e as Error).name === 'AbortError' ? 'timeout' : 'unreachable',
+          route: 'onboarding-state',
+          attempts: 1,
+          cause: (e as Error).message,
+          env,
+        }),
+        repo: repo ?? undefined,
+      };
     }
 
     let payload: unknown;
@@ -186,16 +198,19 @@ export async function fetchOnboardingState(
     }
 
     if (!res.ok) {
+      // The one caller today discards this detail, and that is exactly why it goes
+      // through the shared renderer anyway: "nobody prints it" is a property of the
+      // CALLER, not of this string, and the string was being built ready to leak the
+      // moment a second caller decided to show it.
       const obj = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
-      const serverErr =
-        typeof obj.message === 'string' && obj.message.length > 0
-          ? obj.message
-          : 'error' in obj
-            ? String(obj.error)
-            : `HTTP ${res.status}`;
       return {
         status: 'fetch-failed',
-        detail: `onboarding rejected (${res.status}): ${serverErr}`,
+        detail: describeFailure({
+          lead: "your setup status didn't load",
+          status: res.status,
+          payload: obj,
+          env,
+        }),
         repo: repo ?? undefined,
       };
     }

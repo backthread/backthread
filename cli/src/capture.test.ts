@@ -470,10 +470,13 @@ test('derived decisions but no resolvable repo → nothing-to-capture (nothing t
 });
 
 test('inference failure → infer-failed (swallowed)', async () => {
-  const { fetch: fetchImpl } = stubFetch({ infer: () => ({ status: 401, body: { error: 'token revoked' } }) });
+  const { fetch: fetchImpl } = stubFetch({ infer: () => ({ status: 401, body: { error: 'token_revoked' } }) });
   const out = await runCapture(HOOK, deps({ fetchImpl }));
   assert.equal(out.status, 'infer-failed');
-  assert.match(out.detail, /token revoked/);
+  // The detail a person reads is a sentence about what did not happen — never the
+  // internal slug, which is an operator field behind `--verbose`.
+  assert.match(out.detail, /this session wasn't written up/);
+  assert.doesNotMatch(out.detail, /token_revoked/);
 });
 
 test('ingest persist failure → persist-failed (swallowed)', async () => {
@@ -483,7 +486,40 @@ test('ingest persist failure → persist-failed (swallowed)', async () => {
   });
   const out = await runCapture(HOOK, deps({ fetchImpl }));
   assert.equal(out.status, 'persist-failed');
-  assert.match(out.detail, /500/);
+  // `capture --manual` PRINTS this detail, so it is product copy: the reader learns their
+  // decisions were not saved, and does not read `persist_failed`.
+  assert.match(out.detail, /the write didn't complete on our side/);
+  assert.doesNotMatch(out.detail, /persist_failed/);
+});
+
+test('a raw upstream diagnostic never reaches the reader as product copy', async () => {
+  // ⚠ MEASURED LEAK. ingest-decisions pairs the slug with `rpcErr.message`, so before this
+  // slug was mapped a person read: "the decisions weren't saved — duplicate key value
+  // violates unique constraint \"decisions_pkey\"". The `failureBody` allow-list that
+  // normally makes this impossible does not run on this route.
+  const { fetch: fetchImpl } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }] } }),
+    ingest: () => ({
+      status: 500,
+      body: {
+        error: 'persist_failed',
+        message: 'duplicate key value violates unique constraint "decisions_pkey"',
+      },
+    }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.doesNotMatch(out.detail, /duplicate key|constraint|decisions_pkey/);
+  assert.match(out.detail, /the write didn't complete on our side/);
+});
+
+test('a plan-limit rejection tells the reader what to do about it', async () => {
+  const { fetch: fetchImpl } = stubFetch({
+    infer: () => ({ status: 200, body: { ok: true, persisted: false, decisions: [{ title: 'x' }] } }),
+    ingest: () => ({ status: 402, body: { error: 'plan_limit' } }),
+  });
+  const out = await runCapture(HOOK, deps({ fetchImpl }));
+  assert.match(out.detail, /used its capture allowance for now/);
+  assert.doesNotMatch(out.detail, /plan_limit/);
 });
 
 test('empty inference result → nothing-to-capture (no ingest POST)', async () => {
@@ -792,6 +828,19 @@ test('ARP-693 — fromTurnIndex at/after the end → nothing-to-capture, no infe
 });
 
 // --- ARP-1054: pre-send capture-scope skip ----------------------------------
+
+test('a scope skip is reported as a sentence, not as the enum value', async () => {
+  // ⚠ A MUTANT SURVIVED HERE. A table of sentences with nothing driving the call site is a
+  // table, not a behaviour: reverting `capture.ts` to `capture skipped (not_a_member)` was
+  // invisible to the whole suite. This drives the real runCapture.
+  const out = await runCapture(
+    HOOK,
+    deps({ checkScopeImpl: async () => ({ send: false, reason: 'not_a_member' }) }),
+  );
+  assert.equal(out.status, 'skipped-out-of-scope');
+  assert.match(out.detail, /you're not a member of the account that owns this repo/);
+  assert.doesNotMatch(out.detail, /not_a_member/);
+});
 
 test('scope skip (capture_paused) → skipped-out-of-scope; transcript never read, nothing sent, no nudge', async () => {
   const { fetch: fetchImpl, calls } = stubFetch({});

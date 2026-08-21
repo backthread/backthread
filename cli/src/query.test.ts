@@ -185,11 +185,14 @@ test('queryDecisions: no resolvable repo → no-repo, NO fetch', async () => {
 });
 
 test('queryDecisions: server rejection surfaces read-failed with detail + deep-link', async () => {
-  const { fetch } = stubFetch({ status: 403, body: { error: 'not authorized to read this repo' } });
+  const { fetch } = stubFetch({ status: 403, body: { error: 'repo_gate_failed' } });
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /403/);
-  assert.match(out.detail, /not authorized/);
+  // A body with no `reason` and no server-authored `message` says the status and stops.
+  // The machine slug is NOT product copy: it names one of our call sites and there is
+  // nothing a reader can do with it.
+  assert.match(out.detail, /The server rejected it \(HTTP 403\)/);
+  assert.doesNotMatch(out.detail, /repo_gate_failed/);
   // deep-link is still returned (repo was resolvable) so the agent can offer it.
   assert.equal(out.deepLink, 'https://app.backthread.dev/acme/app');
 });
@@ -204,7 +207,10 @@ test('queryDecisions: network throw surfaces read-failed (never throws)', async 
     }),
   );
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /ECONNREFUSED/);
+  // The transport error is an operator field like every other diagnostic — the reader is
+  // told Backthread could not be reached, and `--verbose` carries the cause.
+  assert.match(out.detail, /Backthread could not be reached/);
+  assert.doesNotMatch(out.detail, /ECONNREFUSED/);
 });
 
 test('queryDecisions: a timeout (AbortError) surfaces a clean read-failed', async () => {
@@ -219,7 +225,8 @@ test('queryDecisions: a timeout (AbortError) surfaces a clean read-failed', asyn
     }),
   );
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /timed out/);
+  assert.match(out.detail, /It took longer than 45s — try again\./);
+  assert.doesNotMatch(out.detail, /grounded-ask/);
 });
 
 // --- ARP-839: one automatic retry on timeout / network error / 5xx ------------
@@ -263,7 +270,12 @@ test('queryDecisions: two failing attempts surface read-failed with the attempt 
   const { fetch, calls } = flakyFetch(['network', 'network'], OK_BODY);
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /after 2 attempts/);
+  // ⚠ THE TICKET'S OWN EXAMPLE STRING LIVED ON THIS PATH. No body comes back when every
+  // attempt fails, so `describeFailure` never ran — and the line stayed
+  // `grounded-ask rejected (502) (after 2 attempts) — try again.`, a bare internal route
+  // name in front of a person, on the very command the ticket names.
+  assert.match(out.detail, /Backthread could not be reached/);
+  assert.doesNotMatch(out.detail, /grounded-ask/);
   assert.equal(calls(), 2, 'never more than one retry');
 });
 
@@ -275,7 +287,9 @@ test('queryDecisions: 4xx rejections do NOT retry (auth/bad-repo are not transie
   }) as typeof fetch;
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl }));
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /403/);
+  // The worker writes this one for the reader rather than emitting a slug, so it survives
+  // verbatim — `error` carries both kinds and only the machine kind is hidden.
+  assert.match(out.detail, /not authorized/);
   assert.equal(n, 1, '4xx must not be retried');
 });
 
@@ -283,7 +297,8 @@ test('queryDecisions: 200 with no answer degrades to read-failed (never an empty
   const { fetch } = stubFetch({ status: 200, body: { ok: true, answer: '' } });
   const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
   assert.equal(out.status, 'read-failed');
-  assert.match(out.detail, /no answer/);
+  assert.match(out.detail, /the answer came back empty/);
+  assert.doesNotMatch(out.detail, /grounded-ask/);
 });
 
 test('queryDecisions: token never appears in the outcome', async () => {
@@ -398,4 +413,33 @@ test('queryDecisions: non-git cwd (runner errors) → verbatim answer, no note',
   );
   assert.equal(out.status, 'ok');
   assert.equal(out.answer, OK_BODY.answer);
+});
+
+test('the route name and the transport cause are there for an operator who asks', async () => {
+  const out = await queryDecisions(
+    { question: 'q', repo: 'acme/app' },
+    deps({
+      env: { BACKTHREAD_VERBOSE: '1' } as NodeJS.ProcessEnv,
+      fetchImpl: (async () => {
+        throw new Error('ECONNREFUSED');
+      }) as typeof fetch,
+    }),
+  );
+  assert.match(out.detail, /route=grounded-ask/);
+  assert.match(out.detail, /attempts=2/);
+  assert.match(out.detail, /cause=ECONNREFUSED/);
+});
+
+test('a run of 5xx ends at the LAST response, so it is rendered from a real body', async () => {
+  // Worth pinning because it is why `describeTransportFailure` has only two kinds. The retry
+  // loop breaks on the final attempt with the response still in hand, so "every attempt was
+  // a 5xx" never reaches the no-body path — it reaches `describeFailure` with a body, which
+  // is strictly more informative.
+  const { fetch, calls } = flakyFetch([500, 500], OK_BODY);
+  const out = await queryDecisions({ question: 'q', repo: 'acme/app' }, deps({ fetchImpl: fetch }));
+  assert.equal(out.status, 'read-failed');
+  assert.match(out.detail, /The server rejected it \(HTTP 500\)/);
+  assert.match(out.detail, /github\.com\/backthread\/backthread\/issues/);
+  assert.doesNotMatch(out.detail, /grounded-ask/);
+  assert.equal(calls(), 2);
 });

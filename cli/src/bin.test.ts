@@ -248,6 +248,61 @@ test('`backthread how <question>` strips --cwd, relays the question, prints the 
   assert.equal(result, 0);
 });
 
+// --- the global --verbose flag ------------------------------------------------------
+
+test('`--verbose` is consumed globally and never becomes part of the question', async () => {
+  // Measured failure mode if it were not stripped: `backthread how why is auth split
+  // --verbose` joins its free text into the question, so the flag would be ASKED.
+  let seen: unknown;
+  const env = {} as NodeJS.ProcessEnv;
+  await captureConsole(() =>
+    main(['how', '--cwd', '/repo', 'why', 'is', 'auth', 'split', '--verbose'], {
+      env,
+      queryDecisionsImpl: async (input) => {
+        seen = input;
+        return { status: 'ok', detail: '', answer: 'a' };
+      },
+    }),
+  );
+  assert.deepEqual(seen, { question: 'why is auth split', cwd: '/repo' });
+  assert.equal(env.BACKTHREAD_VERBOSE, '1');
+});
+
+test('without `--verbose` the operator switch stays off', async () => {
+  const env = {} as NodeJS.ProcessEnv;
+  await captureConsole(() =>
+    main(['how', 'q'], {
+      env,
+      queryDecisionsImpl: async () => ({ status: 'ok', detail: '', answer: 'a' }),
+    }),
+  );
+  assert.equal(env.BACKTHREAD_VERBOSE, undefined);
+});
+
+test('`--verbose` works on a subcommand that takes its own flags', async () => {
+  // It is consumed BEFORE dispatch, so it cannot collide with a per-command parser —
+  // and, just as importantly, cannot be mistaken for one of that command's own flags.
+  const env = {} as NodeJS.ProcessEnv;
+  let seen: unknown;
+  await captureConsole(() =>
+    main(['learn', '--answer', 'q1', '--verbose', '--text', 'because'], {
+      env,
+      answerLessonImpl: async (input) => {
+        seen = input;
+        return { status: 'ok', detail: 'recorded' };
+      },
+    }),
+  );
+  assert.equal(env.BACKTHREAD_VERBOSE, '1');
+  assert.deepEqual(seen, { questionId: 'q1', answer: 'because', outcome: null });
+});
+
+test('`backthread help` documents the global flag it accepts', async () => {
+  const { out } = await captureConsole(() => main(['help']));
+  assert.match(out, /--verbose/);
+  assert.match(out, /BACKTHREAD_VERBOSE=1/);
+});
+
 test('`backthread ask` is an alias for `how`', async () => {
   let called = false;
   const { result } = await captureConsole(() =>

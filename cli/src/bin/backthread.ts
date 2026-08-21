@@ -135,6 +135,13 @@ Manage
   backthread version            Print the installed version (also --version, -v)
   backthread help               Show this message (also --help, -h)
 
+Global flags
+  --verbose               When something fails, also print the operator detail — the
+                          HTTP status, our internal error code, the retry reason and the
+                          database's own SQLSTATE. Off by default: those name our call
+                          sites, not anything you can act on. (Also BACKTHREAD_VERBOSE=1,
+                          which the MCP tools read too.)
+
 Your source never leaves your machine unredacted — it's checkable in this OSS repo.
 Docs:     https://app.backthread.dev
 Security: https://backthread.dev/security`;
@@ -251,9 +258,35 @@ export interface MainDeps {
   runUpdateImpl?: typeof runUpdate;
   /** Test seam for `doctor` (reads config/hook files, fetch + npm). Defaults to runDoctor. */
   runDoctorImpl?: typeof runDoctor;
+  /**
+   * Where the global `--verbose` flag is recorded. Defaults to the real environment —
+   * a test seam so a suite can observe the switch without mutating `process.env`.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
-export async function main(argv: string[], deps: MainDeps = {}): Promise<number | null> {
+/**
+ * `--verbose` is GLOBAL and is consumed here, before dispatch — it is stripped from the
+ * arg list and turned into `BACKTHREAD_VERBOSE=1`.
+ *
+ * WHY AN ENV VAR AND NOT A PARSED OPTION THREADED THROUGH EVERY CALL. The surface that
+ * most needs the operator detail is the MCP `query` tool, which has no argv at all: the
+ * host agent calls it, nobody types it. An env var is reachable from both, so the flag and
+ * the variable are one switch rather than two that can disagree. Threading a boolean
+ * through six call sites would also have been six chances to forget one — which is the
+ * failure mode this whole change exists to stop.
+ *
+ * STRIPPING IS NOT COSMETIC: `backthread how why is auth split --verbose` joins its free
+ * text into the question, so an unconsumed flag would be asked as part of the question.
+ */
+function consumeVerboseFlag(argv: string[], env: NodeJS.ProcessEnv): string[] {
+  if (!argv.includes('--verbose')) return argv;
+  env.BACKTHREAD_VERBOSE = '1';
+  return argv.filter((a) => a !== '--verbose');
+}
+
+export async function main(rawArgv: string[], deps: MainDeps = {}): Promise<number | null> {
+  const argv = consumeVerboseFlag(rawArgv, deps.env ?? process.env);
   const [command, ...rest] = argv;
   const onboarding = deps.runOnboardingImpl ?? runOnboarding;
 

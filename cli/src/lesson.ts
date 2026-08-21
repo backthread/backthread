@@ -41,6 +41,7 @@ import { readConfig, type BackthreadConfig } from './config.js';
 import { type RemoteReader, type RepoHandle } from './repo.js';
 import { resolveQueryRepo } from './query.js';
 import { buildLessonStartUrl, buildLessonAnswerUrl } from './urls.js';
+import { describeFailure, readServerMessage, withOperatorDetail } from './failureCopy.js';
 import { versionHeaders } from './version.js';
 
 // The server races its own build against a ~55s ceiling (three model phases on a
@@ -237,9 +238,14 @@ export async function startLesson(
     if (res.status === 409) {
       return {
         status: 'in-progress',
-        detail:
-          serverMessage(rec) ??
-          'a lesson is already being prepared for this repo — try again in a moment.',
+        // The 409 body carries a worker-AUTHORED sentence, not a relayed diagnostic —
+        // render it verbatim. Reading only `message` (never the `error` slug) is the
+        // point: the old helper fell back to the slug and printed `lesson_in_progress`.
+        detail: withOperatorDetail(
+          readServerMessage(rec) ??
+            'a lesson is already being prepared for this repo — try again in a moment.',
+          { status: res.status, payload: rec, env },
+        ),
         repo,
         ...(upgrade ? { upgrade } : {}),
       };
@@ -247,7 +253,15 @@ export async function startLesson(
     if (res.status < 200 || res.status >= 300) {
       return {
         status: 'failed',
-        detail: `lesson start rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ''}`,
+        // One renderer for every route that speaks the relayed-failure contract
+        // (failureCopy.ts). The reader gets the retry verdict the server sent in
+        // `reason`; the slug and the SQLSTATE stay behind `--verbose`.
+        detail: describeFailure({
+          lead: "the lesson didn't start",
+          status: res.status,
+          payload: rec,
+          env,
+        }),
         repo,
         ...(upgrade ? { upgrade } : {}),
       };
@@ -321,7 +335,14 @@ export async function answerLesson(
     if (res.status < 200 || res.status >= 300) {
       return {
         status: 'failed',
-        detail: `answer rejected (${res.status})${serverMessage(rec) ? `: ${serverMessage(rec)}` : ''}`,
+        // "wasn't recorded" rather than "failed": the one thing somebody who just
+        // answered wants to know is whether their answer counted.
+        detail: describeFailure({
+          lead: "your answer wasn't recorded",
+          status: res.status,
+          payload: rec,
+          env,
+        }),
         ...(upgrade ? { upgrade } : {}),
       };
     }
@@ -400,12 +421,6 @@ async function postJson(
   } finally {
     clearTimeout(timer);
   }
-}
-
-function serverMessage(rec: Record<string, unknown>): string | null {
-  if (typeof rec.message === 'string' && rec.message.length > 0) return rec.message;
-  if (typeof rec.error === 'string' && rec.error.length > 0) return rec.error;
-  return null;
 }
 
 function readUpgrade(header: string | null, rec: Record<string, unknown>): string | undefined {
