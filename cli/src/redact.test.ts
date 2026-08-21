@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CODE_REDACTION,
+  HARVESTED_PATH_EXTENSIONS,
   parseJsonl,
   redactCodeFences,
   redactTranscript,
@@ -221,12 +222,326 @@ test('sessionPaths drops MID-path .. traversal that escapes the repo (defense-in
   assert.ok(sessionPaths(records, '/repo').every((p) => !p.split(/[\\/]/).includes('..')));
 });
 
-test('sessionPaths does NOT harvest Codex shell command arrays (a command is not a file path)', () => {
+// --- shell-command path harvest ----------------------------------------------
+//
+// Two things gate a path scraped out of a shell command, and the tests below are
+// split along that line on purpose:
+//   1. the STRING rules (extension, a directory separator, the token grammar) —
+//      cheap, and enough to reject a glob or a doubled extension;
+//   2. the `exists` PREDICATE — the only thing that can reject a token that is
+//      perfectly well-formed and still not a file in this repo (`cd /etc && cat
+//      app/secrets.json`, a scheme-less URL, a string literal inside a heredoc).
+// Where a case is settled by (2), the test says so by asserting the predicate was
+// actually consulted — otherwise it would pass just as well if the regex had
+// silently rejected the token, and would stop guarding anything the day the regex
+// changed.
+
+/** A Claude Code assistant record carrying one Bash tool_use — the real shape. */
+const bashRecord = (command: string) => ({
+  type: 'assistant',
+  message: { content: [{ type: 'tool_use', name: 'Bash', input: { command, description: 'run it' } }] },
+});
+
+/** An `exists` predicate backed by a fixed file list — no filesystem, still pure. */
+const repoWith = (...files: string[]) => ({ exists: (p: string) => files.includes(p) });
+
+/** Same, but records every path it was asked about, so a test can prove it ran. */
+function spyRepo(...files: string[]) {
+  const asked: string[] = [];
+  return {
+    asked,
+    opts: {
+      exists: (p: string) => {
+        asked.push(p);
+        return files.includes(p);
+      },
+    },
+  };
+}
+
+test('sessionPaths emits NO shell-derived path when no exists predicate is given (fail closed)', () => {
+  // A consumer that hasn't opted in must not receive unverified guesses. The
+  // path-NAMED inputs are unaffected — they are an explicit act by the agent.
+  const records = [
+    bashRecord('cat src/real.ts'),
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/repo/src/named.ts' } }] } },
+  ];
+  assert.deepEqual(sessionPaths(records, '/repo'), ['src/named.ts']);
+  assert.deepEqual(sessionPaths(records, '/repo', {}), ['src/named.ts']);
+  assert.deepEqual(sessionPaths(records, '/repo', repoWith('src/real.ts')), ['src/named.ts', 'src/real.ts']);
+});
+
+test('sessionPaths harvests Codex shell command ARRAYS through the same fence', () => {
+  // Codex passes the shell tool an argv array (["bash","-lc","…"]); we join it and
+  // run the same token scan as a Claude Code Bash command string. This REVERSES the
+  // old "a command is not a file path" rule — the file a shell call touches is named
+  // only inside its command, and skipping it left ~half of all sessions unanchored.
   const records = [
     {
       type: 'response_item',
-      payload: { type: 'function_call', name: 'shell', arguments: JSON.stringify({ command: ['cat', '/repo/secret.ts'] }) },
+      payload: {
+        type: 'function_call',
+        name: 'shell',
+        arguments: JSON.stringify({ command: ['bash', '-lc', 'sed -n 1,40p /repo/src/auth/rls.ts'] }),
+      },
     },
   ];
-  assert.deepEqual(sessionPaths(records, '/repo'), []);
+  assert.deepEqual(sessionPaths(records, '/repo', repoWith('src/auth/rls.ts')), ['src/auth/rls.ts']);
+});
+
+test('sessionPaths harvests the repo paths a Bash command names', () => {
+  const records = [bashRecord('git diff -- worker/src/ciPayload.ts scripts/ingest/classify/env-vars.ts')];
+  const opts = repoWith('worker/src/ciPayload.ts', 'scripts/ingest/classify/env-vars.ts');
+  assert.deepEqual(sessionPaths(records, '/repo', opts), [
+    'scripts/ingest/classify/env-vars.ts',
+    'worker/src/ciPayload.ts',
+  ]);
+});
+
+test('sessionPaths matches the LONGEST extension: package.json is never package.js', () => {
+  // The trailing lookahead is what forces this, NOT the order of the extension list
+  // (every shorter extension is shadowed by a longer one that continues with a word
+  // character, so the short match is rejected and the engine backtracks). Both files
+  // are claimed to exist, so nothing but the token grammar can decide the outcome.
+  const records = [bashRecord('cat cli/package.json && node scripts/x.mjs')];
+  const opts = repoWith('cli/package.json', 'cli/package.js', 'scripts/x.mjs');
+  assert.deepEqual(sessionPaths(records, '/repo', opts), ['cli/package.json', 'scripts/x.mjs']);
+  // The same guard from the other side: a doubled extension is not a truncated one.
+  assert.deepEqual(sessionPaths([bashRecord('gzip dist/bundle.js.map')], '/repo', repoWith('dist/bundle.js')), []);
+});
+
+test('sessionPaths relativizes an ABSOLUTE path named inside a Bash command', () => {
+  const records = [bashRecord("rg -n 'sessionPaths' /repo/packages/redact/src/index.ts")];
+  assert.deepEqual(sessionPaths(records, '/repo', repoWith('packages/redact/src/index.ts')), [
+    'packages/redact/src/index.ts',
+  ]);
+});
+
+test('sessionPaths drops a Bash-named path OUTSIDE the repo root (never leaks a machine path)', () => {
+  const records = [
+    bashRecord('cat /etc/app/secrets.json /Users/me/other-repo/src/a.ts /repo-other/b.ts && cat /repo/keep.ts'),
+  ];
+  // Claim EVERY one of them exists: the root fence, not the predicate, must drop them.
+  const spy = spyRepo('keep.ts', 'app/secrets.json', 'src/a.ts', 'b.ts');
+  assert.deepEqual(sessionPaths(records, '/repo', spy.opts), ['keep.ts']);
+  assert.deepEqual(spy.asked, ['keep.ts'], 'a foreign absolute must never even reach the predicate');
+  // With no resolvable root at all, every absolute is skipped outright.
+  assert.deepEqual(sessionPaths(records, undefined, spy.opts), []);
+});
+
+test('sessionPaths drops a ../ escape and a ~ home path named inside a Bash command', () => {
+  const records = [bashRecord('cat ../../etc/secrets.json ~/.config/creds.json src/keep.ts')];
+  const opts = repoWith('src/keep.ts', '../../etc/secrets.json', '.config/creds.json', 'etc/secrets.json');
+  assert.deepEqual(sessionPaths(records, '/repo', opts), ['src/keep.ts']);
+  // Belt and braces: nothing emitted ever contains a traversal segment.
+  assert.ok(sessionPaths(records, '/repo', opts).every((p) => !p.split('/').includes('..')));
+});
+
+test('sessionPaths drops an scp-style host:/path argument', () => {
+  // `:` is not in the segment class, so the token starts after it — as an ABSOLUTE
+  // path, which the root fence then rejects for being outside the repo. Claim it
+  // exists so only the fence can be what drops it.
+  const records = [bashRecord('scp deploy@prod-host:/srv/secrets/creds.json .')];
+  const spy = spyRepo('srv/secrets/creds.json');
+  assert.deepEqual(sessionPaths(records, '/repo', spy.opts), []);
+  assert.deepEqual(spy.asked, []);
+});
+
+test('sessionPaths drops glob/wildcard tokens in a Bash command (a glob is not a file)', () => {
+  const records = [
+    bashRecord('rm -rf dist/*.js && prettier "src/**/*.ts" && ls src/a[0].ts src/{a,b}.ts'),
+  ];
+  // Every one of these claims to exist; the token grammar has to be what rejects them.
+  const spy = spyRepo('dist/*.js', 'src/**/*.ts', 'src/a[0].ts', 'src/{a,b}.ts', 'src/a.ts', 'src/b.ts');
+  assert.deepEqual(sessionPaths(records, '/repo', spy.opts), []);
+  assert.deepEqual(spy.asked, []);
+});
+
+test('sessionPaths does NOT harvest a URL out of a Bash command — with OR without a scheme', () => {
+  // A `https://` URL is settled by the root fence: it matches at the second slash as
+  // the absolute path `/example.com/x.json`, which is outside the repo. A SCHEME-LESS
+  // one is not — `internal-api.acme.corp/v3/customers/export.json` is a perfectly
+  // well-formed relative path and used to be emitted verbatim, exfiltrating an
+  // internal hostname and API route. Only the existence check rejects it, so the
+  // assertion below proves the predicate was the thing that ran.
+  const withScheme = [bashRecord('curl -sS https://example.com/x.json -o out.json')];
+  assert.deepEqual(sessionPaths(withScheme, '/repo', repoWith()), []);
+
+  const schemeless = [
+    bashRecord('curl internal-api.acme.corp/v3/customers/export.json && gh api repos/acme/private-repo/contents/infra/prod-secrets.yaml'),
+  ];
+  const spy = spyRepo('src/keep.ts');
+  assert.deepEqual(sessionPaths(schemeless, '/repo', spy.opts), []);
+  assert.deepEqual(spy.asked, [
+    'internal-api.acme.corp/v3/customers/export.json',
+    'repos/acme/private-repo/contents/infra/prod-secrets.yaml',
+  ]);
+});
+
+test('sessionPaths drops a file reached after a `cd` OUT of the repo', () => {
+  // THE privacy case. `cd /etc` then a bare relative filename produces a token the
+  // string fence cannot fault — it looks exactly like an in-repo path. The `/etc`
+  // and `~` in the same command are correctly dropped and then walked around by the
+  // relative name that follows. Existence is the only thing that separates them.
+  const records = [
+    bashRecord('cd /etc && cat app/secrets.json'),
+    bashRecord('cd /Users/jb/personal-notes && rg -n salary hr/comp-bands-2026.md'),
+    bashRecord('cat src/keep.ts'),
+  ];
+  const spy = spyRepo('src/keep.ts');
+  assert.deepEqual(sessionPaths(records, '/repo', spy.opts), ['src/keep.ts']);
+  assert.deepEqual(spy.asked, ['app/secrets.json', 'hr/comp-bands-2026.md', 'src/keep.ts']);
+});
+
+test('sessionPaths drops path-shaped STRING LITERALS inside a heredoc', () => {
+  // Writing a file with a heredoc puts program text in the command. A string literal
+  // in that text is program CONTENT, not a file the session touched — and prose in a
+  // heredoc'd Markdown doc is not one either. The file being WRITTEN is real; the
+  // things it merely mentions are not.
+  const records = [
+    bashRecord(
+      [
+        "cat > src/loader.ts <<'EOF'",
+        "const CUSTOMERS = 'data/customers/pii.json';",
+        "import { parse } from './vendor/fastcsv/index.js';",
+        'EOF',
+      ].join('\n'),
+    ),
+    bashRecord(
+      [
+        "cat > docs/postmortem.md <<'EOF'",
+        'The export at customers/acme-corp/pii-export-2026-08.json was world-readable.',
+        'See also ops/runbooks/incident-2026-08.md for the timeline.',
+        'EOF',
+      ].join('\n'),
+    ),
+  ];
+  const opts = repoWith('src/loader.ts', 'docs/postmortem.md');
+  assert.deepEqual(sessionPaths(records, '/repo', opts), ['docs/postmortem.md', 'src/loader.ts']);
+});
+
+test('sessionPaths excludes .git/ and node_modules/ even though they exist on disk', () => {
+  // They pass every other gate and are still never part of the system anyone learns.
+  const records = [
+    bashRecord('cat .git/hooks/pre-commit.sh node_modules/lodash/lodash.js vendor/node_modules/x/y.js src/keep.ts'),
+  ];
+  const opts = repoWith(
+    '.git/hooks/pre-commit.sh',
+    'node_modules/lodash/lodash.js',
+    'vendor/node_modules/x/y.js',
+    'src/keep.ts',
+  );
+  assert.deepEqual(sessionPaths(records, '/repo', opts), ['src/keep.ts']);
+});
+
+test('sessionPaths caps the LENGTH of a shell-derived path', () => {
+  // A base64 blob presents as an enormous "path" (`+` and `/` are both base64 chars).
+  // Both of these claim to exist, so only the cap can be what drops the long one.
+  const ok = `src/${'a'.repeat(150)}.ts`;
+  const tooLong = `src/${'a'.repeat(400)}.ts`;
+  const records = [bashRecord(`cat ${ok} ${tooLong}`)];
+  assert.deepEqual(sessionPaths(records, '/repo', repoWith(ok, tooLong)), [ok]);
+});
+
+test('sessionPaths caps the COUNT of shell-derived paths, in encounter order', () => {
+  // Named so encounter order and alphabetical order DISAGREE: the `z` files are seen
+  // first, the `a` files last. Truncating after the sort would keep the `a` files and
+  // throw away everything actually read first — which is how alphabetically-early
+  // junk crowds out real source paths. The cap must bite before the sort.
+  const early = Array.from({ length: 400 }, (_, i) => `src/z${String(i).padStart(3, '0')}.ts`);
+  const late = Array.from({ length: 5 }, (_, i) => `src/a${String(i).padStart(3, '0')}.ts`);
+  const all = [...early, ...late];
+  const records = [bashRecord(`cat ${all.join(' ')}`)];
+  const out = sessionPaths(records, '/repo', repoWith(...all));
+
+  assert.equal(out.length, 200, 'capped');
+  assert.ok(out.every((p) => p.startsWith('src/z')), 'kept what was encountered first, not what sorts first');
+  assert.equal(out[0], 'src/z000.ts');
+  // The cap is on SHELL paths only — a path-named input still gets through beside it.
+  const withNamed = [
+    ...records,
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/repo/src/aaa-named.ts' } }] } },
+  ];
+  assert.ok(sessionPaths(withNamed, '/repo', repoWith(...all)).includes('src/aaa-named.ts'));
+});
+
+test('sessionPaths requires a directory separator (a bare filename is too ambiguous)', () => {
+  // `index.ts` exists in every package — with no directory we can't attribute it,
+  // so a single-segment token is dropped rather than guessed at.
+  const records = [bashRecord('npx tsc index.ts && cat README.md'), bashRecord('cat src/index.ts')];
+  const spy = spyRepo('index.ts', 'README.md', 'src/index.ts');
+  assert.deepEqual(sessionPaths(records, '/repo', spy.opts), ['src/index.ts']);
+  assert.deepEqual(spy.asked, ['src/index.ts']);
+});
+
+test('sessionPaths is extension-gated on Bash tokens, by the exported list', () => {
+  assert.ok(HARVESTED_PATH_EXTENSIONS.includes('ts'));
+  assert.ok(HARVESTED_PATH_EXTENSIONS.includes('json'));
+  assert.ok(!HARVESTED_PATH_EXTENSIONS.includes('pem'));
+  const records = [bashRecord('cat secrets/prod.pem secrets/id_rsa.key config/app.yaml')];
+  const spy = spyRepo('secrets/prod.pem', 'secrets/id_rsa.key', 'config/app.yaml');
+  assert.deepEqual(sessionPaths(records, '/repo', spy.opts), ['config/app.yaml']);
+  assert.deepEqual(spy.asked, ['config/app.yaml'], 'an un-listed extension never reaches the predicate');
+});
+
+test('sessionPaths harvests a Bash command from a REAL Claude Code transcript shape', () => {
+  // The record shape a Claude Code .jsonl actually carries: an assistant record
+  // whose message.content holds tool_use blocks, Bash among them, with the file
+  // named only inside `input.command`. Interleaved with the prose + Read blocks a
+  // real session mixes in. Hand-written — no captured transcript content.
+  const records = [
+    { type: 'user', sessionId: 'sess-42', message: { content: 'why did the digest send twice?' } },
+    {
+      type: 'assistant',
+      timestamp: '2026-08-14T09:12:00Z',
+      message: {
+        content: [
+          { type: 'thinking', thinking: 'Check the cron gate first.' },
+          {
+            type: 'tool_use',
+            id: 'toolu_01',
+            name: 'Bash',
+            input: {
+              command: "cd /repo && rg -n 'sendDigest' worker/src/digest/send.ts | head -20",
+              description: 'Find the send entrypoint',
+            },
+          },
+        ],
+      },
+    },
+    // The paired tool_result the fence drops wholesale — never a path source.
+    {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_01', content: '42: export async function sendDigest() {' }] },
+    },
+    {
+      type: 'assistant',
+      timestamp: '2026-08-14T09:12:30Z',
+      message: {
+        content: [
+          { type: 'text', text: 'The per-timezone gate runs twice on a DST boundary.' },
+          { type: 'tool_use', id: 'toolu_02', name: 'Read', input: { file_path: '/repo/worker/src/cron.ts' } },
+          {
+            type: 'tool_use',
+            id: 'toolu_03',
+            name: 'Bash',
+            input: {
+              command: 'git add worker/src/digest/send.ts worker/src/cron.ts && git commit -m "fix: gate once per tz"',
+              description: 'Commit the fix',
+            },
+          },
+        ],
+      },
+    },
+  ];
+
+  const opts = repoWith('worker/src/digest/send.ts', 'worker/src/cron.ts');
+  assert.deepEqual(sessionPaths(records, '/repo', opts), [
+    'worker/src/cron.ts',
+    'worker/src/digest/send.ts',
+  ]);
+  // The fence still holds on the same records: no command, no tool output, no code.
+  const blob = JSON.stringify(redactTranscript(records).turns);
+  assert.doesNotMatch(blob, /rg -n/);
+  assert.doesNotMatch(blob, /export async function sendDigest/);
 });

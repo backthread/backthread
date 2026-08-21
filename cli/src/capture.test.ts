@@ -153,6 +153,60 @@ const TRANSCRIPT_WITH_PATHS = [
   }),
 ].join('\n');
 
+// A session whose only file evidence is inside Bash COMMAND strings — the shape that
+// now dominates real transcripts. One command names a file that exists in the working
+// tree, one names a file reached after `cd`-ing out of the repo. runCapture is what
+// supplies the existence predicate (backed by fs.existsSync in production), so this is
+// the test that the wiring is actually connected — sessionPaths alone would emit
+// nothing here, and would emit BOTH paths if the predicate were passed but ignored.
+const TRANSCRIPT_WITH_BASH = [
+  JSON.stringify({ type: 'user', sessionId: 'sess-11', message: { content: 'why is the queue gated?' } }),
+  JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-08-14T09:00:00Z',
+    message: {
+      content: [
+        { type: 'text', text: 'The gate keeps a retry from double-sending.' },
+        { type: 'tool_use', name: 'Bash', input: { command: "rg -n 'gate' src/queue/gate.ts" } },
+        { type: 'tool_use', name: 'Bash', input: { command: 'cd /etc && cat app/secrets.json' } },
+      ],
+    },
+  }),
+].join('\n');
+
+test('harvests file paths out of Bash commands, gated on the file existing in the repo', async () => {
+  let sentBody: unknown = null;
+  const asked: string[] = [];
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'gate the queue' }] } };
+    },
+  });
+
+  const out = await runCapture(
+    HOOK,
+    deps({
+      fetchImpl,
+      readFileImpl: async () => TRANSCRIPT_WITH_BASH,
+      // Only the in-repo file exists. Asserted absolute, joined off the hook's cwd.
+      fileExistsImpl: (abs: string) => {
+        asked.push(abs);
+        return abs === '/work/app/src/queue/gate.ts';
+      },
+    }),
+  );
+  assert.equal(out.status, 'persisted-by-server');
+
+  const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
+  assert.deepEqual(filePaths, ['src/queue/gate.ts']);
+  // The `cd`-escape token really was produced and really was rejected by the check —
+  // not silently missed by the scanner, which would make this test vacuous.
+  assert.ok(asked.includes('/work/app/app/secrets.json'));
+  // And nothing about the foreign file left the machine.
+  assert.doesNotMatch(JSON.stringify(sentBody), /secrets\.json/);
+});
+
 test('harvests sessionPaths (cwd-relative) and includes filePaths in the /infer-decisions body', async () => {
   let sentBody: unknown = null;
   const { fetch: fetchImpl } = stubFetch({
@@ -181,8 +235,11 @@ test('code-less session (no tool_use paths) → persist leg omits filePaths (una
   });
 
   // TRANSCRIPT_JSONL is a planning/discussion session: its only tool_use is a Bash
-  // COMMAND (not a file path), so sessionPaths yields []. The decision is still kept
-  // + persisted (the server marks it unanchored). The body must NOT carry filePaths.
+  // command (`cat ~/.ssh/id_rsa`). Shell commands ARE path-harvested now, but this one
+  // names nothing harvestable — `.ssh/id_rsa` carries no source/doc extension, and a
+  // `~` home path is foreign to the repo either way — so sessionPaths still yields [].
+  // The decision is still kept + persisted (the server marks it unanchored), and the
+  // body must NOT carry filePaths.
   const out = await runCapture(HOOK, deps({ fetchImpl }));
   assert.equal(out.status, 'persisted-by-server');
   assert.equal((inferBody as { persist?: unknown }).persist, true);

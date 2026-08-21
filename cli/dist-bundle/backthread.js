@@ -7118,8 +7118,8 @@ function cliVersion() {
 var cachedRedact = null;
 function redactVersion() {
   if (cachedRedact !== null) return cachedRedact;
-  if ("0.1.3".length > 0) {
-    cachedRedact = "0.1.3";
+  if ("0.1.4".length > 0) {
+    cachedRedact = "0.1.4";
     return cachedRedact;
   }
   cachedRedact = readRedactVersionFromDisk();
@@ -8042,6 +8042,8 @@ function configHint(env) {
 
 // src/capture.ts
 import { readFile as readFile10 } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join as join12 } from "node:path";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -8168,16 +8170,58 @@ function relativizeUnder(abs, root) {
   if (!abs.startsWith(prefix)) return null;
   return stripLeadingSlashes(abs.slice(trimmedRoot.length));
 }
+var HARVESTED_PATH_EXTENSIONS = [
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "mjs",
+  "cjs",
+  "css",
+  "scss",
+  "html",
+  "json",
+  "sql",
+  "md",
+  "yml",
+  "yaml",
+  "sh",
+  "toml",
+  "py",
+  "rb",
+  "ex",
+  "exs",
+  "php",
+  "kt",
+  "dart",
+  "swift",
+  "java",
+  "go"
+];
+var EXT_ALTERNATION = HARVESTED_PATH_EXTENSIONS.join("|");
+var MAX_SHELL_PATH_CHARS = 200;
+var MAX_SHELL_PATHS = 200;
+var SHELL_EXCLUDED_DIRS = /* @__PURE__ */ new Set([".git", "node_modules"]);
+var SHELL_PATH_TOKEN = new RegExp(
+  `(?<![\\w.@~$+/\\\\-])/?[\\w.@~+-]+(?:/[\\w.@~+-]+)+\\.(?:${EXT_ALTERNATION})(?![\\w.@~+/\\\\-])`,
+  "g"
+);
 function pathsFromRecord(rec) {
   if (!rec || typeof rec !== "object") return [];
   const out = [];
   const r = rec;
+  const pushFromCommand = (command) => {
+    const text = typeof command === "string" ? command : Array.isArray(command) ? command.filter((c) => typeof c === "string").join(" ") : null;
+    if (text === null || text.length === 0) return;
+    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push({ raw: m[0], fromShell: true });
+  };
   const pushFromInput = (input) => {
     if (!input || typeof input !== "object") return;
     const i = input;
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
-      if (typeof v === "string" && v.trim().length > 0) out.push(v.trim());
+      if (typeof v === "string" && v.trim().length > 0) out.push({ raw: v.trim(), fromShell: false });
     }
+    pushFromCommand(i.command);
   };
   const content = r.message?.content;
   if (Array.isArray(content)) {
@@ -8210,22 +8254,36 @@ function codexSessionCwd(records) {
   }
   return null;
 }
-function sessionPaths(records, repoRoot) {
+function sessionPaths(records, repoRoot, options) {
   const root = (repoRoot && repoRoot.trim().length > 0 ? repoRoot.trim() : codexSessionCwd(records)) ?? null;
+  const exists = options?.exists;
   const seen = /* @__PURE__ */ new Set();
+  let shellPathCount = 0;
   for (const rec of records) {
-    for (const p of pathsFromRecord(rec)) {
+    for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
+      if (fromShell && exists === void 0) continue;
+      if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
+      let norm;
       if (isAbsolute(p)) {
         if (root === null) continue;
         const rel = relativizeUnder(p, root);
         if (rel === null || rel.length === 0) continue;
-        const norm = normalizeRepoRelative(rel);
-        if (norm === null || norm.length === 0) continue;
-        seen.add(norm);
+        norm = normalizeRepoRelative(rel);
       } else if (!isForeignRelativePath(p)) {
-        const norm = normalizeRepoRelative(p.replace(/^(?:\.\/)+/, ""));
-        if (norm !== null && norm.length > 0) seen.add(norm);
+        norm = normalizeRepoRelative(p.replace(/^(?:\.\/)+/, ""));
+      } else {
+        continue;
       }
+      if (norm === null || norm.length === 0) continue;
+      if (fromShell) {
+        if (norm.split("/").some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
+        if (!exists(norm)) continue;
+        if (!seen.has(norm)) {
+          if (shellPathCount >= MAX_SHELL_PATHS) continue;
+          shellPathCount += 1;
+        }
+      }
+      seen.add(norm);
     }
   }
   return Array.from(seen).sort();
@@ -10009,6 +10067,7 @@ async function runCapture(input, deps = {}) {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m) => console.error(m));
   const doReadFile = deps.readFileImpl ?? ((p) => readFile10(p, "utf8"));
+  const doFileExists = deps.fileExistsImpl ?? existsSync;
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
     void ensureAuth({ env: e }).catch(() => {
@@ -10056,7 +10115,16 @@ async function runCapture(input, deps = {}) {
     const records = parseJsonl(rawTranscript);
     const redacted = redactTranscript(records);
     const decidedAt = sessionTimestamp(records) ?? void 0;
-    const filePaths = sessionPaths(records, input.cwd);
+    const existsCache = /* @__PURE__ */ new Map();
+    const filePaths = sessionPaths(records, input.cwd, {
+      exists: (rel) => {
+        const hit = existsCache.get(rel);
+        if (hit !== void 0) return hit;
+        const ok = input.cwd !== void 0 && doFileExists(join12(input.cwd, rel));
+        existsCache.set(rel, ok);
+        return ok;
+      }
+    });
     const sessionId = redacted.sessionId ?? input.session_id ?? null;
     const turnCount = redacted.turns.length;
     const fromTurn = deps.fromTurnIndex ?? 0;
@@ -10225,7 +10293,7 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
 
 // src/fromHook.ts
 import { spawn as spawn2 } from "node:child_process";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 import { readFile as readFile11, writeFile as writeFile8, mkdir as mkdir8, chmod as chmod7 } from "node:fs/promises";
 var KNOWN_AGENTS = /* @__PURE__ */ new Set([
   "claude-code",
@@ -10267,7 +10335,7 @@ function normalizeHookInput(payload, _agent) {
   return out;
 }
 function captureStatePath(env = process.env) {
-  return join12(configDir(env), "capture-sessions.json");
+  return join13(configDir(env), "capture-sessions.json");
 }
 var MAX_REMEMBERED = 200;
 function parseState2(raw) {
@@ -34869,11 +34937,11 @@ async function startMcpServer(deps = {}) {
 }
 
 // src/routingStats.ts
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 import { readFile as readFile12, writeFile as writeFile9, mkdir as mkdir9, chmod as chmod8 } from "node:fs/promises";
 var STATS_FILE = "routing-stats.json";
 function statsPath(env) {
-  return join13(configDir(env), STATS_FILE);
+  return join14(configDir(env), STATS_FILE);
 }
 async function readRoutingStats(deps = {}) {
   const env = deps.env ?? process.env;
@@ -34974,21 +35042,21 @@ async function runSessionStart(input = {}, deps = {}) {
 // src/localGraph.ts
 import { statSync } from "node:fs";
 import { readdirSync } from "node:fs";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 
 // src/localCache.ts
 import { mkdir as mkdir10, readFile as readFile13, writeFile as writeFile10, rename } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync as existsSync2 } from "node:fs";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { join as join14, resolve } from "node:path";
+import { join as join15, resolve } from "node:path";
 var CACHE_SCHEMA_VERSION = 1;
 var CACHE_DIR = ".backthread";
 var CACHE_FILE = "cache.json";
 function cacheDir(repoRoot) {
-  return join14(repoRoot, CACHE_DIR);
+  return join15(repoRoot, CACHE_DIR);
 }
 function cachePath(repoRoot) {
-  return join14(cacheDir(repoRoot), CACHE_FILE);
+  return join15(cacheDir(repoRoot), CACHE_FILE);
 }
 var defaultTopLevelReader = (cwd) => {
   try {
@@ -35040,8 +35108,8 @@ function isObject2(v) {
 async function ensureCacheDir(repoRoot) {
   const dir = cacheDir(repoRoot);
   await mkdir10(dir, { recursive: true });
-  const ignore = join14(dir, ".gitignore");
-  if (!existsSync(ignore)) {
+  const ignore = join15(dir, ".gitignore");
+  if (!existsSync2(ignore)) {
     await writeFile10(ignore, "*\n").catch(() => {
     });
   }
@@ -35081,7 +35149,7 @@ function scanInvalidators(root, ext, layout) {
   for (const pkg of layout.packages) if (pkg.root) dirs.add(pkg.root);
   const out = [];
   for (const rel of dirs) {
-    const abs = rel ? join15(root, rel) : root;
+    const abs = rel ? join16(root, rel) : root;
     let entries;
     try {
       entries = readdirSync(abs, { withFileTypes: true });
@@ -35104,7 +35172,7 @@ function collectSignatures(root, ext, layout) {
   for (const id of scanInvalidators(root, ext, layout)) ids.add(id);
   const sigs = {};
   for (const id of ids) {
-    const sig = fileSignature(join15(root, id));
+    const sig = fileSignature(join16(root, id));
     if (sig !== null) sigs[id] = sig;
   }
   return sigs;

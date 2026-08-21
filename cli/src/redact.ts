@@ -24,6 +24,7 @@
 
 export {
   CODE_REDACTION,
+  HARVESTED_PATH_EXTENSIONS,
   parseJsonl,
   redactCodeFences,
   redactTranscript,

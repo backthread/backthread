@@ -5,6 +5,38 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.22.0
+
+**A decision now knows which files it was about, even when your agent worked in the
+shell.** Capture anchors each decision to the files the session touched, and it used to
+learn those files from one place only: the path a `Read`/`Edit`/`Write`/`NotebookEdit`
+tool was handed. That was true of how agents worked when it was written. It isn't any
+more — a modern session `rg`s, `sed`s, `git diff`s and `cat`s its way around, and shell
+calls now outnumber the path-named tools by more than an order of magnitude. The file
+those calls touch is named inside the command, which nothing was reading. Measured on
+real sessions: about half of them ended up with an empty file list, and the share of
+recorded decisions carrying any file at all fell from 85% to 38%. One session that
+produced nothing at all yields 153 real files once the commands are read.
+
+So the harvest now reads shell commands too — `Bash` in Claude Code, the `shell` argv
+array in Codex.
+
+**A path found this way has to be a real file in your repo before it counts.** That
+sounds obvious and it is the whole design. A token taken out of a command carries no
+evidence of what it is relative to: after `cd /etc`, `cat app/secrets.json` reads a file
+that has nothing to do with your repo while looking exactly like one that does. A
+scheme-less `curl internal-api.example/v3/export.json` is a hostname. A string literal
+inside a heredoc is program text, not a file anyone opened. No amount of pattern matching
+separates those from the real thing, so the capture hook checks each one against your
+working tree and keeps only what is actually there. `.git/` and `node_modules/` are
+excluded even though they exist.
+
+The rest of the fence is unchanged and still absolute: nothing machine-absolute, nothing
+outside your repo root, nothing that traverses upward, ever leaves your machine. **Only
+path-shaped substrings can be kept at all — the command itself, and anything it printed,
+still never leave.** One consequence worth stating plainly: a file the session *deleted*
+no longer exists, so it is not recorded.
+
 ## 0.21.0
 
 **A failure now tells you whether to try again.** When something the CLI asks for gets

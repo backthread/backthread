@@ -42,6 +42,8 @@
 // decisions are all that reach ingest-decisions.
 
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { ensureAuth } from './login.js';
 import { parseJsonl, redactTranscript, sessionPaths, sessionTimestamp } from './redact.js';
@@ -116,6 +118,12 @@ export interface CaptureDeps {
   fetchImpl?: typeof fetch;
   /** Test seam: read a file. Defaults to fs.readFile. */
   readFileImpl?: (path: string) => Promise<string>;
+  /**
+   * Test seam: does an ABSOLUTE path exist on disk? Defaults to fs.existsSync.
+   * Backs the `exists` predicate `sessionPaths` requires before it will emit any
+   * path scraped out of a shell command (see below).
+   */
+  fileExistsImpl?: (absolutePath: string) => boolean;
   /** Test seam: the config reader. Defaults to readConfig(). */
   readConfigImpl?: (env: NodeJS.ProcessEnv) => Promise<BackthreadConfig>;
   /** Test seam: the git-remote reader threaded into resolveRepo. */
@@ -222,6 +230,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((m: string) => console.error(m));
   const doReadFile = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
+  const doFileExists = deps.fileExistsImpl ?? existsSync;
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth =
     deps.ensureAuthImpl ??
@@ -324,7 +333,27 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // METADATA only — directory structure, never file contents; the never-store-source
     // claim still holds (paths ≠ contents). Absent cwd → only already-relative paths
     // survive (often []), which the server treats as "unanchored" — correct, not an error.
-    const filePaths = sessionPaths(records, input.cwd);
+    //
+    // `exists` is what lets sessionPaths emit anything it scraped out of a shell
+    // COMMAND string. A relative token in a command proves nothing on its own: after
+    // `cd /etc`, `cat app/secrets.json` reads a file that has no relationship to this
+    // repo while looking exactly like one that does. Only the filesystem can settle
+    // it, and sessionPaths is pure by design, so the check is injected from here —
+    // where the repo root already is. Memoised: one session asks thousands of times
+    // and a session's working tree does not change under us mid-capture. Bounded by
+    // the caps inside sessionPaths, so the map cannot grow without limit either.
+    const existsCache = new Map<string, boolean>();
+    const filePaths = sessionPaths(records, input.cwd, {
+      exists: (rel) => {
+        const hit = existsCache.get(rel);
+        if (hit !== undefined) return hit;
+        // `rel` is already normalized + confirmed inside the root by sessionPaths
+        // (no `..`, never absolute), so this join cannot climb out of input.cwd.
+        const ok = input.cwd !== undefined && doFileExists(join(input.cwd, rel));
+        existsCache.set(rel, ok);
+        return ok;
+      },
+    });
     // Prefer the transcript's own session id; fall back to the hook's session_id.
     const sessionId = redacted.sessionId ?? input.session_id ?? null;
 
