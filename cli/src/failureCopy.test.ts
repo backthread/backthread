@@ -517,10 +517,26 @@ function rel(file: string): string {
  * nothing looked for what it did with one. Permission to name an origin is not permission
  * to skip the registry.
  */
-const ORIGIN_MODULES = ['urls.ts', 'claim.ts', 'doctor.ts'];
+const ORIGIN_MODULES = ['urls.ts', 'doctor.ts'];
 
-/** The subset that may also FETCH. `urls.ts` may not — see the test below. */
-const URL_MODULES = ORIGIN_MODULES;
+/**
+ * Where an endpoint can be BORN. Exactly one module, and it is forbidden to fetch.
+ *
+ * ⚠ IT WAS THREE, AND TWO ORDINARY SPELLINGS WALKED THROUGH THE GAP. The scan called a
+ * declaration a builder only if an origin appeared inside its own brace-matched extent, so
+ * routing the origin through a one-line private helper in the same file
+ * (`function originFor(env) { return workerBaseUrl(env); }`) left the extent clean and the
+ * endpoint unregistered. And because a declaration containing `fetch(` was classified a
+ * consumer and skipped, a single function in `claim.ts` or `doctor.ts` that BOTH built a
+ * URL and requested it was invisible to every guard here — which is the codebase's own
+ * house style, just with the URL built inline.
+ *
+ * Both are gone because the discriminators are. `buildExchangeClaimUrl` moved here, so this
+ * is the only URL module; every export in it that is not an origin helper must be in the
+ * registry, with no test of what its body says or what its signature returns. There is
+ * nothing left to spell differently.
+ */
+const URL_MODULES = ['urls.ts'];
 
 /**
  * The two origins a FETCH can go to. Deliberately excludes the app origin: that one is a
@@ -533,9 +549,6 @@ const ORIGIN_TOKEN =
 /** The literal hosts, for the author who pastes a URL out of a curl command. */
 const ORIGIN_HOST = /\b(?:workers\.dev|supabase\.co)\b/;
 
-/** Any origin at all — what makes an exported function a URL builder, fetched or linked. */
-const ANY_ORIGIN =
-  /\b(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_WORKER_URL|DEFAULT_FUNCTIONS_URL|DEFAULT_APP_URL|BACKTHREAD_WORKER_URL|BACKTHREAD_FUNCTIONS_URL|BACKTHREAD_APP_URL)\b|\b(?:workers\.dev|supabase\.co)\b/;
 
 /** The origin declarations themselves are not builders — they are what builders reach for. */
 const IS_ORIGIN_DECL = /^(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_\w+_URL)$/;
@@ -555,39 +568,17 @@ const IS_ORIGIN_DECL = /^(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_\w
  * allow-listed to these two modules by the test below, so an endpoint has nowhere else to
  * be born.
  */
-/** The source of one top-level declaration, from `export` to its matching close brace. */
-function declarationExtent(src: string, from: number): string {
-  const open = src.indexOf('{', from);
-  const semi = src.indexOf(';', from);
-  if (open < 0 || (semi >= 0 && semi < open)) return src.slice(from, semi < 0 ? undefined : semi + 1);
-  let depth = 0;
-  for (let i = open; i < src.length; i++) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}' && --depth === 0) return src.slice(from, i + 1);
-  }
-  return src.slice(from);
-}
 
 function declaredBuilders(): string[] {
   const found = new Set<string>();
   for (const base of URL_MODULES) {
-    const src = stripComments(readFileSync(join(SRC_DIR, base), 'utf8'));
+    const src = codeOnly(readFileSync(join(SRC_DIR, base), 'utf8'));
     for (const m of src.matchAll(
       /\bexport\s+(?:async\s+)?(?:function\s+([A-Za-z0-9_]+)|const\s+([A-Za-z0-9_]+)\s*[:=])/g,
     )) {
       const name = m[1] ?? m[2];
       if (IS_ORIGIN_DECL.test(name)) continue;
-      // ⚠ BRACE-MATCHED, AND THE DISCRIMINATOR IS "DOES IT FETCH", NOT ITS RETURN TYPE.
-      // Two earlier versions were walked past. A textual `: string` test missed a builder
-      // with no annotation at all, one returning a `URL`, and one returning an aliased
-      // type — all ordinary spellings. And an earlier `fetch(` test over a crudely split
-      // chunk was defeated by appending a private fetch helper AFTER the builder, since
-      // both landed in the same chunk. A brace-matched extent belongs to ONE declaration,
-      // so neither a neighbour nor a missing annotation can change the answer. A builder
-      // constructs a URL; a consumer uses one.
-      const body = declarationExtent(src, m.index ?? 0);
-      if (/\b(?:doFetch|fetch)\s*\(/.test(body)) continue;
-      if (ANY_ORIGIN.test(body)) found.add(name);
+      found.add(name);
     }
   }
   return [...found].sort();
@@ -766,10 +757,24 @@ test('every declared network module really does fetch', () => {
 
 test('the centralisation ban is not vacuous — the allow-listed modules really do trip it', () => {
   // If the tokens ever stop matching, the test above passes over every file in silence.
-  for (const base of URL_MODULES) {
+  for (const base of ORIGIN_MODULES) {
     assert.ok(ORIGIN_TOKEN.test(readFileSync(join(SRC_DIR, base), 'utf8')), base);
   }
   assert.ok(ORIGIN_HOST.test(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8')));
+});
+
+test('doctor probes origins and builds no path, which is why it may name one', () => {
+  // ⚠ THE OTHER HALF OF NARROWING URL_MODULES TO ONE. `doctor.ts` keeps permission to name
+  // an origin because it checks the bare hosts for reachability — so it must not be able to
+  // turn one into an endpoint. It has no builder scan over it any more; this is what stands
+  // in its place, and it is a stronger statement than the scan was.
+  const src = codeOnly(readFileSync(join(SRC_DIR, 'doctor.ts'), 'utf8'));
+  assert.doesNotMatch(src, /new URL\(/, 'doctor.ts constructs a URL — build it in urls.ts and register it');
+  assert.doesNotMatch(
+    src,
+    /(?:workerBaseUrl|functionsBaseUrl)\s*\([^)]*\)\s*(?:\+|\.concat)/,
+    'doctor.ts joins a path to an origin',
+  );
 });
 
 test('each driver actually reaches the network', async () => {
@@ -1445,4 +1450,29 @@ test('--verbose means something on the two paths that answer before the renderer
   );
   assert.match(answered.detail, /nothing is owed/);
   assert.match(answered.detail, /\[status=410\]/, answered.detail);
+});
+
+test('a server-authored `message` beats prose in `error` when a 4xx carries both', () => {
+  // ⚠ THE ORDER OF THE TWO READERS WAS UNASSERTED — swapping them survived the suite,
+  // because no producer this package reaches sends both today. `message` is the field a
+  // server uses when it means to be read; `error` holding prose is the older habit. If one
+  // ever arrives with both, the deliberate one wins.
+  const out = describeFailure({
+    lead: 'zzlead',
+    status: 400,
+    payload: { error: 'no repo given and none connected', message: 'pass repo:"owner/name"' },
+    env: PLAIN_ENV,
+  });
+  assert.match(out, /pass repo:"owner\/name"/);
+  assert.doesNotMatch(out, /no repo given and none connected/);
+});
+
+test('urls.ts is the only place an endpoint can be born', () => {
+  // The claim the registry doc makes about itself, asked directly. Both halves matter: one
+  // module, and that module cannot make a request — so "built here" and "used there" can
+  // never be the same declaration, which is how a build-and-fetch function slipped past.
+  assert.deepEqual(URL_MODULES, ['urls.ts']);
+  assert.doesNotMatch(codeOnly(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8')), /\bfetch\b/i);
+  // …and every export of it is classified, origin helpers aside.
+  assert.ok(declaredBuilders().length >= 12, `only ${declaredBuilders().length} exports classified`);
 });

@@ -15,7 +15,7 @@
 // $HOME.
 
 import { updateConfig } from './config.js';
-import { functionsBaseUrl, appBaseUrl } from './urls.js';
+import { appBaseUrl, buildExchangeClaimUrl } from './urls.js';
 import { versionHeaders } from './version.js';
 
 // Plaintext prefix of every claim code (lockstep with the mint-claim /
@@ -26,12 +26,6 @@ export const CLAIM_PREFIX = 'backthread_claim_';
 /** A string is claim-shaped iff it carries the prefix AND a non-empty body. */
 export function isClaimCode(code: string): boolean {
   return code.startsWith(CLAIM_PREFIX) && code.length > CLAIM_PREFIX.length;
-}
-
-// Build the exchange-claim URL on the Functions origin (same origin + override
-// seam as ingest/read — BACKTHREAD_FUNCTIONS_URL for local dev).
-export function buildExchangeClaimUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return new URL(`${functionsBaseUrl(env)}/exchange-claim`).toString();
 }
 
 export interface ClaimExchangeOptions {
@@ -123,8 +117,13 @@ function exchangeErrorMessage(
     case 'rate_limited':
       return 'Too many attempts from this machine — wait a few minutes and try again.';
     default: {
-      const detail = typeof body?.message === 'string' ? ` — ${body.message}` : '';
-      return `Exchange failed (HTTP ${status})${detail}`;
+      // ⚠ ON A 4xx ONLY. This endpoint's 500 arm is `{ error: 'exchange_failed', message:
+      // <the caught upstream string> }`, so relaying `message` unconditionally printed
+      // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
+      // Same rule as the shared renderer: nobody writes reader-facing copy for a 500.
+      const authored = status < 500 && typeof body?.message === 'string' ? body.message : '';
+      const detail = authored ? ` — ${authored}` : '';
+      return `Exchange failed (HTTP ${status})${detail}. ${fresh}`;
     }
   }
 }

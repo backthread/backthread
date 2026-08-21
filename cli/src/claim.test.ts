@@ -11,7 +11,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exchangeClaim, isClaimCode, buildExchangeClaimUrl, CLAIM_PREFIX } from './claim.js';
+import { exchangeClaim, isClaimCode, CLAIM_PREFIX } from './claim.js';
+import { buildExchangeClaimUrl } from './urls.js';
 import { configPath, parseConfig, writeConfig, CONFIG_MODE } from './config.js';
 
 const TOKEN = 'backthread_pat_test-token-value';
@@ -134,13 +135,29 @@ test('server error slugs map to actionable messages', async () => {
   });
 });
 
-test('an unknown error slug falls back to the HTTP status + server message', async () => {
+test('an unknown 4xx slug falls back to the HTTP status + the server sentence', async () => {
   await withTempEnv(async (env) => {
-    const { impl } = fetchStub(500, { error: 'mint_failed', message: 'boom' });
+    const { impl } = fetchStub(400, { error: 'mint_failed', message: 'that code is malformed' });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /HTTP 400/);
+    assert.match(result.message, /that code is malformed/);
+    assert.doesNotMatch(result.message, /mint_failed/);
+  });
+});
+
+test('a 5xx `message` is a relayed diagnostic here too, and is not printed', async () => {
+  // ⚠ MEASURED LEAK. This endpoint's 500 arm is `{ error, message: <the caught upstream
+  // string> }`, so relaying `message` unconditionally printed
+  // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
+  await withTempEnv(async (env) => {
+    const { impl } = fetchStub(500, { error: 'mint_failed', message: 'permission denied for schema private' });
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.equal(result.ok, false);
     assert.match(result.message, /HTTP 500/);
-    assert.match(result.message, /boom/);
+    assert.doesNotMatch(result.message, /permission denied/);
+    // …and it still says what to do, which the bare status line did not.
+    assert.match(result.message, /fresh code/i);
   });
 });
 

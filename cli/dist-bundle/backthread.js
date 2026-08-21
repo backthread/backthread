@@ -6981,6 +6981,9 @@ function buildReadDecisionsUrl(env = process.env) {
 function buildOnboardingStateUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/onboarding-state`).toString();
 }
+function buildExchangeClaimUrl(env = process.env) {
+  return new URL(`${functionsBaseUrl(env)}/exchange-claim`).toString();
+}
 function buildCliAuthPollUrl(env = process.env) {
   return new URL(`${functionsBaseUrl(env).replace(/\/+$/, "")}/cli-auth-poll`).toString();
 }
@@ -7171,9 +7174,6 @@ var CLAIM_PREFIX = "backthread_claim_";
 function isClaimCode(code) {
   return code.startsWith(CLAIM_PREFIX) && code.length > CLAIM_PREFIX.length;
 }
-function buildExchangeClaimUrl(env = process.env) {
-  return new URL(`${functionsBaseUrl(env)}/exchange-claim`).toString();
-}
 async function exchangeClaim(rawCode, opts = {}) {
   const env = opts.env ?? process.env;
   const doFetch = opts.fetchImpl ?? fetch;
@@ -7221,8 +7221,9 @@ function exchangeErrorMessage(status, body, env) {
     case "rate_limited":
       return "Too many attempts from this machine \u2014 wait a few minutes and try again.";
     default: {
-      const detail = typeof body?.message === "string" ? ` \u2014 ${body.message}` : "";
-      return `Exchange failed (HTTP ${status})${detail}`;
+      const authored = status < 500 && typeof body?.message === "string" ? body.message : "";
+      const detail = authored ? ` \u2014 ${authored}` : "";
+      return `Exchange failed (HTTP ${status})${detail}. ${fresh}`;
     }
   }
 }

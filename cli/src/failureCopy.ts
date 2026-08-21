@@ -25,7 +25,9 @@
 // as a nested ternary at the call site. Fixing
 // the one that was reported would have fixed one route and left four, which is exactly how
 // a defect recurs one endpoint at a time. There is now one renderer and one registry, and
-// failureCopy.test.ts fails when a new endpoint appears without a disposition.
+// failureCopy.test.ts fails when a new endpoint appears without a disposition — because an
+// endpoint can only be born in `urls.ts`, which is forbidden to fetch, and every export
+// there that is not an origin helper must be in this table.
 //
 // WHAT IS AND IS NOT PRODUCT COPY. `error` and `code` are OPERATOR fields. A SQLSTATE is
 // obviously one; a slug like `lesson_persist_failed` is no less one — it names an internal
@@ -448,12 +450,22 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
 //
 // THIS IS THE THING THAT STOPS THE DEFECT RECURRING, and it is a registry rather than a
 // note in a review checklist because a convention is only as durable as the next author's
-// memory. failureCopy.test.ts derives the set of `build*Url` builders from the source of
-// this package and fails when one is missing from this table — so adding an endpoint is
-// red until somebody says, in writing, what a person sees when it fails. The same test
-// then DRIVES every `failure-body` entry through a stubbed rejection and asserts the
-// sentence is a sentence: it carries the retry verdict and carries neither the slug nor
-// the SQLSTATE, unless verbose is on.
+// memory. failureCopy.test.ts enumerates every export of `urls.ts` — the ONE module allowed
+// to turn an origin into an endpoint, and the one module forbidden to fetch — and fails
+// when any of them is missing from this table. So adding an endpoint is red until somebody
+// says, in writing, what a person sees when it fails.
+//
+// ⚠ IT ASKS NOTHING ABOUT HOW THE BUILDER IS SPELLED, AND THAT IS THE POINT. Earlier
+// versions tested the declaration's name, then its return type, then whether an origin
+// appeared in its body — and each version was walked past by an ordinary spelling: an
+// `export const`, a name not ending in `Url`, a return type of `URL`, an origin routed
+// through a one-line private helper. Chasing shapes was the mistake. Every export here is
+// a builder because there is nothing else this module is for.
+//
+// The same test then DRIVES every `failure-body` entry through a stubbed rejection —
+// checking the injected fetch was really called, so a driver cannot merely claim to have
+// driven a route — and asserts the sentence is a sentence: it carries the retry verdict and
+// carries neither the slug nor the SQLSTATE, unless verbose is on.
 //
 // Keyed by builder name rather than by URL path because the builder is what exists in this
 // repository; the path is the server's to name, and this package cannot see the server.
