@@ -314,6 +314,62 @@ function relativizeUnder(abs: string, root: string): string | null {
 }
 
 /**
+ * File extensions a token scraped out of a SHELL COMMAND must end in to count as
+ * a file path. Exported so the accepted set is reviewable in one place (and so a
+ * consumer can assert against it) rather than buried in a regex literal.
+ *
+ * This gate applies ONLY to the shell-command scan. Path-named tool inputs
+ * (`file_path`, `path`, `notebook_path`, `cwd`) are already unambiguous and stay
+ * ungated — a `cwd` is a directory and has no extension at all.
+ */
+export const HARVESTED_PATH_EXTENSIONS: readonly string[] = [
+  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs',
+  'css', 'scss', 'html', 'json', 'sql', 'md', 'yml', 'yaml', 'sh', 'toml',
+  'py', 'rb', 'ex', 'exs', 'php', 'kt', 'dart', 'swift', 'java', 'go',
+];
+
+// LONGEST-FIRST alternation. JS regex alternation is first-match-wins, not
+// longest-match-wins, so `js|json` would match `package.js` out of
+// `package.json` and emit a file that doesn't exist. Sorted by length desc
+// (ties broken alphabetically, so the built pattern is deterministic).
+const EXT_ALTERNATION = [...HARVESTED_PATH_EXTENSIONS]
+  .sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0))
+  .join('|');
+
+/**
+ * Path-shaped tokens inside a shell command string. Deliberately a TOKEN SCAN,
+ * not a shell parse — we never interpret the command, we only pick substrings
+ * that look like files. Only the matched substrings are ever emitted; the
+ * command string itself never leaves this module, so a heredoc full of source
+ * can contribute a path but never a line of code.
+ *
+ * Shape: `[/]seg/seg[/seg…].ext`
+ *  - **Must contain at least one `/`** — the `(?:/…)+` group is not optional. A
+ *    bare `index.ts` names a file we can't attribute (every package has one), so
+ *    ambiguous single-segment tokens are dropped rather than guessed at.
+ *  - The segment class `[\w.@~+-]` excludes every shell metacharacter, so
+ *    quoting, `$( )`, `=`, `:`, `,`, `;`, `|`, `&`, redirects and parens all act
+ *    as natural token boundaries — no stripping pass needed. It also excludes the
+ *    glob metacharacters `* ? [ { `, so `src/*.ts` and `src/a[0].ts` simply do not
+ *    match (a glob is not a file).
+ *  - The lookbehind rejects a token whose preceding character is itself path-ish
+ *    (`/ \ . @ ~ + - $ _` + word chars). That is what keeps a URL out:
+ *    `https://example.com/x.json` can only start at `example`, which is preceded
+ *    by `/` → rejected; `x.json` alone has no `/` → rejected.
+ *  - The lookahead rejects a token followed by a path-ish character, so
+ *    `bundle.js.map` doesn't harvest as `bundle.js`.
+ *
+ * Everything the scan yields is then run through the SAME absolute/relative
+ * fence as every other harvested path (`isAbsolute` → `relativizeUnder` →
+ * `normalizeRepoRelative`, or `isForeignRelativePath`) — there is no second,
+ * weaker path into the output.
+ */
+const SHELL_PATH_TOKEN = new RegExp(
+  `(?<![\\w.@~$+/\\\\-])/?[\\w.@~+-]+(?:/[\\w.@~+-]+)+\\.(?:${EXT_ALTERNATION})(?![\\w.@~+/\\\\-])`,
+  'g',
+);
+
+/**
  * Collect candidate file-path strings out of one raw record's tool I/O —
  * BEFORE redaction drops those records. We treat all of this as DATA, never
  * instructions: we only read string fields at known shapes and never act on
@@ -324,8 +380,17 @@ function relativizeUnder(abs: string, root: string): string | null {
  *   `input.notebook_path` (NotebookEdit and friends) and Bash `input.cwd`.
  * Codex: `payload.type === 'function_call'` may carry paths inside the
  *   JSON-string `payload.arguments` — we parse it defensively and pull the same
- *   path-named fields if present (shell `command` arrays are NOT path-harvested:
- *   a command string isn't a file path).
+ *   path-named fields if present.
+ *
+ * SHELL COMMANDS ARE SCANNED TOO (`input.command`). Measured on real Claude Code
+ * transcripts, shell calls now outnumber Read/Edit/Write by more than an order of
+ * magnitude — an agent greps, seds and `git diff`s far more than it opens files
+ * through a path-named tool — so reading only the path-named fields left roughly
+ * half of all sessions with an EMPTY path list and their decisions unanchored.
+ * The file a shell call touches is named inside the command string, so we scan it
+ * with `SHELL_PATH_TOKEN` above. We match on the FIELD, not on the tool's name,
+ * so an agent that calls its shell tool something other than `Bash` is covered
+ * too; Codex passes the same field as an argv array, which we join first.
  */
 function pathsFromRecord(rec: unknown): string[] {
   if (!rec || typeof rec !== 'object') return [];
@@ -336,12 +401,33 @@ function pathsFromRecord(rec: unknown): string[] {
     payload?: { type?: unknown; arguments?: unknown };
   };
 
+  // A shell command: one string (Claude Code `Bash`) or an argv array (Codex
+  // `shell`: ["bash","-lc","…"]). Join an array on a space — the scan is
+  // whitespace-boundary-tolerant, so an argv entry is just another token.
+  const pushFromCommand = (command: unknown): void => {
+    const text =
+      typeof command === 'string'
+        ? command
+        : Array.isArray(command)
+          ? command.filter((c): c is string => typeof c === 'string').join(' ')
+          : null;
+    if (text === null || text.length === 0) return;
+    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push(m[0]);
+  };
+
   const pushFromInput = (input: unknown): void => {
     if (!input || typeof input !== 'object') return;
-    const i = input as { file_path?: unknown; path?: unknown; notebook_path?: unknown; cwd?: unknown };
+    const i = input as {
+      file_path?: unknown;
+      path?: unknown;
+      notebook_path?: unknown;
+      cwd?: unknown;
+      command?: unknown;
+    };
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
       if (typeof v === 'string' && v.trim().length > 0) out.push(v.trim());
     }
+    pushFromCommand(i.command);
   };
 
   // Claude Code: tool_use blocks inside an assistant message's content array.

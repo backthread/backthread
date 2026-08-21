@@ -5,6 +5,27 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.22.0
+
+**A decision now knows which files it was about, even when your agent worked in the
+shell.** Capture anchors each decision to the files the session touched, and it used to
+learn those files from one place only: the path a `Read`/`Edit`/`Write`/`NotebookEdit`
+tool was handed. That was true of how agents worked when it was written. It isn't any
+more — a modern session `rg`s, `sed`s, `git diff`s and `cat`s its way around, and shell
+calls now outnumber the path-named tools by more than an order of magnitude. The file
+those calls touch is named inside the command, which nothing was reading. Measured on
+real sessions: about half of them ended up with an empty file list, and the share of
+recorded decisions carrying any file at all fell from 85% to 38%. One session that
+produced nothing at all yields 153 real files once the commands are read.
+
+So the harvest now reads shell commands too — `Bash` in Claude Code, the `shell` argv
+array in Codex — and the fence around it did not move. A token scraped out of a command
+goes through exactly the same checks as every other path: never machine-absolute, never
+outside your repo root, never a `../` escape. On top of that it has to end in a known
+source or doc extension and name a directory, so a wildcard, a bare filename, and a URL
+in a `curl` are all left alone. **Only path-shaped substrings are ever kept — the command
+itself, and anything it printed, still never leaves your machine.**
+
 ## 0.21.0
 
 **A failure now tells you whether to try again.** When something the CLI asks for gets

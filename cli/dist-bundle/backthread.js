@@ -7118,8 +7118,8 @@ function cliVersion() {
 var cachedRedact = null;
 function redactVersion() {
   if (cachedRedact !== null) return cachedRedact;
-  if ("0.1.3".length > 0) {
-    cachedRedact = "0.1.3";
+  if ("0.1.4".length > 0) {
+    cachedRedact = "0.1.4";
     return cachedRedact;
   }
   cachedRedact = readRedactVersionFromDisk();
@@ -8168,16 +8168,55 @@ function relativizeUnder(abs, root) {
   if (!abs.startsWith(prefix)) return null;
   return stripLeadingSlashes(abs.slice(trimmedRoot.length));
 }
+var HARVESTED_PATH_EXTENSIONS = [
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "mjs",
+  "cjs",
+  "css",
+  "scss",
+  "html",
+  "json",
+  "sql",
+  "md",
+  "yml",
+  "yaml",
+  "sh",
+  "toml",
+  "py",
+  "rb",
+  "ex",
+  "exs",
+  "php",
+  "kt",
+  "dart",
+  "swift",
+  "java",
+  "go"
+];
+var EXT_ALTERNATION = [...HARVESTED_PATH_EXTENSIONS].sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0)).join("|");
+var SHELL_PATH_TOKEN = new RegExp(
+  `(?<![\\w.@~$+/\\\\-])/?[\\w.@~+-]+(?:/[\\w.@~+-]+)+\\.(?:${EXT_ALTERNATION})(?![\\w.@~+/\\\\-])`,
+  "g"
+);
 function pathsFromRecord(rec) {
   if (!rec || typeof rec !== "object") return [];
   const out = [];
   const r = rec;
+  const pushFromCommand = (command) => {
+    const text = typeof command === "string" ? command : Array.isArray(command) ? command.filter((c) => typeof c === "string").join(" ") : null;
+    if (text === null || text.length === 0) return;
+    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push(m[0]);
+  };
   const pushFromInput = (input) => {
     if (!input || typeof input !== "object") return;
     const i = input;
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
       if (typeof v === "string" && v.trim().length > 0) out.push(v.trim());
     }
+    pushFromCommand(i.command);
   };
   const content = r.message?.content;
   if (Array.isArray(content)) {

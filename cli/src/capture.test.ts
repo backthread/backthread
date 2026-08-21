@@ -181,8 +181,11 @@ test('code-less session (no tool_use paths) → persist leg omits filePaths (una
   });
 
   // TRANSCRIPT_JSONL is a planning/discussion session: its only tool_use is a Bash
-  // COMMAND (not a file path), so sessionPaths yields []. The decision is still kept
-  // + persisted (the server marks it unanchored). The body must NOT carry filePaths.
+  // command (`cat ~/.ssh/id_rsa`). Shell commands ARE path-harvested now, but this one
+  // names nothing harvestable — `.ssh/id_rsa` carries no source/doc extension, and a
+  // `~` home path is foreign to the repo either way — so sessionPaths still yields [].
+  // The decision is still kept + persisted (the server marks it unanchored), and the
+  // body must NOT carry filePaths.
   const out = await runCapture(HOOK, deps({ fetchImpl }));
   assert.equal(out.status, 'persisted-by-server');
   assert.equal((inferBody as { persist?: unknown }).persist, true);
