@@ -181,3 +181,18 @@ test('a non-JSON error response still yields a clean failure', async () => {
     assert.match(result.message, /HTTP 502/);
   });
 });
+
+test('a server sentence that already ends in a stop is not chased with ours', () => {
+  // Measured: `Exchange failed (HTTP 403) — …Upgrade to connect a capture device.. Generate
+  // a fresh code at … and try again.` — a double period and "try again" twice, with two
+  // different antecedents.
+  return withTempEnv(async (env) => {
+    const { impl } = fetchStub(403, {
+      error: 'plan_excluded',
+      message: 'Your plan does not include live capture. Upgrade to connect a capture device.',
+    });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.match(result.message, /Upgrade to connect a capture device\.$/);
+    assert.doesNotMatch(result.message, /\.\./);
+  });
+});

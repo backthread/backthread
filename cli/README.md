@@ -171,8 +171,9 @@ backthread help                Show the full usage (also --help, -h)
 ### Global flags
 
 ```
---verbose                      When something fails, also print the operator detail: our
-                               internal error code and the database's own SQLSTATE.
+--verbose                      When something fails, also print the operator detail: the HTTP
+                               status, our internal error code, the retry reason, and the
+                               database's own SQLSTATE when there is one.
 ```
 
 Off by default, because those name *our* call sites and there is nothing you can do with them.

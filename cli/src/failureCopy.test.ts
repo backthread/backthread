@@ -550,8 +550,22 @@ const ORIGIN_TOKEN =
 const ORIGIN_HOST = /\b(?:workers\.dev|supabase\.co)\b/;
 
 
-/** The origin declarations themselves are not builders — they are what builders reach for. */
-const IS_ORIGIN_DECL = /^(?:workerBaseUrl|functionsBaseUrl|appBaseUrl|DEFAULT_\w+_URL)$/;
+/**
+ * The origin declarations themselves are not builders — they are what builders reach for.
+ *
+ * ⚠ AN EXPLICIT LIST, NOT A NAME SHAPE. It was `/^(?:…|DEFAULT_\w+_URL)$/`, which is a
+ * name-shaped exemption — the precise mistake every other version of this scan made. An
+ * outside read named a builder `DEFAULT_LESSON_NEXT_URL` and walked straight out of the
+ * registry. Six names, written down.
+ */
+const ORIGIN_DECLS = new Set([
+  'appBaseUrl',
+  'workerBaseUrl',
+  'functionsBaseUrl',
+  'DEFAULT_APP_URL',
+  'DEFAULT_WORKER_URL',
+  'DEFAULT_FUNCTIONS_URL',
+]);
 
 /**
  * Every exported endpoint builder in the package, found in source rather than listed.
@@ -577,8 +591,19 @@ function declaredBuilders(): string[] {
       /\bexport\s+(?:async\s+)?(?:function\s+([A-Za-z0-9_]+)|const\s+([A-Za-z0-9_]+)\s*[:=])/g,
     )) {
       const name = m[1] ?? m[2];
-      if (IS_ORIGIN_DECL.test(name)) continue;
+      if (ORIGIN_DECLS.has(name)) continue;
       found.add(name);
+    }
+    // ⚠ AND THE LIST FORM. `function f() {…}` followed by `export { f };` is an ordinary
+    // TypeScript spelling and was invisible — a builder declared privately and exported at
+    // the bottom of the file never reached the registry.
+    for (const m of src.matchAll(/\bexport\s*\{([^}]*)\}\s*(?:from\s*''\s*)?;/g)) {
+      for (const raw of m[1].split(',')) {
+        const name = (raw.split(/\bas\b/).pop() ?? '').trim();
+        if (!name || ORIGIN_DECLS.has(name)) continue;
+        if (/^type\b/.test(raw.trim())) continue;
+        found.add(name);
+      }
     }
   }
   return [...found].sort();
@@ -745,6 +770,48 @@ test('a not-a-fetch-target really is never fetched', () => {
   assert.deepEqual(offenders, [], 'an endpoint is registered as a link and is being requested');
 });
 
+test('a fetched URL traces to a registered builder — no literals, no surgery', () => {
+  // ⚠ NAMING THE FETCHERS ONLY STOPS A NEW MODULE. Inside one already on the list, nothing
+  // asked what the request was POINTED AT — so an outside read added, in `lesson.ts` and
+  // `query.ts`, a complete unregistered endpoint two ways: string surgery on a registered
+  // builder's result (`buildLessonStartUrl(env).replace('/lesson/start', '/lesson/next')`)
+  // and a hardcoded host on a domain the host pattern did not list. `/lesson/next` is a
+  // REAL worker route that emits the contract, so this was the ticket's own defect one
+  // ordinary line away.
+  //
+  // The property is "every URL a request is handed traces to a registered builder call".
+  // Two things break that trace and both are banned here: inventing a URL, and editing one.
+  const registered = Object.keys(CLI_ENDPOINTS).join('|');
+  const SURGERY = new RegExp(`\\b(?:${registered})\\s*\\([^)]*\\)\\s*(?:\\.\\s*(?:replace|concat|slice|substring|split)\\b|\\+)`);
+  const LITERAL_URL = /['"`]https?:\/\//;
+  const offenders: string[] = [];
+  for (const file of sourceFiles()) {
+    const base = rel(file);
+    if (URL_MODULES.includes(base)) continue; // where URLs are legitimately written down
+    const src = codeWithStrings(readFileSync(file, 'utf8'));
+    // Surgery on a builder's result is banned EVERYWHERE — the edited URL only has to reach
+    // a network module to be requested, and it does not have to be edited in one.
+    if (SURGERY.test(src)) offenders.push(`${base} edits a builder's URL`);
+    // A literal URL is banned only where a request can be made. Elsewhere a hardcoded
+    // address is a LINK — the issue tracker this module points a reader at, the GitHub
+    // clone URL `sweep` builds — and banning those would be a vocabulary rule, not a safety
+    // one, which is how a guard earns the reputation that gets it deleted.
+    if (NETWORK_MODULES.has(base) && LITERAL_URL.test(src)) offenders.push(`${base} hardcodes a URL`);
+  }
+  assert.deepEqual(offenders, [], 'build it in urls.ts and register it instead');
+});
+
+test('the URL-trace rules are not vacuous', () => {
+  // Both patterns must match the thing they ban, or the test above passes in silence.
+  const registered = Object.keys(CLI_ENDPOINTS).join('|');
+  const SURGERY = new RegExp(`\\b(?:${registered})\\s*\\([^)]*\\)\\s*(?:\\.\\s*(?:replace|concat|slice|substring|split)\\b|\\+)`);
+  assert.ok(SURGERY.test("buildLessonStartUrl(env).replace('/lesson/start', '/lesson/next')"));
+  assert.ok(SURGERY.test('buildGroundedAskUrl(env) + "/next"'));
+  assert.ok(/['"`]https?:\/\//.test("fetch('https://api.backthread.dev/coverage')"));
+  // …and urls.ts, which is exempt, really does contain one.
+  assert.ok(/['"`]https?:\/\//.test(codeWithStrings(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8'))));
+});
+
 test('every declared network module really does fetch', () => {
   // Otherwise the list rots into permission nobody needs, and a stale entry is a hole
   // somebody can move a new endpoint into without touching this file.
@@ -768,12 +835,20 @@ test('doctor probes origins and builds no path, which is why it may name one', (
   // an origin because it checks the bare hosts for reachability — so it must not be able to
   // turn one into an endpoint. It has no builder scan over it any more; this is what stands
   // in its place, and it is a stronger statement than the scan was.
-  const src = codeOnly(readFileSync(join(SRC_DIR, 'doctor.ts'), 'utf8'));
+  // ⚠ ON codeWithStrings, NOT codeOnly. `codeOnly` replaces every template literal with an
+  // empty pair of backticks, so `` `${workerBaseUrl(env)}/lesson/next` `` VANISHED before
+  // this guard looked at it — an outside read fetched exactly that from here, green.
+  const src = codeWithStrings(readFileSync(join(SRC_DIR, 'doctor.ts'), 'utf8'));
   assert.doesNotMatch(src, /new URL\(/, 'doctor.ts constructs a URL — build it in urls.ts and register it');
   assert.doesNotMatch(
     src,
     /(?:workerBaseUrl|functionsBaseUrl)\s*\([^)]*\)\s*(?:\+|\.concat)/,
     'doctor.ts joins a path to an origin',
+  );
+  assert.doesNotMatch(
+    src,
+    /\$\{\s*(?:workerBaseUrl|functionsBaseUrl)\s*\([^)]*\)\s*\}\s*\//,
+    'doctor.ts interpolates an origin in front of a path',
   );
 });
 
@@ -903,9 +978,52 @@ test('a Functions slug that is not on the table degrades, it does not leak', () 
 
 // --- "never shown" has to mean the string is never BUILT ----------------------------
 
-/** Source with comments removed — a mention in prose is not a use. */
+/**
+ * Source with comments removed — a mention in prose is not a use.
+ *
+ * ⚠ A SCANNER, NOT A REGEX PAIR. A line-comment regex eats from the `//` in
+ * `'https://app.backthread.dev'`, so every guard built on it was silently reading truncated
+ * source — including the one that bans hardcoded URLs, which could not see a URL. A
+ * comment and a string can only be told apart by walking the file.
+ */
 function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      i += 2;
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          out += src[i] + (src[i + 1] ?? '');
+          i += 2;
+          continue;
+        }
+        out += src[i];
+        if (src[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
 }
 
 /**
@@ -921,6 +1039,11 @@ function codeOnly(src: string): string {
     .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
     .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
     .replace(/`(?:[^`\\]|\\.)*`/g, '``');
+}
+
+/** Comments removed, string literals KEPT — for rules that are about what a string says. */
+function codeWithStrings(src: string): string {
+  return stripComments(src);
 }
 
 /** The non-test modules that call a given builder. */
@@ -1475,4 +1598,26 @@ test('urls.ts is the only place an endpoint can be born', () => {
   assert.doesNotMatch(codeOnly(readFileSync(join(SRC_DIR, 'urls.ts'), 'utf8')), /\bfetch\b/i);
   // …and every export of it is classified, origin helpers aside.
   assert.ok(declaredBuilders().length >= 12, `only ${declaredBuilders().length} exports classified`);
+});
+
+test('a 5xx `message` is withheld from the reader and handed to the operator', () => {
+  const payload = {
+    error: 'persist_failed',
+    message: 'duplicate key value violates unique constraint "decisions_pkey"',
+  };
+  const plain = describeFailure({ lead: 'zzlead', status: 500, payload, env: PLAIN_ENV });
+  assert.doesNotMatch(plain, /duplicate key|decisions_pkey/, plain);
+  const loud = describeFailure({ lead: 'zzlead', status: 500, payload, env: VERBOSE_ENV });
+  assert.match(loud, /message=duplicate key value violates unique constraint/, loud);
+});
+
+test('a 4xx `message` is the reader\'s, so it is not repeated as a diagnostic', () => {
+  const out = describeFailure({
+    lead: 'zzlead',
+    status: 426,
+    payload: { error: 'client_too_old', message: 'please update backthread' },
+    env: VERBOSE_ENV,
+  });
+  assert.match(out, /please update backthread/);
+  assert.doesNotMatch(out, /message=/, out);
 });

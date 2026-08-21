@@ -63,16 +63,17 @@ tools read too, having no command line of their own) and the line gains
 
 **Sentences the server wrote for you still reach you.** `error` carries two different kinds
 of thing — a machine code like `retrieval_failed`, and plain English like `repo not found or
-not connected to Backthread`. Only the first is hidden. The second is a sentence somebody
-wrote for a reader, and it is rendered as one.
+not connected to Backthread`. The machine code is hidden. The sentence is rendered, because
+somebody wrote it for a reader — on a 4xx, where the server is answering your request. On a
+5xx it is a diagnostic whatever it looks like, and goes behind `--verbose` with the rest.
 
 Under the hood: seven modules each carried their own copy of the same `message ?? String(
 error)` logic — two as a named helper, five inlined at the call site — which is why fixing
-the reported one would have left six. There is
-one renderer now, plus a registry of every endpoint this package can reach and what a person
-sees when it fails. Endpoints can only be born in one module, that module is forbidden to
-make requests, and every export of it must be in the registry — so an endpoint joins the
-package red until somebody answers that question.
+the reported one would have left six. There is one renderer now, plus a registry of every
+endpoint this package can reach and what a person sees when it fails. Endpoints can only be
+born in one module; that module cannot make requests; every export of it must be in the
+registry; and no request anywhere may be pointed at a URL that was invented or edited rather
+than built there. So an endpoint joins the package red until somebody answers that question.
 
 ## 0.20.0
 

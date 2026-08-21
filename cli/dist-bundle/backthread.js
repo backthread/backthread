@@ -7222,8 +7222,8 @@ function exchangeErrorMessage(status, body, env) {
       return "Too many attempts from this machine \u2014 wait a few minutes and try again.";
     default: {
       const authored = status < 500 && typeof body?.message === "string" ? body.message : "";
-      const detail = authored ? ` \u2014 ${authored}` : "";
-      return `Exchange failed (HTTP ${status})${detail}. ${fresh}`;
+      if (authored) return `Exchange failed (HTTP ${status}) \u2014 ${authored}`;
+      return `Exchange failed (HTTP ${status}). ${fresh}`;
     }
   }
 }
@@ -8116,6 +8116,8 @@ function operatorSuffix(status, payload) {
   if (reason) parts.push(`reason=${reason}`);
   const code = readFailureCode(payload);
   if (code) parts.push(`code=${code}`);
+  const msg = status >= 500 ? readServerMessage(payload) : null;
+  if (msg) parts.push(`message=${msg}`);
   return ` [${parts.join(" ")}]`;
 }
 function withOperatorDetail(sentence, ctx) {
@@ -8160,9 +8162,10 @@ var SLUG_COPY = Object.freeze({
   repo_not_found: "that repo isn't connected to Backthread yet \u2014 run `backthread` to connect it.",
   not_a_member: RE_INVITE,
   // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
-  // exactly one condition in every producer: `!repo.account_id`. The first draft told the
-  // reader to ask one of its owners for an invite, which is advice about people who do not
-  // exist. Read the producer before writing the sentence.
+  // `!repo.account_id` — the read side reaching it only for a private repo, since a public
+  // one short-circuits first. Never on a permission a reader could be granted, and the first
+  // draft told the reader to ask one of its owners for an invite — advice about people who
+  // do not exist. Read the producer before writing the sentence.
   // Fires on the IDENTICAL condition as `repo_not_writable` (`!repo.account_id`), so it
   // gets the identical remedy. An earlier draft named the fix on one and left the other
   // with nothing to do.
@@ -8204,7 +8207,7 @@ var SLUG_COPY = Object.freeze({
   persist_failed: "the write didn't complete on our side. Nothing was saved; try again.",
   inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
   // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
-  // sends any of them — they belong to /ci/snapshot and the git-decisions routes. Dead
+  // sends any of them — they are emitted only by routes this package never calls — /ci/snapshot, the git-decisions and billing routes. Dead
   // entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
   // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
   // written to fix it.
@@ -36347,9 +36350,10 @@ Manage
 
 Global flags
   --verbose               When something fails, also print the operator detail \u2014 the
-                          internal error code and the database's own SQLSTATE. Off by
-                          default: those name our call sites, not anything you can act
-                          on. (Also BACKTHREAD_VERBOSE=1, which the MCP tools read too.)
+                          HTTP status, our internal error code, the retry reason and the
+                          database's own SQLSTATE. Off by default: those name our call
+                          sites, not anything you can act on. (Also BACKTHREAD_VERBOSE=1,
+                          which the MCP tools read too.)
 
 Your source never leaves your machine unredacted \u2014 it's checkable in this OSS repo.
 Docs:     https://app.backthread.dev

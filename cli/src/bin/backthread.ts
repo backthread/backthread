@@ -137,9 +137,10 @@ Manage
 
 Global flags
   --verbose               When something fails, also print the operator detail — the
-                          internal error code and the database's own SQLSTATE. Off by
-                          default: those name our call sites, not anything you can act
-                          on. (Also BACKTHREAD_VERBOSE=1, which the MCP tools read too.)
+                          HTTP status, our internal error code, the retry reason and the
+                          database's own SQLSTATE. Off by default: those name our call
+                          sites, not anything you can act on. (Also BACKTHREAD_VERBOSE=1,
+                          which the MCP tools read too.)
 
 Your source never leaves your machine unredacted — it's checkable in this OSS repo.
 Docs:     https://app.backthread.dev

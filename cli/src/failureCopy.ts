@@ -167,7 +167,7 @@ export function readFailureSlug(payload: Record<string, unknown>): string | null
  * same as "written for a person". A 4xx `error` string is the server answering the caller's
  * own request — `repo not found or not connected to Backthread`, `no repo given and none
  * connected — pass repo:"owner/name"` — and rendering those verbatim is right; hiding them
- * was a measured regression. But three Edge Functions this package calls do
+ * was a measured regression. But several Edge Functions this package calls do
  * `json({ error: message }, 500)` with the caught upstream string, so on a 5xx the same
  * field carries `could not serialize access due to concurrent update` and
  * `permission denied for schema private`. Both fail the machine-code test, and an earlier
@@ -202,9 +202,9 @@ export function readFailureCode(payload: Record<string, unknown>): string | null
  * Those are complete, correct sentences and are rendered verbatim.
  *
  * ⚠ THAT ALLOW-LIST IS NOT UNIVERSAL, AND AN EARLIER DRAFT OF THIS COMMENT CLAIMED IT WAS.
- * Two routes this module renders do not go through `failureBody` at all and DO pair a slug
- * with a raw upstream string — `persist_failed` on ingest-decisions and `inference_failed`
- * on /infer-decisions, both carrying `(e as Error).message`. Measured, that reached a
+ * Routes this module renders that do not go through `failureBody` at all DO pair a slug
+ * with a raw upstream string — `persist_failed` (both ingest-decisions and /infer-decisions)
+ * and `inference_failed`, each carrying `(e as Error).message`. Measured, that reached a
  * person as `the decisions weren't saved — duplicate key value violates unique constraint
  * "decisions_pkey"`. The fix is not a cleverer reader: both slugs are on {@link SLUG_COPY},
  * which is consulted FIRST, so neither body ever reaches this branch. A slug that pairs
@@ -250,6 +250,11 @@ function operatorSuffix(status: number, payload: Record<string, unknown>): strin
   if (reason) parts.push(`reason=${reason}`);
   const code = readFailureCode(payload);
   if (code) parts.push(`code=${code}`);
+  // A 5xx `message` too. It is deliberately withheld from the reader — it is upstream text
+  // like `duplicate key value violates unique constraint "decisions_pkey"` — but withholding
+  // it from the OPERATOR as well would just lose it, and they are the one who can act on it.
+  const msg = status >= 500 ? readServerMessage(payload) : null;
+  if (msg) parts.push(`message=${msg}`);
   return ` [${parts.join(' ')}]`;
 }
 
@@ -377,9 +382,10 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
   repo_not_found: "that repo isn't connected to Backthread yet — run `backthread` to connect it.",
   not_a_member: RE_INVITE,
   // ⚠ THESE TWO ARE NOT "ASK AN OWNER" — THEY ARE "THERE IS NO OWNER". Both fire on
-  // exactly one condition in every producer: `!repo.account_id`. The first draft told the
-  // reader to ask one of its owners for an invite, which is advice about people who do not
-  // exist. Read the producer before writing the sentence.
+  // `!repo.account_id` — the read side reaching it only for a private repo, since a public
+  // one short-circuits first. Never on a permission a reader could be granted, and the first
+  // draft told the reader to ask one of its owners for an invite — advice about people who
+  // do not exist. Read the producer before writing the sentence.
   // Fires on the IDENTICAL condition as `repo_not_writable` (`!repo.account_id`), so it
   // gets the identical remedy. An earlier draft named the fix on one and left the other
   // with nothing to do.
@@ -431,7 +437,7 @@ export const SLUG_COPY: Readonly<Record<string, string>> = Object.freeze({
   inference_failed: "the write-up didn't complete on our side. Nothing was saved; try again.",
 
   // ⚠ `forbidden`, `repo_not_connected` and `unauthorized` were here and NO reachable route
-  // sends any of them — they belong to /ci/snapshot and the git-decisions routes. Dead
+  // sends any of them — they are emitted only by routes this package never calls — /ci/snapshot, the git-decisions and billing routes. Dead
   // entries make "the table is exhaustive" quietly meaningless, and `forbidden`'s sentence
   // had re-committed the "ask an owner who does not exist" defect in a sibling of the entry
   // written to fix it.

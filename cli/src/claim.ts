@@ -122,8 +122,11 @@ function exchangeErrorMessage(
       // `Exchange failed (HTTP 500) — permission denied for schema private` to a person.
       // Same rule as the shared renderer: nobody writes reader-facing copy for a 500.
       const authored = status < 500 && typeof body?.message === 'string' ? body.message : '';
-      const detail = authored ? ` — ${authored}` : '';
-      return `Exchange failed (HTTP ${status})${detail}. ${fresh}`;
+      // The server's own sentence already ends in a stop and often already says "try
+      // again", so appending ours produced `…then try again.. Generate a fresh code … and
+      // try again.` When it speaks, it speaks alone.
+      if (authored) return `Exchange failed (HTTP ${status}) — ${authored}`;
+      return `Exchange failed (HTTP ${status}). ${fresh}`;
     }
   }
 }
