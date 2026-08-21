@@ -137,12 +137,12 @@ test('server error slugs map to actionable messages', async () => {
 
 test('an unknown 4xx slug falls back to the HTTP status + the server sentence', async () => {
   await withTempEnv(async (env) => {
-    const { impl } = fetchStub(400, { error: 'mint_failed', message: 'that code is malformed' });
+    const { impl } = fetchStub(400, { error: 'a_slug_nothing_maps', message: 'that code is malformed' });
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.equal(result.ok, false);
     assert.match(result.message, /HTTP 400/);
     assert.match(result.message, /that code is malformed/);
-    assert.doesNotMatch(result.message, /mint_failed/);
+    assert.doesNotMatch(result.message, /a_slug_nothing_maps/);
   });
 });
 
@@ -209,13 +209,19 @@ test('the 500 that carries deliberate recovery copy keeps it', async () => {
   // shared renderer replaced it with "retry and file a bug", which is both useless and
   // wrong. The discriminator is the slug, not the status.
   await withTempEnv(async (env) => {
+    // ⚠ AND ONLY HALF OF THAT `message` IS AUTHORED. `lastFail` is `error.message` from the
+    // register RPC — a raw Postgres string on one of its two arms — so relaying the whole
+    // thing printed `permission denied for schema private — the claim code is spent…`. The
+    // recovery is the half that matters and it never varies, so the client writes it.
     const { impl } = fetchStub(500, {
       error: 'mint_failed',
-      message: 'could not allocate token — the claim code is spent; generate a fresh one.',
+      message: 'permission denied for schema private — the claim code is spent; generate a fresh one.',
     });
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.equal(result.ok, false);
-    assert.match(result.message, /the claim code is spent; generate a fresh one\./);
+    assert.match(result.message, /That claim code is spent/);
+    assert.match(result.message, /Generate a fresh code at/);
+    assert.doesNotMatch(result.message, /permission denied/);
     assert.doesNotMatch(result.message, /issues/);
   });
 });
@@ -229,5 +235,17 @@ test('the OTHER 500 arm, which pairs its slug with raw upstream text, still says
     const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
     assert.doesNotMatch(result.message, /permission denied/);
     assert.match(result.message, /issues/);
+  });
+});
+
+test('an unmapped 4xx with no server sentence still names the one recovery there is', async () => {
+  // ⚠ A SURVIVING MUTANT. Deleting the "generate a fresh code" tail left the suite green
+  // while the line became `Exchange failed (HTTP 400).` and nothing else — a status and no
+  // next step, on the arm most likely to catch a slug nobody has mapped yet.
+  await withTempEnv(async (env) => {
+    const { impl } = fetchStub(400, { error: 'a_slug_nothing_maps' });
+    const result = await exchangeClaim(CODE, { env, fetchImpl: impl });
+    assert.match(result.message, /HTTP 400/);
+    assert.match(result.message, /Generate a fresh code at/);
   });
 });

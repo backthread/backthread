@@ -7363,7 +7363,7 @@ var CLI_ENDPOINTS = Object.freeze({
   buildOnboardingStateUrl: { renders: "failure-body", entryPoint: "fetchOnboardingState" },
   buildCliAuthPollUrl: {
     renders: "own-slug-map",
-    why: "the login poll owns a state machine (pending / expired / claimed), not a failure taxonomy \u2014 each state is its own instruction to the person waiting at the terminal."
+    why: "the login poll owns a state machine (pending / ready / expired / consumed), not a failure taxonomy \u2014 each state is its own instruction to the person waiting at the terminal."
   },
   buildExchangeClaimUrl: {
     renders: "own-slug-map",
@@ -7427,12 +7427,15 @@ function exchangeErrorMessage(status, body, env) {
     case "rate_limited":
       return "Too many attempts from this machine \u2014 wait a few minutes and try again.";
     default: {
-      if (slug === "mint_failed" && typeof body?.message === "string") {
-        return `Exchange failed (HTTP ${status}) \u2014 ${body.message}`;
+      if (slug === "mint_failed") {
+        return withOperatorDetail(
+          `That claim code is spent \u2014 it was consumed even though the device could not be authorized. ${fresh}`,
+          { status, payload: body ?? {}, env }
+        );
       }
       if (status >= 500) {
         return describeFailure({
-          lead: "this device could not be authorized",
+          lead: "This device could not be authorized",
           status,
           payload: body ?? {},
           env

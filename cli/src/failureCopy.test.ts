@@ -533,8 +533,17 @@ const ORIGIN_MODULES = ['urls.ts', 'doctor.ts'];
  *
  * Both are gone because the discriminators are. `buildExchangeClaimUrl` moved here, so this
  * is the only URL module; every export in it that is not an origin helper must be in the
- * registry, with no test of what its body says or what its signature returns. There is
- * nothing left to spell differently.
+ * registry, with no test of what its body says or what its signature returns.
+ *
+ * ⚠ WHAT THIS IS AND IS NOT. Earlier drafts of this comment ended "there is nothing left to
+ * spell differently", and an outside read falsified that sentence four rounds running — most
+ * recently with `export default`. The claim was the defect, not just the spelling. What is
+ * true: the ORDINARY ways to add an endpoint are red at three independent points — an
+ * unregistered builder, a module that makes requests without being declared one, and a URL
+ * that was invented or edited. It is a source-level trace, not a type system: a determined
+ * author can still dodge it, and a reviewer should still read a diff that adds a request.
+ * What it stops is FORGETTING, which is what actually happened here — the defect this whole
+ * change exists for sat on five routes at once because nothing ever asked.
  */
 const URL_MODULES = ['urls.ts'];
 
@@ -589,8 +598,9 @@ function declaredBuilders(): string[] {
     const src = codeOnly(readFileSync(join(SRC_DIR, base), 'utf8'));
     for (const m of src.matchAll(
       // `const` was the only binding form matched, so `export let buildLessonNextUrl = …`
-      // walked out of the registry. Every binding keyword, and `class` for good measure.
-      /\bexport\s+(?:async\s+)?(?:function\s+([A-Za-z0-9_]+)|(?:const|let|var|class)\s+([A-Za-z0-9_]+)\s*[:={(]?)/g,
+      // walked out of the registry — and later `export default function …` did the same.
+      // Every binding keyword, `default`, and `class` for good measure.
+      /\bexport\s+(?:default\s+)?(?:async\s+)?(?:function\s+([A-Za-z0-9_]+)|(?:const|let|var|class)\s+([A-Za-z0-9_]+)\s*[:={(]?)/g,
     )) {
       const name = m[1] ?? m[2];
       if (ORIGIN_DECLS.has(name)) continue;
@@ -663,7 +673,7 @@ test('every disposition that is not a renderer says something', () => {
  */
 const ORIGIN_ALLOWED = new Set([...URL_MODULES, 'doctor.ts']);
 
-test('endpoint construction is centralised, so nothing can dodge the registry', () => {
+test('endpoint construction is centralised, so the ordinary ways are red', () => {
   // ⚠ WIDENED FROM A PATTERN TO A BAN, after an outside read walked four spellings past the
   // pattern version: `base + '/path'`, a `const base = workerBaseUrl(env)` hop, a hardcoded
   // `https://….workers.dev/path`, and a builder that simply was not called `build…Url`.
@@ -1846,4 +1856,12 @@ test('a single word is not a sentence somebody wrote for you', () => {
   const out = describeFailure({ lead: 'zzlead', status: 400, payload: { error: 'hasOwnProperty' }, env: PLAIN_ENV });
   assert.doesNotMatch(out, /hasOwnProperty/, out);
   assert.match(out, /HTTP 400/);
+});
+
+test('the verdict follows the lead as a SENTENCE, not as another dashed clause', () => {
+  // ⚠ A SURVIVING MUTANT, on a join the module argues for explicitly: the presenter above
+  // this already prefixes `query: read-failed — `, so a third dash turns the line into a log
+  // entry. Swapping the full stop for a dash was invisible.
+  const out = describeFailure({ lead: 'zzlead', status: 502, payload: OVERLOADED, env: PLAIN_ENV });
+  assert.equal(out, 'zzlead. The database was busy — try again in a moment.');
 });

@@ -17,7 +17,7 @@
 import { updateConfig } from './config.js';
 import { appBaseUrl, buildExchangeClaimUrl } from './urls.js';
 import { versionHeaders } from './version.js';
-import { describeFailure } from './failureCopy.js';
+import { describeFailure, withOperatorDetail } from './failureCopy.js';
 
 // Plaintext prefix of every claim code (lockstep with the mint-claim /
 // exchange-claim Edge Functions). A code is NOT a token — visually distinct from
@@ -129,12 +129,21 @@ function exchangeErrorMessage(
       // and by then the code really is burned, so a fresh one is the ONLY recovery. A first
       // draft sent every 5xx through the renderer on the grounds that nobody writes
       // reader-facing copy for a 500. This endpoint does, on one of its two arms.
-      if (slug === 'mint_failed' && typeof body?.message === 'string') {
-        return `Exchange failed (HTTP ${status}) — ${body.message}`;
+      if (slug === 'mint_failed') {
+        // ⚠ AND WE WRITE THE SENTENCE, NOT THE SERVER. Its `message` is
+        // `` `${lastFail} — the claim code is spent; generate a fresh one.` ``, and only the
+        // SUFFIX is authored — `lastFail` is `error.message` from the register RPC, i.e. a
+        // raw Postgres string on one of its two arms. Relaying the whole thing printed
+        // `permission denied for schema private — the claim code is spent…` to a person.
+        // The recovery is the half that matters and it is always the same, so it is ours.
+        return withOperatorDetail(
+          `That claim code is spent — it was consumed even though the device could not be authorized. ${fresh}`,
+          { status, payload: (body ?? {}) as Record<string, unknown>, env },
+        );
       }
       if (status >= 500) {
         return describeFailure({
-          lead: 'this device could not be authorized',
+          lead: 'This device could not be authorized',
           status,
           payload: (body ?? {}) as Record<string, unknown>,
           env,

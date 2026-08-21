@@ -281,7 +281,7 @@ function operatorSuffix(status: number, payload: Record<string, unknown>): strin
 /**
  * A complete sentence, plus the operator suffix if one was asked for.
  *
- * Two paths answer with copy of their own before `describeFailure` is reached — the 409
+ * Some paths answer with copy of their own before `describeFailure` is reached — the 409
  * "a lesson is already being prepared" and the bare-410 expired-ask reassurance — and both
  * are RIGHT to: the server wrote the first, and the second is the design working rather
  * than a failure. But `--verbose` stopped meaning anything on them, which makes the switch
@@ -547,7 +547,7 @@ export const CLI_ENDPOINTS: Readonly<Record<string, EndpointDisposition>> = Obje
   buildOnboardingStateUrl: { renders: 'failure-body', entryPoint: 'fetchOnboardingState' },
   buildCliAuthPollUrl: {
     renders: 'own-slug-map',
-    why: 'the login poll owns a state machine (pending / expired / claimed), not a failure taxonomy — each state is its own instruction to the person waiting at the terminal.',
+    why: 'the login poll owns a state machine (pending / ready / expired / consumed), not a failure taxonomy — each state is its own instruction to the person waiting at the terminal.',
   },
   buildExchangeClaimUrl: {
     renders: 'own-slug-map',

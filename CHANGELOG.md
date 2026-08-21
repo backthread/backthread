@@ -72,9 +72,11 @@ error)` logic — two as a named helper, five inlined at the call site — which
 the reported one would have left six. There is one renderer now, plus a registry of every
 endpoint this package can reach and what a person sees when it fails. Endpoints can only be
 born in one module; that module cannot make requests; every export of it must be in the
-registry; only two named files may write an address down; and no URL a builder returned may
-be edited — followed through its bindings, its imports and the function it was returned
-from. So an endpoint joins the package red until somebody answers that question.
+registry; an address may be written down in only three named files; and no URL a builder
+returned may be edited — followed through its bindings, its imports and the function it was
+returned from. So the ordinary ways to add an endpoint are red until somebody answers that
+question. It is a source-level trace rather than a type system, so it stops forgetting, not
+a determined author.
 
 ## 0.20.0
 
