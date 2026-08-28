@@ -8360,16 +8360,17 @@ function resolveRepoRoots(cwd, run = defaultGitRunner) {
   const top = (run(cwd, ["rev-parse", "--show-toplevel"]) ?? "").trim();
   if (top.length === 0) return [resolve(cwd)];
   const primary = resolve(top);
-  const commonDir = (run(cwd, ["rev-parse", "--git-common-dir"]) ?? "").trim();
+  const commonDir = (run(primary, ["rev-parse", "--git-common-dir"]) ?? "").trim();
   if (commonDir.length === 0) return [primary];
-  const identity = resolve(cwd, commonDir);
-  const listed = run(cwd, ["worktree", "list", "--porcelain"]);
+  const identity = resolve(primary, commonDir);
+  const listed = run(primary, ["worktree", "list", "--porcelain"]);
   if (listed === null) return [primary];
   const roots = [primary];
   let checked = 0;
   for (const raw of parseWorktreePorcelain(listed)) {
     const candidate = resolve(raw);
     if (roots.includes(candidate)) continue;
+    if (candidate === identity || candidate.startsWith(identity + "/")) continue;
     if (checked >= MAX_LINKED_WORKTREES) break;
     checked += 1;
     const candidateCommon = (run(candidate, ["rev-parse", "--git-common-dir"]) ?? "").trim();

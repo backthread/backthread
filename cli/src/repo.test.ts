@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -226,6 +226,100 @@ test('resolveRepoRoots reads only the `worktree` lines of the porcelain record',
   };
   // `HEAD …`, `branch …`, `detached`, `locked` and `prunable …` are not paths.
   assert.deepEqual(resolveRepoRoots('/work/app', run), ['/work/app', '/work/lane1']);
+});
+
+// A hook payload's `cwd` is whatever the host agent reported, which is not guaranteed
+// to be the physical path — `/tmp` is a symlink on macOS, and people symlink project
+// dirs. Measured against a LOGICAL cwd, git's common dir answer resolves somewhere no
+// candidate can match and every worktree is refused: the widening degrades to exactly
+// the behaviour it exists to replace, silently. This is why the identity is taken from
+// the toplevel and not from the cwd.
+test('resolveRepoRoots still finds the worktrees when reached through a SYMLINKED path', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-link-')));
+  try {
+    const real = join(tmp, 'real');
+    mkdirSync(real, { recursive: true });
+    const main = join(real, 'app');
+    const lane1 = join(real, 'app-lane1');
+    initRepo(main);
+    git(main, 'worktree', 'add', '-q', '-b', 'lane1', lane1);
+    symlinkSync(real, join(tmp, 'link'), 'dir');
+
+    const viaLink = resolveRepoRoots(join(tmp, 'link', 'app'));
+    assert.deepEqual([...viaLink].sort(), [main, lane1].sort());
+    // The probe is live: the same repo reached physically agrees.
+    assert.deepEqual([...resolveRepoRoots(main)].sort(), [main, lane1].sort());
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resolveRepoRoots refuses a worktree whose directory has been deleted', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-gone-')));
+  try {
+    const main = join(tmp, 'app');
+    const gone = join(tmp, 'app-gone');
+    initRepo(main);
+    git(main, 'worktree', 'add', '-q', '-b', 'gone', gone);
+    assert.ok(resolveRepoRoots(main).includes(gone), 'precondition: it was a root while it existed');
+    rmSync(gone, { recursive: true, force: true });
+    // `git worktree list` still names it (nothing has pruned the registration), so the
+    // only thing keeping it out is the check that it answers as a repo at all.
+    assert.deepEqual(resolveRepoRoots(main), [main]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resolveRepoRoots never admits git internals (a submodule gitdir) as a checkout', () => {
+  const run: GitRunner = (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/host/sub\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return '/work/host/.git/modules/sub\n';
+    if (args[0] === 'worktree') {
+      // What `worktree list` reports from inside a submodule: the checkout AND the
+      // gitdir. The gitdir shares the common dir, so only an explicit exclusion keeps
+      // git's own storage out of a list of directories a session edits files in.
+      return ['worktree /work/host/sub', '', 'worktree /work/host/.git/modules/sub', ''].join('\n');
+    }
+    return null;
+  };
+  assert.deepEqual(resolveRepoRoots('/work/host/sub', run), ['/work/host/sub']);
+});
+
+test('resolveRepoRoots ignores a path-less porcelain line rather than adopting the process cwd', () => {
+  const run: GitRunner = (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return '/work/app/.git\n';
+    if (args[0] === 'worktree') return ['worktree /work/app', '', 'worktree ', '', 'worktree   ', ''].join('\n');
+    return null;
+  };
+  const roots = resolveRepoRoots('/work/app', run);
+  // An empty path would `resolve('')` to the PROCESS cwd — this repo — and quietly make
+  // the machine's own checkout a root of somebody else's repo.
+  assert.deepEqual(roots, ['/work/app']);
+  assert.ok(!roots.includes(process.cwd()));
+});
+
+test('resolveRepoRoots caps how many linked worktrees one call will probe', () => {
+  let probes = 0;
+  const run: GitRunner = (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') {
+      probes += 1;
+      return '/work/app/.git\n';
+    }
+    if (args[0] === 'worktree') {
+      const lines = ['worktree /work/app', ''];
+      for (let i = 0; i < 500; i += 1) lines.push(`worktree /work/lane${i}`, '');
+      return lines.join('\n');
+    }
+    return null;
+  };
+  const roots = resolveRepoRoots('/work/app', run);
+  // The cap bounds how many subprocesses one capture can spawn: the session's own probe
+  // plus at most 64 candidates, never the 500 git happened to list.
+  assert.equal(roots.length, 65);
+  assert.equal(probes, 65);
 });
 
 test('resolveRepoRoots degrades to the toplevel alone when git cannot list worktrees', () => {

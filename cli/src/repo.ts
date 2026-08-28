@@ -187,11 +187,18 @@ export function resolveRepoRoots(cwd: string, run: GitRunner = defaultGitRunner)
 
   // `--git-common-dir` answers relative to the cwd it was asked from (plain `.git` in a
   // main checkout, an absolute path from a linked worktree), so resolve before comparing.
-  const commonDir = (run(cwd, ['rev-parse', '--git-common-dir']) ?? '').trim();
+  // Everything below is measured from `primary`, NEVER from the caller's `cwd`.
+  // `--show-toplevel` answers with the PHYSICAL path, while `--git-common-dir` can
+  // answer with a bare `.git` relative to wherever it was asked from. Ask from `cwd`
+  // and a caller who reached the repo through a symlink gets a LOGICAL identity that
+  // matches no candidate — every sibling worktree is then refused and the whole
+  // widening silently does nothing. Asking from `primary` puts both sides on physical
+  // paths. (`cwd` here comes off a hook payload, so it is not guaranteed physical.)
+  const commonDir = (run(primary, ['rev-parse', '--git-common-dir']) ?? '').trim();
   if (commonDir.length === 0) return [primary];
-  const identity = resolve(cwd, commonDir);
+  const identity = resolve(primary, commonDir);
 
-  const listed = run(cwd, ['worktree', 'list', '--porcelain']);
+  const listed = run(primary, ['worktree', 'list', '--porcelain']);
   if (listed === null) return [primary];
 
   const roots = [primary];
@@ -199,6 +206,11 @@ export function resolveRepoRoots(cwd: string, run: GitRunner = defaultGitRunner)
   for (const raw of parseWorktreePorcelain(listed)) {
     const candidate = resolve(raw);
     if (roots.includes(candidate)) continue;
+    // Asked from inside a submodule, `worktree list` names the submodule's GITDIR
+    // (`<host>/.git/modules/<name>`). It shares the common dir, so it would pass the
+    // check below — but it is git's own storage, never a checkout, and no file a
+    // session edits lives under it.
+    if (candidate === identity || candidate.startsWith(identity + '/')) continue;
     if (checked >= MAX_LINKED_WORKTREES) break;
     checked += 1;
     const candidateCommon = (run(candidate, ['rev-parse', '--git-common-dir']) ?? '').trim();
