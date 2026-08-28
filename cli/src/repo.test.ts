@@ -293,6 +293,47 @@ test('resolveRepoRoots handles a symlink that renames the checkout, not just its
   }
 });
 
+// THE case string reasoning cannot settle: an alias that EXISTS and names something
+// else. With a second link in the tree, substituting the prefix can land on a real
+// directory that has nothing to do with the repo — and as a root it would make every
+// file under it count as in-repo. Only asking the filesystem separates the two.
+test('resolveRepoRoots rejects an alias that exists but resolves to a DIFFERENT directory', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-decoy-')));
+  try {
+    const real = join(tmp, 'real');
+    const app = join(real, 'app');
+    const worktree = join(real, 'decoy');
+    mkdirSync(app, { recursive: true });
+    mkdirSync(worktree, { recursive: true });
+
+    // `link/` is a REAL directory. `link/app` is a symlink to the checkout, which is how
+    // the session reaches it — but `link/decoy` is an unrelated directory that merely
+    // happens to sit where the substitution points.
+    const link = join(tmp, 'link');
+    mkdirSync(link, { recursive: true });
+    symlinkSync(app, join(link, 'app'), 'dir');
+    mkdirSync(join(link, 'decoy'), { recursive: true });
+    writeFileSync(join(link, 'decoy', 'not-ours.ts'), 'export const x = 1;\n');
+
+    const run: GitRunner = (_cwd, args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return `${app}\n`;
+      if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return `${app}/.git\n`;
+      if (args[0] === 'worktree') return [`worktree ${app}`, '', `worktree ${worktree}`, ''].join('\n');
+      return null;
+    };
+
+    const roots = resolveRepoRoots(join(link, 'app'), run);
+    // The alias that genuinely names the checkout is kept.
+    assert.ok(roots.includes(join(link, 'app')), 'the real alias must survive');
+    assert.ok(roots.includes(app) && roots.includes(worktree));
+    // The one that only looks right is not.
+    assert.ok(!roots.includes(join(link, 'decoy')), 'an alias naming another directory must be refused');
+    assert.equal(roots.length, 3);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // NEGATIVE CONTROL for the aliasing. A root that is not under the substituted prefix
 // must be left alone. Rewriting it anyway can shorten it to the directory ABOVE the
 // repos, and a root that wide swallows every unrelated repo sitting beside them — the

@@ -8368,9 +8368,14 @@ function withLogicalAlias(cwd, roots) {
   if (logicalHead === physicalHead) return roots;
   const out = [...roots];
   for (const root of roots) {
-    if (physicalHead.length > 0 && root !== physicalHead && !root.startsWith(physicalHead + "/")) continue;
     const alias = logicalHead + root.slice(physicalHead.length);
-    if (alias.length > 0 && alias !== root && !out.includes(alias)) out.push(alias);
+    if (alias.length === 0 || alias === root || out.includes(alias)) continue;
+    try {
+      if (realpathSync2(alias) !== realpathSync2(root)) continue;
+    } catch {
+      continue;
+    }
+    out.push(alias);
   }
   return out;
 }

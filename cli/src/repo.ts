@@ -163,9 +163,13 @@ const MAX_LINKED_WORKTREES = 64;
  * just the session's own checkout — they are named by the same listing and reached through
  * the same link.
  *
- * This never widens a root. Each alias names exactly the directory its source named, by
- * another path. If the two spellings do not line up we add nothing rather than guess: an
- * over-wide root would let a foreign path in, and losing a path is the safer failure.
+ * An alias is only kept if it RESOLVES to the same directory as the root it came from.
+ * The substitution is string surgery on a path that is about to become a repo root, and a
+ * root deciding the wrong directory is in-repo is how another project's files get in. The
+ * argument that it cannot happen is not enough — with a second link in the tree the
+ * substitution can land on a real, unrelated directory — so the filesystem is asked
+ * instead of reasoned about. Anything that does not resolve, or resolves elsewhere, is
+ * dropped: losing a path is the safer failure.
  */
 function withLogicalAlias(cwd: string, roots: string[]): string[] {
   const logicalCwd = resolve(cwd);
@@ -198,9 +202,21 @@ function withLogicalAlias(cwd: string, roots: string[]): string[] {
 
   const out = [...roots];
   for (const root of roots) {
-    if (physicalHead.length > 0 && root !== physicalHead && !root.startsWith(physicalHead + '/')) continue;
     const alias = logicalHead + root.slice(physicalHead.length);
-    if (alias.length > 0 && alias !== root && !out.includes(alias)) out.push(alias);
+    if (alias.length === 0 || alias === root || out.includes(alias)) continue;
+    // An alias is a string we BUILT, and it is about to become a repo root — the thing
+    // that decides whether a file path counts as in-repo. So it has to PROVE it names the
+    // same directory rather than us arguing that it must. String reasoning is not enough:
+    // with more than one link in the tree a substitution can spell a real but unrelated
+    // directory, and a root that names the wrong place admits another repo's files.
+    // Anything that fails to resolve, or resolves elsewhere, is dropped. One stat per
+    // root, on a list already capped at 65.
+    try {
+      if (realpathSync(alias) !== realpathSync(root)) continue;
+    } catch {
+      continue; // the alias names nothing on disk
+    }
+    out.push(alias);
   }
   return out;
 }
