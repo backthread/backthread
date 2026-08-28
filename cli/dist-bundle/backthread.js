@@ -6891,7 +6891,7 @@ var require_dist = __commonJS({
 
 // src/bin/backthread.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { realpathSync as realpathSync2 } from "node:fs";
+import { realpathSync as realpathSync3 } from "node:fs";
 
 // src/login.ts
 import { hostname } from "node:os";
@@ -8285,6 +8285,7 @@ function sessionPaths(records, repoRoot, options) {
 
 // src/repo.ts
 import { execFileSync } from "node:child_process";
+import { realpathSync as realpathSync2 } from "node:fs";
 import { resolve } from "node:path";
 function parseRepoFromRemote(remote) {
   const trimmed = remote.trim();
@@ -8347,6 +8348,32 @@ function resolveGitContext(cwd, run = defaultGitRunner) {
   };
 }
 var MAX_LINKED_WORKTREES = 64;
+function withLogicalAlias(cwd, roots) {
+  const logicalCwd = resolve(cwd);
+  let physicalCwd;
+  try {
+    physicalCwd = realpathSync2(logicalCwd);
+  } catch {
+    return roots;
+  }
+  if (logicalCwd === physicalCwd) return roots;
+  const logSegs = logicalCwd.split("/");
+  const physSegs = physicalCwd.split("/");
+  let shared = 0;
+  while (shared < logSegs.length && shared < physSegs.length && logSegs[logSegs.length - 1 - shared] === physSegs[physSegs.length - 1 - shared]) {
+    shared += 1;
+  }
+  const logicalHead = logSegs.slice(0, logSegs.length - shared).join("/");
+  const physicalHead = physSegs.slice(0, physSegs.length - shared).join("/");
+  if (logicalHead === physicalHead) return roots;
+  const out = [...roots];
+  for (const root of roots) {
+    if (physicalHead.length > 0 && root !== physicalHead && !root.startsWith(physicalHead + "/")) continue;
+    const alias = logicalHead + root.slice(physicalHead.length);
+    if (alias.length > 0 && alias !== root && !out.includes(alias)) out.push(alias);
+  }
+  return out;
+}
 function parseWorktreePorcelain(out) {
   const paths = [];
   for (const line of out.split("\n")) {
@@ -8361,10 +8388,10 @@ function resolveRepoRoots(cwd, run = defaultGitRunner, warn = (m) => console.war
   if (top.length === 0) return [resolve(cwd)];
   const primary = resolve(top);
   const commonDir = (run(primary, ["rev-parse", "--git-common-dir"]) ?? "").trim();
-  if (commonDir.length === 0) return [primary];
+  if (commonDir.length === 0) return withLogicalAlias(cwd, [primary]);
   const identity = resolve(primary, commonDir);
   const listed = run(primary, ["worktree", "list", "--porcelain"]);
-  if (listed === null) return [primary];
+  if (listed === null) return withLogicalAlias(cwd, [primary]);
   const roots = [primary];
   let checked = 0;
   for (const raw of parseWorktreePorcelain(listed)) {
@@ -8383,7 +8410,7 @@ function resolveRepoRoots(cwd, run = defaultGitRunner, warn = (m) => console.war
     if (resolve(candidate, candidateCommon) !== identity) continue;
     roots.push(candidate);
   }
-  return roots;
+  return withLogicalAlias(cwd, roots);
 }
 
 // src/infer.ts
@@ -36822,7 +36849,7 @@ function isEntryPoint() {
     const self = fileURLToPath2(import.meta.url);
     const resolve3 = (p) => {
       try {
-        return realpathSync2(p);
+        return realpathSync3(p);
       } catch {
         return p;
       }

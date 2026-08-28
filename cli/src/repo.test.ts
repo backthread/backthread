@@ -245,10 +245,141 @@ test('resolveRepoRoots still finds the worktrees when reached through a SYMLINKE
     git(main, 'worktree', 'add', '-q', '-b', 'lane1', lane1);
     symlinkSync(real, join(tmp, 'link'), 'dir');
 
-    const viaLink = resolveRepoRoots(join(tmp, 'link', 'app'));
-    assert.deepEqual([...viaLink].sort(), [main, lane1].sort());
-    // The probe is live: the same repo reached physically agrees.
+    const linked = join(tmp, 'link', 'app');
+    const linkedLane = join(tmp, 'link', 'app-lane1');
+    const viaLink = resolveRepoRoots(linked);
+    // Both the real directories AND the spelling the caller used, for EVERY root. An
+    // agent started under the symlink reports its file paths under the symlink too, and
+    // a physical root does not prefix-match those — so measuring only physically would
+    // buy worktree matching by taking away the session's own paths. The sibling worktree
+    // needs the same treatment: it is reached through the same link.
+    assert.deepEqual([...viaLink].sort(), [main, lane1, linked, linkedLane].sort());
+    assert.equal(viaLink[0], main, 'the physical toplevel still leads');
+    // The probe is live: reached physically, there is no alias to add.
     assert.deepEqual([...resolveRepoRoots(main)].sort(), [main, lane1].sort());
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// The real shape of this on macOS: `/var` is a symlink to `/private/var`, so the
+// substituted prefix sits MANY segments above the repos. A root's alias has to keep the
+// whole path below the link, not just the repo's own directory name — otherwise every
+// repo collapses to the same place and the aliases name directories that do not exist.
+// A symlink that RENAMES the checkout — `~/proj -> ~/www/thing`, which is how a lot of
+// people shorten a path they type often. The two spellings share no trailing segment, so
+// the whole of one maps to the whole of the other.
+test('resolveRepoRoots handles a symlink that renames the checkout, not just its parent', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-rename-')));
+  try {
+    const main = join(tmp, 'www', 'thing');
+    initRepo(main);
+    const lane = join(tmp, 'www', 'thing-lane');
+    git(main, 'worktree', 'add', '-q', '-b', 'lane', lane);
+    const alias = join(tmp, 'proj');
+    symlinkSync(main, alias, 'dir');
+
+    const roots = resolveRepoRoots(alias);
+    // The renamed spelling has to be a root, or the session's own paths — which the
+    // agent reports as `<tmp>/proj/src/a.ts` — match nothing and are all dropped.
+    assert.ok(roots.includes(alias), 'the spelling the caller used must be a root');
+    assert.ok(roots.includes(main));
+    assert.ok(roots.includes(lane), 'the sibling worktree is still found');
+    // And it must not have widened to the directory holding both repos.
+    assert.ok(!roots.includes(tmp));
+    assert.ok(!roots.includes(join(tmp, 'www')));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// NEGATIVE CONTROL for the aliasing. A root that is not under the substituted prefix
+// must be left alone. Rewriting it anyway can shorten it to the directory ABOVE the
+// repos, and a root that wide swallows every unrelated repo sitting beside them — the
+// exact leak the whole change is built to avoid, arriving through the fix for symlinks.
+test('resolveRepoRoots never aliases a root outside the substituted prefix into a wider one', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-alias-')));
+  try {
+    const real = join(tmp, 'real');
+    const app = join(real, 'app');
+    mkdirSync(app, { recursive: true });
+    symlinkSync(real, join(tmp, 'link'), 'dir');
+    // A foreign repo living beside the checkout under the symlinked spelling. If the
+    // alias ever widens to `<tmp>/link`, this becomes in-repo.
+    mkdirSync(join(real, 'unrelated'), { recursive: true });
+
+    const run: GitRunner = (_cwd, args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return `${app}\n`;
+      if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return `${app}/.git\n`;
+      // A worktree registered far outside the symlinked tree, and SHORTER than the
+      // prefix being substituted — the shape that collapses to the parent directory.
+      if (args[0] === 'worktree') return [`worktree ${app}`, '', 'worktree /x', ''].join('\n');
+      return null;
+    };
+
+    const roots = resolveRepoRoots(join(tmp, 'link', 'app'), run);
+    assert.ok(!roots.includes(join(tmp, 'link')), 'must never adopt the directory above the repo');
+    assert.ok(!roots.includes(real), 'must never adopt the physical directory above the repo');
+    assert.ok(!roots.includes(''), 'must never adopt an empty root');
+    // What it should be: the checkout, the far-away worktree, and the linked spelling
+    // of the checkout — nothing wider.
+    assert.deepEqual([...roots].sort(), [app, '/x', join(tmp, 'link', 'app')].sort());
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resolveRepoRoots rebuilds the full path below a symlink several levels above the repos', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-deep-')));
+  try {
+    const outer = join(tmp, 'outer');
+    const nest = join(outer, 'a', 'b');
+    mkdirSync(nest, { recursive: true });
+    const main = join(nest, 'app');
+    const lane = join(nest, 'app-lane');
+    initRepo(main);
+    git(main, 'worktree', 'add', '-q', '-b', 'lane', lane);
+    symlinkSync(outer, join(tmp, 'link'), 'dir');
+
+    const roots = resolveRepoRoots(join(tmp, 'link', 'a', 'b', 'app'));
+    assert.deepEqual(
+      [...roots].sort(),
+      [main, lane, join(tmp, 'link', 'a', 'b', 'app'), join(tmp, 'link', 'a', 'b', 'app-lane')].sort(),
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resolveRepoRoots aliases the TOPLEVEL, not the subdirectory, when reached via a symlink', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-linksub-')));
+  try {
+    const real = join(tmp, 'real');
+    mkdirSync(real, { recursive: true });
+    const main = join(real, 'app');
+    initRepo(main);
+    mkdirSync(join(main, 'packages', 'core'), { recursive: true });
+    symlinkSync(real, join(tmp, 'link'), 'dir');
+
+    const roots = resolveRepoRoots(join(tmp, 'link', 'app', 'packages', 'core'));
+    // The alias must climb back to the repo root, or a path under the symlink would
+    // relativize to `a.ts` instead of `packages/core/a.ts` and anchor to the wrong file.
+    assert.deepEqual([...roots].sort(), [main, join(tmp, 'link', 'app')].sort());
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('resolveRepoRoots adds no alias for a repo with no worktrees reached physically', () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'bt-roots-noalias-')));
+  try {
+    const main = join(tmp, 'app');
+    initRepo(main);
+    // Guards against the alias becoming an always-on second root: a wider root set than
+    // the repo is exactly how a foreign path would get in.
+    assert.deepEqual(resolveRepoRoots(main), [main]);
+    mkdirSync(join(main, "sub"), { recursive: true });
+    assert.deepEqual(resolveRepoRoots(join(main, "sub")), [main]);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -14,6 +14,7 @@
 // only decides WHICH repo slug the capture claims (connected vs repo-less is the
 // server's call).
 import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 export interface RepoHandle {
@@ -143,6 +144,67 @@ export function resolveGitContext(cwd: string, run: GitRunner = defaultGitRunner
  */
 const MAX_LINKED_WORKTREES = 64;
 
+/**
+ * Add each root back under the spelling the CALLER would use, when they reached the repo
+ * through a symlink and git answered with the physical path.
+ *
+ * Git always replies to `--show-toplevel` and `worktree list` with real paths, so every
+ * root is physical. But an agent started under `/var/project` — a symlink to
+ * `/private/var/project`, which is how macOS spells the same directory — reports its file
+ * paths that way too, and a physical root does not prefix-match a symlinked path. Putting
+ * the identity on physical paths is what makes the worktree matching work at all, so
+ * without this it would buy that by taking away the paths of anyone whose checkout is
+ * reached through a link. Both spellings name the same directories, so both are roots.
+ *
+ * The symlink is somewhere ABOVE the working directory, so we find it by comparing the
+ * caller's `cwd` with its own real path and taking the longest run of trailing path
+ * segments they agree on. What is left in front is the substitution: every root under the
+ * physical head is re-spelled with the logical one. That covers sibling worktrees too, not
+ * just the session's own checkout — they are named by the same listing and reached through
+ * the same link.
+ *
+ * This never widens a root. Each alias names exactly the directory its source named, by
+ * another path. If the two spellings do not line up we add nothing rather than guess: an
+ * over-wide root would let a foreign path in, and losing a path is the safer failure.
+ */
+function withLogicalAlias(cwd: string, roots: string[]): string[] {
+  const logicalCwd = resolve(cwd);
+  let physicalCwd: string;
+  try {
+    physicalCwd = realpathSync(logicalCwd);
+  } catch {
+    return roots; // cwd is gone from under us — nothing to alias
+  }
+  if (logicalCwd === physicalCwd) return roots; // no symlink in play
+
+  // Longest common trailing segment run, e.g. `/var/x/app` vs `/private/var/x/app`
+  // agree on `var/x/app`, leaving the heads `` and `/private`.
+  const logSegs = logicalCwd.split('/');
+  const physSegs = physicalCwd.split('/');
+  let shared = 0;
+  while (
+    shared < logSegs.length &&
+    shared < physSegs.length &&
+    logSegs[logSegs.length - 1 - shared] === physSegs[physSegs.length - 1 - shared]
+  ) {
+    shared += 1;
+  }
+  // `shared === 0` is the link that RENAMES: `~/proj -> /Users/me/www/thing`. The two
+  // spellings then share no trailing segment at all and the whole of one maps to the
+  // whole of the other, which the loop below handles as the `root === physicalHead` case.
+  const logicalHead = logSegs.slice(0, logSegs.length - shared).join('/');
+  const physicalHead = physSegs.slice(0, physSegs.length - shared).join('/');
+  if (logicalHead === physicalHead) return roots;
+
+  const out = [...roots];
+  for (const root of roots) {
+    if (physicalHead.length > 0 && root !== physicalHead && !root.startsWith(physicalHead + '/')) continue;
+    const alias = logicalHead + root.slice(physicalHead.length);
+    if (alias.length > 0 && alias !== root && !out.includes(alias)) out.push(alias);
+  }
+  return out;
+}
+
 /** The `<path>` of each `worktree <path>` line in `git worktree list --porcelain`. */
 function parseWorktreePorcelain(out: string): string[] {
   const paths: string[] = [];
@@ -199,11 +261,11 @@ export function resolveRepoRoots(
   // widening silently does nothing. Asking from `primary` puts both sides on physical
   // paths. (`cwd` here comes off a hook payload, so it is not guaranteed physical.)
   const commonDir = (run(primary, ['rev-parse', '--git-common-dir']) ?? '').trim();
-  if (commonDir.length === 0) return [primary];
+  if (commonDir.length === 0) return withLogicalAlias(cwd, [primary]);
   const identity = resolve(primary, commonDir);
 
   const listed = run(primary, ['worktree', 'list', '--porcelain']);
-  if (listed === null) return [primary];
+  if (listed === null) return withLogicalAlias(cwd, [primary]);
 
   const roots = [primary];
   let checked = 0;
@@ -235,5 +297,5 @@ export function resolveRepoRoots(
     if (resolve(candidate, candidateCommon) !== identity) continue; // a DIFFERENT repo
     roots.push(candidate);
   }
-  return roots;
+  return withLogicalAlias(cwd, roots);
 }
