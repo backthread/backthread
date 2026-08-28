@@ -180,7 +180,11 @@ function parseWorktreePorcelain(out: string): string[] {
  * git repo at all — same fail-soft as the rest of this module: capture still works,
  * it is just anchored where it always was.
  */
-export function resolveRepoRoots(cwd: string, run: GitRunner = defaultGitRunner): string[] {
+export function resolveRepoRoots(
+  cwd: string,
+  run: GitRunner = defaultGitRunner,
+  warn: (message: string) => void = (m) => console.warn(m),
+): string[] {
   const top = (run(cwd, ['rev-parse', '--show-toplevel']) ?? '').trim();
   if (top.length === 0) return [resolve(cwd)]; // not a git repo → the cwd is all we have
   const primary = resolve(top);
@@ -211,7 +215,20 @@ export function resolveRepoRoots(cwd: string, run: GitRunner = defaultGitRunner)
     // check below — but it is git's own storage, never a checkout, and no file a
     // session edits lives under it.
     if (candidate === identity || candidate.startsWith(identity + '/')) continue;
-    if (checked >= MAX_LINKED_WORKTREES) break;
+    if (checked >= MAX_LINKED_WORKTREES) {
+      // Say so. Past the cap, paths in the remaining worktrees go back to being
+      // dropped as foreign — this function's own bug, reappearing at scale — and
+      // WHICH worktrees survive is decided by git's listing order, not by which ones
+      // the session touched. Silent truncation leaves that undiagnosable from the
+      // outside; one line on stderr makes it a one-line diagnosis. It can only fire
+      // on a machine that has outgrown the bound, so it is not noise.
+      warn(
+        `backthread: more than ${MAX_LINKED_WORKTREES} linked worktrees; file paths in the ` +
+          'remainder will not be recognised as belonging to this repo. Run `git worktree prune` ' +
+          'to drop stale registrations and restore full coverage.',
+      );
+      break;
+    }
     checked += 1;
     const candidateCommon = (run(candidate, ['rev-parse', '--git-common-dir']) ?? '').trim();
     if (candidateCommon.length === 0) continue; // gone, or no longer a repo → not us

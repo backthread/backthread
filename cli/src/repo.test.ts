@@ -315,11 +315,30 @@ test('resolveRepoRoots caps how many linked worktrees one call will probe', () =
     }
     return null;
   };
-  const roots = resolveRepoRoots('/work/app', run);
+  const warnings: string[] = [];
+  const roots = resolveRepoRoots('/work/app', run, (m) => warnings.push(m));
   // The cap bounds how many subprocesses one capture can spawn: the session's own probe
   // plus at most 64 candidates, never the 500 git happened to list.
   assert.equal(roots.length, 65);
   assert.equal(probes, 65);
+  // And it SAYS SO. Past the cap the remaining worktrees' paths are dropped as foreign
+  // again — this function's own bug at scale — so the truncation must not be silent.
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /64 linked worktrees/);
+  assert.match(warnings[0], /git worktree prune/);
+});
+
+test('resolveRepoRoots stays quiet when it is under the cap', () => {
+  const run: GitRunner = (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return '/work/app/.git\n';
+    if (args[0] === 'worktree') return ['worktree /work/app', '', 'worktree /work/lane1', ''].join('\n');
+    return null;
+  };
+  const warnings: string[] = [];
+  resolveRepoRoots('/work/app', run, (m) => warnings.push(m));
+  // Otherwise the warning above is worthless: it has to mean something happened.
+  assert.deepEqual(warnings, []);
 });
 
 test('resolveRepoRoots degrades to the toplevel alone when git cannot list worktrees', () => {

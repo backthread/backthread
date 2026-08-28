@@ -248,6 +248,29 @@ test('sessionPaths with an EMPTY root list falls back to the transcript cwd, not
   assert.deepEqual(sessionPaths(records, ['', '   ']), ['src/changed.ts']);
 });
 
+// A root of `/` is not a root. It claims the whole filesystem as the repo, and the
+// only honest reading is that the caller supplied nothing usable — so it is treated
+// exactly like an omitted root and the transcript's own cwd decides. Stated as a test
+// because it is the one input where a single-string caller's result changed: `/` used
+// to be carried through and drop every absolute path, and a caller relying on that
+// silence would now start receiving the transcript-relative ones.
+test('sessionPaths treats a root of "/" as no root at all, not as the whole filesystem', () => {
+  const records = [
+    { type: 'session_meta', payload: { id: 'cx-1', cwd: '/Users/me/proj' } },
+    { type: 'response_item', payload: { type: 'function_call', arguments: JSON.stringify({ file_path: '/Users/me/proj/src/a.ts' } ) } },
+    { type: 'response_item', payload: { type: 'function_call', arguments: JSON.stringify({ file_path: '/etc/passwd' }) } },
+  ];
+  for (const root of ['/', '//', '/  ']) {
+    const out = sessionPaths(records, root);
+    assert.deepEqual(out, ['src/a.ts'], `root ${JSON.stringify(root)}`);
+    // Whatever it does, it must never turn the filesystem root into a repo root and
+    // start emitting everything absolute with the leading slash shaved off.
+    assert.ok(!out.includes('etc/passwd'));
+  }
+  // Same for the list form.
+  assert.deepEqual(sessionPaths(records, ['/']), ['src/a.ts']);
+});
+
 test('sessionPaths drops a path that IS a root, rather than re-measuring it upward', () => {
   const records = [
     { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { cwd: '/work/app/wt' } }] } },

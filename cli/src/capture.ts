@@ -143,7 +143,7 @@ export interface CaptureDeps {
    * against, so a file edited in a sibling worktree relativizes instead of being
    * dropped as foreign.
    */
-  resolveRepoRootsImpl?: (cwd: string, run?: GitRunner) => string[];
+  resolveRepoRootsImpl?: (cwd: string, run?: GitRunner, warn?: (message: string) => void) => string[];
   /**
    * ARP-693 — incremental capture watermark: infer ONLY the redacted turns at/after
    * this index, skipping turns already captured on an earlier `stop` of the same
@@ -366,7 +366,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // where the repo root already is. Memoised: one session asks thousands of times
     // and a session's working tree does not change under us mid-capture. Bounded by
     // the caps inside sessionPaths, so the map cannot grow without limit either.
-    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl) : [];
+    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, log) : [];
     const existsCache = new Map<string, boolean>();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {

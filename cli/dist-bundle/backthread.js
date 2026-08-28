@@ -8356,7 +8356,7 @@ function parseWorktreePorcelain(out) {
   }
   return paths;
 }
-function resolveRepoRoots(cwd, run = defaultGitRunner) {
+function resolveRepoRoots(cwd, run = defaultGitRunner, warn = (m) => console.warn(m)) {
   const top = (run(cwd, ["rev-parse", "--show-toplevel"]) ?? "").trim();
   if (top.length === 0) return [resolve(cwd)];
   const primary = resolve(top);
@@ -8371,7 +8371,12 @@ function resolveRepoRoots(cwd, run = defaultGitRunner) {
     const candidate = resolve(raw);
     if (roots.includes(candidate)) continue;
     if (candidate === identity || candidate.startsWith(identity + "/")) continue;
-    if (checked >= MAX_LINKED_WORKTREES) break;
+    if (checked >= MAX_LINKED_WORKTREES) {
+      warn(
+        `backthread: more than ${MAX_LINKED_WORKTREES} linked worktrees; file paths in the remainder will not be recognised as belonging to this repo. Run \`git worktree prune\` to drop stale registrations and restore full coverage.`
+      );
+      break;
+    }
     checked += 1;
     const candidateCommon = (run(candidate, ["rev-parse", "--git-common-dir"]) ?? "").trim();
     if (candidateCommon.length === 0) continue;
@@ -10145,7 +10150,7 @@ async function runCapture(input, deps = {}) {
     const records = parseJsonl(rawTranscript);
     const redacted = redactTranscript(records);
     const decidedAt = sessionTimestamp(records) ?? void 0;
-    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl) : [];
+    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, log) : [];
     const existsCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {

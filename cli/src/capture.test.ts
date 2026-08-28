@@ -305,6 +305,44 @@ test('the same session WITHOUT worktree awareness keeps only the hook cwd path (
   assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/gate.ts']);
 });
 
+// The root set is the repo TOPLEVEL, not the directory the hook happened to fire in.
+// A hook firing inside a monorepo package used to emit paths relative to that package,
+// which the server cannot join against modules derived from a walk of the repo root.
+// Pinned here because it is a silent change to the format of an existing field.
+test('a hook firing in a SUBDIRECTORY emits repo-root-relative paths, not cwd-relative ones', async () => {
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+    },
+  });
+  const transcript = [
+    JSON.stringify({ type: 'user', sessionId: 'sess-sub', message: { content: 'why split the core package?' } }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-29T09:00:00Z',
+      message: {
+        content: [
+          { type: 'text', text: 'Splitting core keeps the adapters off the hot path.' },
+          { type: 'tool_use', name: 'Edit', input: { file_path: '/work/app/packages/core/src/a.ts' } },
+        ],
+      },
+    }),
+  ].join('\n');
+
+  await runCapture(
+    { transcript_path: '/tmp/sess.jsonl', cwd: '/work/app/packages/core', session_id: 'sess-sub' },
+    deps({
+      fetchImpl,
+      readFileImpl: async () => transcript,
+      // What resolveRepoRoots reports from a subdirectory: the toplevel, not the cwd.
+      resolveRepoRootsImpl: () => ['/work/app'],
+    }),
+  );
+  assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['packages/core/src/a.ts']);
+});
+
 test('the existence gate for a SHELL path accepts a file that lives in a sibling worktree', async () => {
   let sentBody: unknown = null;
   const { fetch: fetchImpl } = stubFetch({
