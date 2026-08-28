@@ -314,6 +314,59 @@ function relativizeUnder(abs: string, root: string): string | null {
 }
 
 /**
+ * The repo roots an absolute path may be measured against. A single string is the
+ * historical contract and still works; a LIST is what lets one repo be present on
+ * disk at several paths at once — a checkout plus its linked worktrees. They are
+ * the same repo, so `<checkout>/src/a.ts` and `<worktree>/src/a.ts` must BOTH
+ * relativize to `src/a.ts` rather than the second being discarded as foreign.
+ *
+ * Membership is decided by the CALLER, never here: this package is pure and cannot
+ * ask git or the filesystem anything. Whatever roots arrive are taken to belong to
+ * one repo; a path under none of them is still foreign and is still dropped, which
+ * is what keeps a genuinely different repo out however many roots are supplied.
+ */
+export type SessionRoots = string | readonly string[];
+
+/**
+ * Clean, dedupe and ORDER the roots for matching. Longest first, because roots can
+ * nest: with a worktree parked inside its own checkout (`/repo` and `/repo/wt`) a
+ * file at `/repo/wt/src/a.ts` is under both, and only the deeper root yields the
+ * path the repo knows the file by (`src/a.ts`, not `wt/src/a.ts`). Trailing slashes
+ * are trimmed here so the ordering is decided on the same strings `relativizeUnder`
+ * will go on to compare.
+ */
+function normalizeRoots(roots: readonly string[]): string[] {
+  const cleaned: string[] = [];
+  for (const r of roots) {
+    if (typeof r !== 'string') continue;
+    const trimmed = r.trim().replace(/\/+$/, '');
+    if (trimmed.length === 0) continue;
+    if (!cleaned.includes(trimmed)) cleaned.push(trimmed);
+  }
+  return cleaned.sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Relativize `abs` against the first (deepest) root that contains it, then resolve
+ * whatever `..` the string-prefix strip left behind. Null when the path is under NO
+ * root — foreign, dropped.
+ *
+ * A path that IS a root names a directory, not a file, and resolves to nothing. We
+ * stop there rather than re-measuring it against a shallower root: that preserves
+ * the single-root behaviour exactly (the root itself was always dropped) instead of
+ * quietly turning a session's cwd into a harvested directory name.
+ */
+function relativizeUnderAny(abs: string, roots: readonly string[]): string | null {
+  for (const root of roots) {
+    const rel = relativizeUnder(abs, root);
+    if (rel === null) continue;
+    if (rel.length === 0) return null; // the root itself → not a file
+    return normalizeRepoRelative(rel);
+  }
+  return null;
+}
+
+/**
  * File extensions a token scraped out of a SHELL COMMAND must end in to count as
  * a file path. Exported so the accepted set is reviewable in one place (and so a
  * consumer can assert against it) rather than buried in a regex literal.
@@ -552,24 +605,47 @@ function codexSessionCwd(records: unknown[]): string | null {
  * paths live in, so this MUST run on the parsed records BEFORE `redactTranscript`
  * — same pre-redaction scan discipline as `sessionTimestamp`.
  *
- * `repoRoot` (optional): when given, each absolute path is normalized to
- * repo-relative by stripping the `repoRoot` prefix + leading slash. The caller
- * passes the WORKTREE root as `repoRoot`, so prefix-stripping handles worktrees
- * — we do NOT detect worktrees here. When `repoRoot` is omitted, we fall back to
- * an in-transcript root signal (Codex `session_meta.payload.cwd`); if no root can
- * be resolved, absolute paths are skipped (we NEVER emit machine-absolute paths)
- * and only already-relative paths are kept.
+ * `repoRoot` (optional): the root, or ROOTS, an absolute path is normalized against
+ * by stripping the root prefix + leading slash. One string is the original contract.
+ * A LIST is what makes this worktree-aware: a repo checked out at several paths at
+ * once (a checkout plus its linked worktrees) is ONE repo, and a file edited in any
+ * of them must relativize to the same repo-relative path instead of being discarded
+ * as foreign. Passing a single root that happens to be a worktree only ever covered
+ * the worktree the session started in — every sibling worktree it touched was lost,
+ * which on a machine where parallel worktrees are the normal workflow silently
+ * emptied the path list for whole sessions.
  *
- * Paths NOT under the resolved root are dropped (foreign to this repo). Already-
- * relative paths are kept as-is (deduped). Output is deduped + sorted for a
+ * We still do NOT detect worktrees here: this package is pure and dependency-free
+ * (load-bearing for the esbuild-inlined bundle), so it cannot ask git which paths
+ * are the same repo. The caller resolves that and hands the answer down.
+ *
+ * When `repoRoot` is omitted we fall back to an in-transcript root signal (Codex
+ * `session_meta.payload.cwd`); if no root can be resolved, absolute paths are
+ * skipped (we NEVER emit machine-absolute paths) and only already-relative paths
+ * are kept.
+ *
+ * Paths under NONE of the resolved roots are dropped (foreign to this repo).
+ * Already-relative paths are kept as-is (deduped). Output is deduped + sorted for a
  * stable order. Pure → unit-testable; zero runtime deps (plain string ops).
  *
  * `options.exists` — REQUIRED for any shell-derived path to be emitted; see
  * `SessionPathsOptions`. Without it this function behaves exactly as it did before
  * shell scanning existed.
  */
-export function sessionPaths(records: unknown[], repoRoot?: string, options?: SessionPathsOptions): string[] {
-  const root = (repoRoot && repoRoot.trim().length > 0 ? repoRoot.trim() : codexSessionCwd(records)) ?? null;
+export function sessionPaths(
+  records: unknown[],
+  repoRoot?: SessionRoots,
+  options?: SessionPathsOptions,
+): string[] {
+  // Defensive on the shape as well as the contents: this is a public MIT API and a
+  // JS caller can hand us anything. Anything that is neither a string nor an array
+  // contributes no roots rather than throwing mid-harvest.
+  const supplied = normalizeRoots(
+    typeof repoRoot === 'string' ? [repoRoot] : Array.isArray(repoRoot) ? repoRoot : [],
+  );
+  // Only fall back to the transcript's own cwd when the caller supplied NOTHING
+  // usable — an empty list is "I looked and found no roots", not "use the default".
+  const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? '']);
   const exists = options?.exists;
 
   const seen = new Set<string>();
@@ -587,15 +663,13 @@ export function sessionPaths(records: unknown[], repoRoot?: string, options?: Se
 
       let norm: string | null;
       if (isAbsolute(p)) {
-        // Absolute path: needs a root to relativize against. No root → skip it
-        // (never emit a machine-absolute path). Outside the root → foreign → drop.
-        if (root === null) continue;
-        const rel = relativizeUnder(p, root);
-        if (rel === null || rel.length === 0) continue;
-        // Re-check the relativized RESULT: string-prefix relativization can leave
-        // a `../`-escape (`/repo/../etc/passwd` → `../etc/passwd`). Normalize it
-        // and drop anything that still traverses above the root.
-        norm = normalizeRepoRelative(rel);
+        // Absolute path: needs a root to relativize against. No roots → skip it
+        // (never emit a machine-absolute path). Under none of them → foreign → drop.
+        // `relativizeUnderAny` also re-checks the relativized RESULT, because
+        // string-prefix relativization can leave a `../`-escape
+        // (`/repo/../etc/passwd` → `../etc/passwd`).
+        if (roots.length === 0) continue;
+        norm = relativizeUnderAny(p, roots);
       } else if (!isForeignRelativePath(p)) {
         // Genuinely relative — keep as-is (a path the agent referenced relative
         // to the repo). Strip any leading `./` for a stable, canonical form.
