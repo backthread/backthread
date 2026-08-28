@@ -31,5 +31,6 @@ export {
   sessionPaths,
   sessionTimestamp,
   type RedactedTranscript,
+  type SessionRoots,
   type TranscriptTurn,
 } from '@backthread/redact';

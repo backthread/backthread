@@ -2984,7 +2984,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve2.call(this, root, ref);
+      let _sch = resolve3.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3011,7 +3011,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve2(root, ref) {
+    function resolve3(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3642,14 +3642,9 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve2(baseURI, relativeURI, options) {
+    function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
-      const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
-      const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
-      if (baseMalformed || relativeMalformed) {
-        throw new Error(baseParsed.error || relativeParsed.error || "URI is malformed.");
-      }
-      const resolved = resolveComponent(baseParsed, relativeParsed, schemelessOptions, true);
+      const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
@@ -3774,8 +3769,6 @@ var require_fast_uri = __commonJS({
       return uriTokens.join("");
     }
     var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
-    var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
-    var AUTHORITY_INTRODUCER_REGION = /^(?:[^#/:?]+:)?([/\\\t\n\r]*)/;
     function getParseError(parsed, matches2) {
       if (matches2[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
         return 'URI path must start with "/" when authority is present.';
@@ -3803,25 +3796,6 @@ var require_fast_uri = __commonJS({
           uri = options.scheme + ":" + uri;
         } else {
           uri = "//" + uri;
-        }
-      }
-      const authorityMatch = uri.match(AUTHORITY_PREFIX);
-      if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
-        parsed.error = "URI authority must not contain a literal backslash.";
-        malformedAuthorityOrPort = true;
-      }
-      const introducerMatch = uri.match(AUTHORITY_INTRODUCER_REGION);
-      if (introducerMatch !== null) {
-        const region = introducerMatch[1];
-        const normalizedRegion = region.replace(/[\t\n\r]/g, "");
-        if (normalizedRegion.length >= 2) {
-          if (normalizedRegion.slice(0, 2) !== "//") {
-            parsed.error = parsed.error || "URI authority must not contain a literal backslash.";
-            malformedAuthorityOrPort = true;
-          } else if (region.length !== normalizedRegion.length) {
-            parsed.error = parsed.error || "URI authority introducer must not contain whitespace.";
-            malformedAuthorityOrPort = true;
-          }
         }
       }
       const matches2 = uri.match(URI_PARSE);
@@ -3867,7 +3841,7 @@ var require_fast_uri = __commonJS({
         if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
           if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) {
             try {
-              parsed.host = new URL("http://" + parsed.host).hostname;
+              parsed.host = URL.domainToASCII(parsed.host.toLowerCase());
             } catch (e) {
               parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e;
             }
@@ -3926,7 +3900,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve2,
+      resolve: resolve3,
       resolveComponent,
       equal,
       serialize,
@@ -7005,10 +6979,10 @@ function browserCommand(platform) {
   }
 }
 function openBrowser(url2, platform = process.platform) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const launcher = browserCommand(platform);
     if (!launcher) {
-      resolve2(false);
+      resolve3(false);
       return;
     }
     try {
@@ -7016,11 +6990,11 @@ function openBrowser(url2, platform = process.platform) {
         stdio: "ignore",
         detached: true
       });
-      child.on("error", () => resolve2(false));
+      child.on("error", () => resolve3(false));
       child.unref();
-      setTimeout(() => resolve2(true), 0);
+      setTimeout(() => resolve3(true), 0);
     } catch {
-      resolve2(false);
+      resolve3(false);
     }
   });
 }
@@ -7730,14 +7704,14 @@ import { execFile } from "node:child_process";
 function runNpm(args) {
   const isWin = process.platform === "win32";
   const npm = isWin ? "npm.cmd" : "npm";
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     try {
       execFile(
         npm,
         args,
         { timeout: 12e4, windowsHide: true, shell: isWin, maxBuffer: 8 * 1024 * 1024 },
         (err, stdout, stderr) => {
-          resolve2({
+          resolve3({
             ok: !err,
             stdout: (stdout ?? "").toString().trim(),
             stderr: (stderr ?? "").toString().trim()
@@ -7745,7 +7719,7 @@ function runNpm(args) {
         }
       );
     } catch (e) {
-      resolve2({ ok: false, stdout: "", stderr: e.message ?? String(e) });
+      resolve3({ ok: false, stdout: "", stderr: e.message ?? String(e) });
     }
   });
 }
@@ -8170,6 +8144,25 @@ function relativizeUnder(abs, root) {
   if (!abs.startsWith(prefix)) return null;
   return stripLeadingSlashes(abs.slice(trimmedRoot.length));
 }
+function normalizeRoots(roots) {
+  const cleaned = [];
+  for (const r of roots) {
+    if (typeof r !== "string") continue;
+    const trimmed = r.trim().replace(/\/+$/, "");
+    if (trimmed.length === 0) continue;
+    if (!cleaned.includes(trimmed)) cleaned.push(trimmed);
+  }
+  return cleaned.sort((a, b) => b.length - a.length);
+}
+function relativizeUnderAny(abs, roots) {
+  for (const root of roots) {
+    const rel = relativizeUnder(abs, root);
+    if (rel === null) continue;
+    if (rel.length === 0) return null;
+    return normalizeRepoRelative(rel);
+  }
+  return null;
+}
 var HARVESTED_PATH_EXTENSIONS = [
   "ts",
   "tsx",
@@ -8255,7 +8248,10 @@ function codexSessionCwd(records) {
   return null;
 }
 function sessionPaths(records, repoRoot, options) {
-  const root = (repoRoot && repoRoot.trim().length > 0 ? repoRoot.trim() : codexSessionCwd(records)) ?? null;
+  const supplied = normalizeRoots(
+    typeof repoRoot === "string" ? [repoRoot] : Array.isArray(repoRoot) ? repoRoot : []
+  );
+  const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? ""]);
   const exists = options?.exists;
   const seen = /* @__PURE__ */ new Set();
   let shellPathCount = 0;
@@ -8265,10 +8261,8 @@ function sessionPaths(records, repoRoot, options) {
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
       let norm;
       if (isAbsolute(p)) {
-        if (root === null) continue;
-        const rel = relativizeUnder(p, root);
-        if (rel === null || rel.length === 0) continue;
-        norm = normalizeRepoRelative(rel);
+        if (roots.length === 0) continue;
+        norm = relativizeUnderAny(p, roots);
       } else if (!isForeignRelativePath(p)) {
         norm = normalizeRepoRelative(p.replace(/^(?:\.\/)+/, ""));
       } else {
@@ -8291,6 +8285,7 @@ function sessionPaths(records, repoRoot, options) {
 
 // src/repo.ts
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 function parseRepoFromRemote(remote) {
   const trimmed = remote.trim();
   if (!trimmed) return null;
@@ -8350,6 +8345,39 @@ function resolveGitContext(cwd, run = defaultGitRunner) {
     headSha: sha || null,
     gitUser
   };
+}
+var MAX_LINKED_WORKTREES = 64;
+function parseWorktreePorcelain(out) {
+  const paths = [];
+  for (const line of out.split("\n")) {
+    if (!line.startsWith("worktree ")) continue;
+    const p = line.slice("worktree ".length).trim();
+    if (p.length > 0) paths.push(p);
+  }
+  return paths;
+}
+function resolveRepoRoots(cwd, run = defaultGitRunner) {
+  const top = (run(cwd, ["rev-parse", "--show-toplevel"]) ?? "").trim();
+  if (top.length === 0) return [resolve(cwd)];
+  const primary = resolve(top);
+  const commonDir = (run(cwd, ["rev-parse", "--git-common-dir"]) ?? "").trim();
+  if (commonDir.length === 0) return [primary];
+  const identity = resolve(cwd, commonDir);
+  const listed = run(cwd, ["worktree", "list", "--porcelain"]);
+  if (listed === null) return [primary];
+  const roots = [primary];
+  let checked = 0;
+  for (const raw of parseWorktreePorcelain(listed)) {
+    const candidate = resolve(raw);
+    if (roots.includes(candidate)) continue;
+    if (checked >= MAX_LINKED_WORKTREES) break;
+    checked += 1;
+    const candidateCommon = (run(candidate, ["rev-parse", "--git-common-dir"]) ?? "").trim();
+    if (candidateCommon.length === 0) continue;
+    if (resolve(candidate, candidateCommon) !== identity) continue;
+    roots.push(candidate);
+  }
+  return roots;
 }
 
 // src/infer.ts
@@ -10055,11 +10083,11 @@ function parseHookInput(raw) {
   return {};
 }
 function readStream(stream) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     let data = "";
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => data += chunk);
-    stream.on("end", () => resolve2(data));
+    stream.on("end", () => resolve3(data));
     stream.on("error", reject);
   });
 }
@@ -10068,6 +10096,7 @@ async function runCapture(input, deps = {}) {
   const log = deps.log ?? ((m) => console.error(m));
   const doReadFile = deps.readFileImpl ?? ((p) => readFile10(p, "utf8"));
   const doFileExists = deps.fileExistsImpl ?? existsSync;
+  const doResolveRepoRoots = deps.resolveRepoRootsImpl ?? resolveRepoRoots;
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
     void ensureAuth({ env: e }).catch(() => {
@@ -10115,12 +10144,13 @@ async function runCapture(input, deps = {}) {
     const records = parseJsonl(rawTranscript);
     const redacted = redactTranscript(records);
     const decidedAt = sessionTimestamp(records) ?? void 0;
+    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl) : [];
     const existsCache = /* @__PURE__ */ new Map();
-    const filePaths = sessionPaths(records, input.cwd, {
+    const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
         const hit = existsCache.get(rel);
         if (hit !== void 0) return hit;
-        const ok = input.cwd !== void 0 && doFileExists(join12(input.cwd, rel));
+        const ok = repoRoots.some((root) => doFileExists(join12(root, rel)));
         existsCache.set(rel, ok);
         return ok;
       }
@@ -32512,7 +32542,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error51) {
@@ -32529,7 +32559,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const earlyReject = (error51) => {
         reject(error51);
       };
@@ -32607,7 +32637,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve2(parseResult.data);
+            resolve3(parseResult.data);
           }
         } catch (error51) {
           reject(error51);
@@ -32868,12 +32898,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve2, interval);
+      const timeoutId = setTimeout(resolve3, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -33973,7 +34003,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -34622,12 +34652,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve2) => {
+    return new Promise((resolve3) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve2();
+        resolve3();
       } else {
-        this._stdout.once("drain", resolve2);
+        this._stdout.once("drain", resolve3);
       }
     });
   }
@@ -35048,7 +35078,7 @@ import { join as join16 } from "node:path";
 import { mkdir as mkdir10, readFile as readFile13, writeFile as writeFile10, rename } from "node:fs/promises";
 import { existsSync as existsSync2 } from "node:fs";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { join as join15, resolve } from "node:path";
+import { join as join15, resolve as resolve2 } from "node:path";
 var CACHE_SCHEMA_VERSION = 1;
 var CACHE_DIR = ".backthread";
 var CACHE_FILE = "cache.json";
@@ -35071,7 +35101,7 @@ var defaultTopLevelReader = (cwd) => {
 };
 function resolveRepoRoot(cwd, readTopLevel = defaultTopLevelReader) {
   const top = readTopLevel(cwd);
-  return top && top.length > 0 ? resolve(top) : resolve(cwd);
+  return top && top.length > 0 ? resolve2(top) : resolve2(cwd);
 }
 function emptyCache() {
   return { schemaVersion: CACHE_SCHEMA_VERSION, repo: null, structure: null, decisions: null };
@@ -36784,14 +36814,14 @@ function isEntryPoint() {
     const entry = process.argv[1];
     if (!entry) return false;
     const self = fileURLToPath2(import.meta.url);
-    const resolve2 = (p) => {
+    const resolve3 = (p) => {
       try {
         return realpathSync2(p);
       } catch {
         return p;
       }
     };
-    return resolve2(self) === resolve2(entry);
+    return resolve3(self) === resolve3(entry);
   } catch {
     return true;
   }

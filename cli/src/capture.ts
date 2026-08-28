@@ -47,7 +47,13 @@ import { join } from 'node:path';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { ensureAuth } from './login.js';
 import { parseJsonl, redactTranscript, sessionPaths, sessionTimestamp } from './redact.js';
-import { resolveRepo, resolveGitContext, type RemoteReader, type GitRunner } from './repo.js';
+import {
+  resolveRepo,
+  resolveGitContext,
+  resolveRepoRoots,
+  type RemoteReader,
+  type GitRunner,
+} from './repo.js';
 import { inferDecisions, type DerivedDecision, type RedactedTranscriptInput } from './infer.js';
 import { checkCaptureScope, type ScopeVerdict, SCOPE_REASON_COPY } from './captureScope.js';
 import { buildIngestDecisionsUrl } from './urls.js';
@@ -130,6 +136,14 @@ export interface CaptureDeps {
   readRemoteImpl?: RemoteReader;
   /** Test seam: the git-command runner threaded into resolveGitContext (ARP-696). */
   readGitImpl?: GitRunner;
+  /**
+   * Test seam: which directories on this machine ARE this repo — the session's own
+   * checkout plus every linked worktree sharing its git common dir. Defaults to
+   * `resolveRepoRoots`. These are the roots a harvested absolute path is measured
+   * against, so a file edited in a sibling worktree relativizes instead of being
+   * dropped as foreign.
+   */
+  resolveRepoRootsImpl?: (cwd: string, run?: GitRunner) => string[];
   /**
    * ARP-693 — incremental capture watermark: infer ONLY the redacted turns at/after
    * this index, skipping turns already captured on an earlier `stop` of the same
@@ -231,6 +245,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
   const log = deps.log ?? ((m: string) => console.error(m));
   const doReadFile = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
   const doFileExists = deps.fileExistsImpl ?? existsSync;
+  const doResolveRepoRoots = deps.resolveRepoRootsImpl ?? resolveRepoRoots;
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth =
     deps.ensureAuthImpl ??
@@ -327,12 +342,21 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     const decidedAt = sessionTimestamp(records) ?? undefined;
     // Harvest the repo-relative file PATHS the session touched, from the RAW records
     // — BEFORE redaction drops the tool-use records those paths live in (same pre-
-    // redaction scan discipline as sessionTimestamp). `input.cwd` (the hook's working
-    // directory, == the repo/worktree root) lets sessionPaths normalize absolute
-    // tool-use paths to repo-relative, the format the server's reconcile pass joins on.
+    // redaction scan discipline as sessionTimestamp). The roots let sessionPaths
+    // normalize absolute tool-use paths to repo-relative, the format the server's
+    // reconcile pass joins on.
     // METADATA only — directory structure, never file contents; the never-store-source
     // claim still holds (paths ≠ contents). Absent cwd → only already-relative paths
     // survive (often []), which the server treats as "unanchored" — correct, not an error.
+    //
+    // WHY A SET OF ROOTS, not the hook's cwd. Measuring against cwd alone dropped every
+    // path in a sibling git WORKTREE as foreign — but a worktree is the same repo, and
+    // the same file, at the same repo-relative path. On a machine where parallel
+    // worktrees are the normal workflow that emptied the path list for entire sessions:
+    // one measured session recorded hundreds of decisions and zero file paths, because
+    // everything it edited lived in a worktree next door. resolveRepoRoots settles which
+    // directories really are this repo (shared git common dir) and hands the answer to
+    // sessionPaths, which stays pure and asks git nothing.
     //
     // `exists` is what lets sessionPaths emit anything it scraped out of a shell
     // COMMAND string. A relative token in a command proves nothing on its own: after
@@ -342,14 +366,17 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // where the repo root already is. Memoised: one session asks thousands of times
     // and a session's working tree does not change under us mid-capture. Bounded by
     // the caps inside sessionPaths, so the map cannot grow without limit either.
+    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl) : [];
     const existsCache = new Map<string, boolean>();
-    const filePaths = sessionPaths(records, input.cwd, {
+    const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
         const hit = existsCache.get(rel);
         if (hit !== undefined) return hit;
-        // `rel` is already normalized + confirmed inside the root by sessionPaths
-        // (no `..`, never absolute), so this join cannot climb out of input.cwd.
-        const ok = input.cwd !== undefined && doFileExists(join(input.cwd, rel));
+        // `rel` is already normalized + confirmed inside a root by sessionPaths (no
+        // `..`, never absolute), so these joins cannot climb out of any of them.
+        // ANY root counts: the worktrees are one repo, and a file the session edited
+        // in a sibling worktree is as real as one in the checkout the hook fired in.
+        const ok = repoRoots.some((root) => doFileExists(join(root, rel)));
         existsCache.set(rel, ok);
         return ok;
       },

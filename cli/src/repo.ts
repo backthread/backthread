@@ -14,6 +14,7 @@
 // only decides WHICH repo slug the capture claims (connected vs repo-less is the
 // server's call).
 import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 
 export interface RepoHandle {
   owner: string;
@@ -132,4 +133,78 @@ export function resolveGitContext(cwd: string, run: GitRunner = defaultGitRunner
     headSha: sha || null,
     gitUser,
   };
+}
+
+/**
+ * How many linked worktrees we are willing to verify. Each one costs a `git rev-parse`,
+ * and the list is attacker-free but not bounded by anything: a long-lived machine can
+ * accumulate registrations. Well past any real workflow, and a hard stop on the number
+ * of subprocesses one capture can spawn.
+ */
+const MAX_LINKED_WORKTREES = 64;
+
+/** The `<path>` of each `worktree <path>` line in `git worktree list --porcelain`. */
+function parseWorktreePorcelain(out: string): string[] {
+  const paths: string[] = [];
+  for (const line of out.split('\n')) {
+    // Porcelain is `<label> <value>`; the record separator is a blank line. Only the
+    // `worktree` label carries a path — HEAD/branch/detached/locked/prunable do not.
+    if (!line.startsWith('worktree ')) continue;
+    const p = line.slice('worktree '.length).trim();
+    if (p.length > 0) paths.push(p);
+  }
+  return paths;
+}
+
+/**
+ * Every directory on this machine that IS this repo: the checkout the session ran in,
+ * plus every linked worktree of the same repo.
+ *
+ * WHY: a session's file paths were previously measured against one root — the hook's
+ * cwd — and anything outside it was dropped as belonging to another repo. A linked
+ * worktree is not another repo. It is the same project, same history, same file at the
+ * same repo-relative path, sitting at a sibling directory. Where parallel worktrees are
+ * the normal way to work, that rule threw away most of what a session touched and left
+ * its decisions anchored to nothing.
+ *
+ * WHAT MAKES TWO DIRECTORIES THE SAME REPO: a shared `--git-common-dir`. That is the
+ * object store and ref store both checkouts read and write; `--show-toplevel` alone
+ * only names a directory, and two unrelated repos sitting next to each other have two
+ * perfectly good toplevels. So every candidate has to prove it resolves to the SAME
+ * common dir as the session's own — an allowlist, closed by construction. This also
+ * settles the stale case: a registration whose directory has since been replaced by a
+ * different repo answers with a different common dir and is refused.
+ *
+ * The FIRST root is always the session's own toplevel, which is what a caller should
+ * use when it needs one canonical root. Returns `[resolve(cwd)]` when `cwd` is not a
+ * git repo at all — same fail-soft as the rest of this module: capture still works,
+ * it is just anchored where it always was.
+ */
+export function resolveRepoRoots(cwd: string, run: GitRunner = defaultGitRunner): string[] {
+  const top = (run(cwd, ['rev-parse', '--show-toplevel']) ?? '').trim();
+  if (top.length === 0) return [resolve(cwd)]; // not a git repo → the cwd is all we have
+  const primary = resolve(top);
+
+  // `--git-common-dir` answers relative to the cwd it was asked from (plain `.git` in a
+  // main checkout, an absolute path from a linked worktree), so resolve before comparing.
+  const commonDir = (run(cwd, ['rev-parse', '--git-common-dir']) ?? '').trim();
+  if (commonDir.length === 0) return [primary];
+  const identity = resolve(cwd, commonDir);
+
+  const listed = run(cwd, ['worktree', 'list', '--porcelain']);
+  if (listed === null) return [primary];
+
+  const roots = [primary];
+  let checked = 0;
+  for (const raw of parseWorktreePorcelain(listed)) {
+    const candidate = resolve(raw);
+    if (roots.includes(candidate)) continue;
+    if (checked >= MAX_LINKED_WORKTREES) break;
+    checked += 1;
+    const candidateCommon = (run(candidate, ['rev-parse', '--git-common-dir']) ?? '').trim();
+    if (candidateCommon.length === 0) continue; // gone, or no longer a repo → not us
+    if (resolve(candidate, candidateCommon) !== identity) continue; // a DIFFERENT repo
+    roots.push(candidate);
+  }
+  return roots;
 }

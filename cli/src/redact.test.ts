@@ -157,6 +157,106 @@ test('sessionPaths drops paths foreign to the repoRoot (incl. sibling prefixes)'
   assert.deepEqual(sessionPaths(records, '/repo'), ['keep.ts']);
 });
 
+// --- one repo, several checkouts (linked git worktrees) ----------------------
+// A worktree is not another repo: same history, same file, same repo-relative path,
+// different directory. Measuring against a single root threw all of that away — a
+// real session recorded hundreds of decisions and ZERO paths because everything it
+// edited lived in a worktree next door. The list of roots is how the caller says
+// "all of these directories are this one repo".
+
+test('sessionPaths relativizes paths in a SIBLING WORKTREE of the same repo', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/work/app/src/main.ts' } }] } },
+    // the same session, editing the same repo checked out somewhere else
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/work/app-lane1/src/worker.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: '/work/app-lane2/docs/note.md' } }] } },
+  ];
+  // Single root — today's behaviour, and the bug: two of the three are discarded.
+  assert.deepEqual(sessionPaths(records, '/work/app'), ['src/main.ts']);
+  // The full root set: every worktree's file lands at its repo-relative path.
+  assert.deepEqual(sessionPaths(records, ['/work/app', '/work/app-lane1', '/work/app-lane2']), [
+    'docs/note.md',
+    'src/main.ts',
+    'src/worker.ts',
+  ]);
+});
+
+test('sessionPaths collapses the SAME file seen through two worktrees to one path', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/src/main.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app-lane1/src/main.ts' } }] } },
+  ];
+  assert.deepEqual(sessionPaths(records, ['/work/app', '/work/app-lane1']), ['src/main.ts']);
+});
+
+// THE NEGATIVE CONTROL. Widening from one root to many must widen it to THIS repo's
+// worktrees and nothing else. If this test ever goes green while naming a foreign
+// path in the output, the fix has become a leak.
+test('sessionPaths still DROPS a path in a genuinely different repo, however many roots', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app-lane1/keep.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/other-repo/src/secret.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app-lane1-sibling/x.ts' } }] } }, // prefix look-alike
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/etc/passwd' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/../etc/shadow' } }] } }, // traversal out
+  ];
+  assert.deepEqual(sessionPaths(records, ['/work/app', '/work/app-lane1', '/work/app-lane2']), ['keep.ts']);
+});
+
+// The never-emit-a-machine-absolute-path invariant, asserted rather than eyeballed.
+test('sessionPaths never emits a machine-absolute path or a root fragment, with many roots', () => {
+  const roots = ['/Users/someone/work/app', '/Users/someone/work/app-lane1'];
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/Users/someone/work/app-lane1/src/a.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/Users/someone/work/app/src/b.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/Users/someone/.ssh/id_rsa' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '~/secrets.env' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'C:\\Users\\someone\\x.ts' } }] } },
+  ];
+  const out = sessionPaths(records, roots);
+  assert.deepEqual(out, ['src/a.ts', 'src/b.ts']);
+  for (const p of out) {
+    assert.ok(!p.startsWith('/'), `emitted an absolute path: ${p}`);
+    assert.ok(!p.includes('..'), `emitted a traversal: ${p}`);
+    assert.ok(!p.includes('Users/someone'), `emitted a machine path fragment: ${p}`);
+    for (const root of roots) assert.ok(!p.includes(root), `emitted a root fragment: ${p}`);
+  }
+});
+
+test('sessionPaths measures a NESTED worktree against the deepest root, not its parent', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/wt/src/a.ts' } }] } },
+  ];
+  // Order in the argument must not decide it — the deepest containing root does.
+  assert.deepEqual(sessionPaths(records, ['/work/app', '/work/app/wt']), ['src/a.ts']);
+  assert.deepEqual(sessionPaths(records, ['/work/app/wt', '/work/app']), ['src/a.ts']);
+});
+
+test('sessionPaths tolerates blank / duplicate / trailing-slash roots', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app-lane1/src/a.ts' } }] } },
+  ];
+  assert.deepEqual(sessionPaths(records, ['', '  ', '/work/app/', '/work/app', '/work/app-lane1//']), ['src/a.ts']);
+});
+
+test('sessionPaths with an EMPTY root list falls back to the transcript cwd, not to nothing', () => {
+  const records = [
+    { type: 'session_meta', payload: { id: 'cx-1', cwd: '/Users/me/proj' } },
+    { type: 'response_item', payload: { type: 'function_call', arguments: JSON.stringify({ file_path: '/Users/me/proj/src/changed.ts' }) } },
+  ];
+  assert.deepEqual(sessionPaths(records, []), ['src/changed.ts']);
+  assert.deepEqual(sessionPaths(records, ['', '   ']), ['src/changed.ts']);
+});
+
+test('sessionPaths drops a path that IS a root, rather than re-measuring it upward', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { cwd: '/work/app/wt' } }] } },
+  ];
+  // `/work/app/wt` names a worktree directory, not a file in it. It was dropped when
+  // there was one root and it stays dropped now — it must NOT surface as `wt`.
+  assert.deepEqual(sessionPaths(records, ['/work/app', '/work/app/wt']), []);
+});
+
 test('sessionPaths falls back to Codex session_meta.payload.cwd when repoRoot is omitted', () => {
   const records = [
     { type: 'session_meta', payload: { id: 'cx-1', cwd: '/Users/me/proj' } },

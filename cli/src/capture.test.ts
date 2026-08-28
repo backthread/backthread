@@ -71,6 +71,10 @@ function deps(over: Partial<CaptureDeps> = {}): CaptureDeps {
             : args[0] === 'config' && args[1] === 'user.email'
               ? 'test@x.com\n'
               : null,
+    // Never shell out to real git for the repo-root set either: pin it to the hook's
+    // own cwd, which is exactly what capture measured paths against before worktrees
+    // were understood. The worktree tests below override this with a real root set.
+    resolveRepoRootsImpl: (cwd) => [cwd],
     ensureAuthImpl: () => {},
     // ARP-1054 — default the pre-send scope check to a no-network PASS so the existing
     // flow tests aren't gated (and don't gain an extra /capture-scope call in their
@@ -223,6 +227,125 @@ test('harvests sessionPaths (cwd-relative) and includes filePaths in the /infer-
   // Absolutes under /work/app are relativized; the relative one is kept; /etc/passwd
   // is foreign → dropped. Output is deduped + sorted by sessionPaths.
   assert.deepEqual(filePaths, ['src/auth/policy.ts', 'src/auth/rls.ts', 'src/auth/session.ts']);
+});
+
+// A session that did what sessions here actually do: the hook fired in /work/app while
+// the edits landed in linked worktrees next door. Every one of those used to be thrown
+// away as belonging to another repo, which is how a session could produce hundreds of
+// decisions and an empty path list.
+const TRANSCRIPT_ACROSS_WORKTREES = [
+  JSON.stringify({ type: 'user', sessionId: 'sess-wt', message: { content: 'why hold the decision until merge?' } }),
+  JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-08-29T09:00:00Z',
+    message: {
+      content: [
+        { type: 'text', text: 'Holding until merge keeps unmerged reasoning out of the record.' },
+        { type: 'tool_use', name: 'Edit', input: { file_path: '/work/app/src/gate.ts' } },
+        // the same repo, checked out in two sibling worktrees
+        { type: 'tool_use', name: 'Edit', input: { file_path: '/work/app-lane1/src/merge/hold.ts' } },
+        { type: 'tool_use', name: 'Write', input: { file_path: '/work/app-lane2/docs/merge-gate.md' } },
+        // a DIFFERENT repo on the same machine → still foreign, still dropped
+        { type: 'tool_use', name: 'Read', input: { file_path: '/work/other-repo/src/private.ts' } },
+        { type: 'tool_use', name: 'Read', input: { file_path: '/etc/passwd' } },
+      ],
+    },
+  }),
+].join('\n');
+
+test('harvests paths from SIBLING WORKTREES of the same repo, and still drops a foreign repo', async () => {
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'hold until merge' }] } };
+    },
+  });
+
+  const out = await runCapture(
+    HOOK,
+    deps({
+      fetchImpl,
+      readFileImpl: async () => TRANSCRIPT_ACROSS_WORKTREES,
+      // What resolveRepoRoots reports on a machine running parallel worktrees.
+      resolveRepoRootsImpl: () => ['/work/app', '/work/app-lane1', '/work/app-lane2'],
+    }),
+  );
+  assert.equal(out.status, 'persisted-by-server');
+
+  const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
+  assert.deepEqual(filePaths, ['docs/merge-gate.md', 'src/gate.ts', 'src/merge/hold.ts']);
+  // Nothing from the neighbouring repo, and no machine-absolute path, left the machine.
+  const wire = JSON.stringify(sentBody);
+  assert.doesNotMatch(wire, /other-repo/);
+  assert.doesNotMatch(wire, /private\.ts/);
+  assert.doesNotMatch(wire, /passwd/);
+  for (const p of filePaths) assert.ok(!p.startsWith('/'), `emitted an absolute path: ${p}`);
+});
+
+test('the same session WITHOUT worktree awareness keeps only the hook cwd path (the regression)', async () => {
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'hold until merge' }] } };
+    },
+  });
+
+  await runCapture(
+    HOOK,
+    deps({
+      fetchImpl,
+      readFileImpl: async () => TRANSCRIPT_ACROSS_WORKTREES,
+      resolveRepoRootsImpl: (cwd) => [cwd], // the old single-root behaviour
+    }),
+  );
+  // Two of the three real edits are gone. This is the measured defect, pinned so the
+  // test above cannot be read as passing for some other reason.
+  assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/gate.ts']);
+});
+
+test('the existence gate for a SHELL path accepts a file that lives in a sibling worktree', async () => {
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+    },
+  });
+  const transcript = [
+    JSON.stringify({ type: 'user', sessionId: 'sess-wt2', message: { content: 'why the retry cap?' } }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-29T09:00:00Z',
+      message: {
+        content: [
+          { type: 'text', text: 'A cap stops a poisoned job retrying forever.' },
+          { type: 'tool_use', name: 'Bash', input: { command: "sed -n '1,40p' src/queue/retry.ts" } },
+        ],
+      },
+    }),
+  ].join('\n');
+
+  // The file exists ONLY in the sibling worktree — never under the hook's own cwd.
+  const asked: string[] = [];
+  await runCapture(
+    HOOK,
+    deps({
+      fetchImpl,
+      readFileImpl: async () => transcript,
+      resolveRepoRootsImpl: () => ['/work/app', '/work/app-lane1'],
+      fileExistsImpl: (p) => {
+        asked.push(p);
+        return p === '/work/app-lane1/src/queue/retry.ts';
+      },
+    }),
+  );
+  // The predicate really was consulted for BOTH roots — otherwise a green here would
+  // only mean the shell path skipped the gate entirely.
+  assert.ok(asked.includes('/work/app/src/queue/retry.ts'));
+  assert.ok(asked.includes('/work/app-lane1/src/queue/retry.ts'));
+  assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/queue/retry.ts']);
 });
 
 test('code-less session (no tool_use paths) → persist leg omits filePaths (unanchored, still captured)', async () => {
