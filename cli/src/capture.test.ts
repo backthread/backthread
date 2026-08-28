@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -341,6 +343,71 @@ test('a hook firing in a SUBDIRECTORY emits repo-root-relative paths, not cwd-re
     }),
   );
   assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['packages/core/src/a.ts']);
+});
+
+// Every worktree test above stubs `resolveRepoRootsImpl`, which means none of them can
+// fail if the wiring from runCapture down to git is removed — the guard would sit one
+// layer above the break. This one uses REAL git repos and the REAL resolver, so the
+// only thing stubbed is the network and the transcript.
+test('END TO END with real git: a sibling worktree edit reaches the wire, a foreign repo does not', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-e2e-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const lane = join(tmp, 'app-lane');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    runGit(app, 'worktree', 'add', '-q', '-b', 'lane', lane);
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-e2e', message: { content: 'why hold until merge?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Holding until merge keeps unmerged reasoning out of the record.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/gate.ts') } },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(lane, 'src/hold.ts') } },
+            { type: 'tool_use', name: 'Read', input: { file_path: join(foreign, 'src/private.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'hold' }] } };
+      },
+    });
+
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    // The point of this test: let REAL git decide, both for the root set and the context.
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-e2e' }, base);
+
+    const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
+    assert.deepEqual(filePaths, ['src/gate.ts', 'src/hold.ts']);
+    const wire = JSON.stringify(sentBody);
+    assert.doesNotMatch(wire, /other-repo/);
+    assert.doesNotMatch(wire, /private\.ts/);
+    for (const p of filePaths) assert.ok(!p.startsWith('/') && !p.includes('..'), p);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
 });
 
 test('the existence gate for a SHELL path accepts a file that lives in a sibling worktree', async () => {
