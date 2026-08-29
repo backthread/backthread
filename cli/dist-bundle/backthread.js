@@ -8051,11 +8051,11 @@ function captureNoticeCheck(deps, env) {
   const read = deps.readCaptureNoticeImpl ?? readCaptureNotice;
   const notice = read(env);
   if (!notice) {
-    return { key: "capture", label: "Capture", status: "ok", detail: "nothing left unsaid by the last capture" };
+    return { key: "capture", label: "Capture notes", status: "ok", detail: "no notice from capture" };
   }
   const when = new Date(notice.at);
   const stamp = Number.isFinite(when.getTime()) ? when.toISOString().slice(0, 10) : notice.at;
-  return { key: "capture", label: "Capture", status: "warn", detail: `${notice.message} (${stamp})` };
+  return { key: "capture", label: "Capture notes", status: "warn", detail: `${notice.message} (${stamp})` };
 }
 async function collectChecks(deps = {}) {
   const env = deps.env ?? process.env;
@@ -8106,7 +8106,7 @@ function configHint(env) {
 // src/capture.ts
 import { readFile as readFile10 } from "node:fs/promises";
 import { existsSync, realpathSync as realpathSync3 } from "node:fs";
-import { dirname as dirname4, join as join13 } from "node:path";
+import { dirname as dirname4, join as join13, sep } from "node:path";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -8364,7 +8364,7 @@ function sessionPaths(records, repoRoot, options) {
         if (norm.split("/").some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
         if (!exists(norm)) continue;
       }
-      if (escapesRepo?.(norm)) continue;
+      if (escapesRepo?.(norm, roots)) continue;
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;
         shellPathCount += 1;
@@ -8473,11 +8473,23 @@ function withLogicalAlias(cwd, roots) {
 }
 function parseWorktreePorcelain(out) {
   const paths = [];
+  let current = null;
+  let prunable = false;
+  const flush = () => {
+    if (current !== null && !prunable) paths.push(current);
+    current = null;
+    prunable = false;
+  };
   for (const line of out.split("\n")) {
-    if (!line.startsWith("worktree ")) continue;
-    const p = line.slice("worktree ".length).trim();
-    if (p.length > 0) paths.push(p);
+    if (line.startsWith("worktree ")) {
+      flush();
+      const p = line.slice("worktree ".length).trim();
+      current = p.length > 0 ? p : null;
+      continue;
+    }
+    if (line === "prunable" || line.startsWith("prunable ")) prunable = true;
   }
+  flush();
   return paths;
 }
 function resolveRepoRoots(cwd, run = defaultGitRunner, warn = (m) => console.warn(m)) {
@@ -9434,11 +9446,11 @@ async function installCodex(home, deps) {
 command = "${MCP_COMMAND}"
 args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
 `;
-    const sep = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
+    const sep2 = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
     const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
     const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
     await doMkdir(dirname3(tomlPath));
-    await doWrite(tomlPath, toml + sep + block);
+    await doWrite(tomlPath, toml + sep2 + block);
     writes.push({ path: tomlPath, wrote: true });
   }
   const hooksPath = join10(home, ".codex", "hooks.json");
@@ -10199,6 +10211,9 @@ async function maybeFirstCaptureConfirm(count, repoConnected, repo, deps = {}) {
 }
 
 // src/capture.ts
+function isInsideRoot(real, roots, separator = sep) {
+  return roots.some((r) => real === r || real.startsWith(r + separator));
+}
 async function readHookInput(env = process.env, stdin = process.stdin) {
   return parseHookInput(await readRawHookInput(env, stdin));
 }
@@ -10292,11 +10307,28 @@ async function runCapture(input, deps = {}) {
     };
     const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, warnAboutRoots) : [];
     const existsCache = /* @__PURE__ */ new Map();
-    const realRoots = [];
-    for (const root of repoRoots) {
-      const real = doRealPath(root);
-      if (real !== null && !realRoots.includes(real)) realRoots.push(real);
-    }
+    const realPathCache = /* @__PURE__ */ new Map();
+    const realOf = (abs) => {
+      const hit = realPathCache.get(abs);
+      if (hit !== void 0) return hit;
+      const real = doRealPath(abs);
+      realPathCache.set(abs, real);
+      return real;
+    };
+    const realRootsCache = /* @__PURE__ */ new Map();
+    const realRootsOf = (roots) => {
+      const key = JSON.stringify(roots);
+      const hit = realRootsCache.get(key);
+      if (hit !== void 0) return hit;
+      const out2 = [];
+      for (const root of roots) {
+        const real = realOf(root);
+        if (real !== null && !out2.includes(real)) out2.push(real);
+      }
+      realRootsCache.set(key, out2);
+      return out2;
+    };
+    const inside = (real, realRoots) => isInsideRoot(real, realRoots);
     const escapesCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -10306,48 +10338,57 @@ async function runCapture(input, deps = {}) {
         existsCache.set(rel, ok);
         return ok;
       },
-      // Containment, decided by the filesystem instead of by string prefix. A repo
-      // can contain a symlink that leaves it — `repoA/vendor` pointing at `repoB` is
-      // an ordinary thing for a checkout to have — and every rule inside sessionPaths
-      // is a string rule, so `<repoA>/vendor/src/secret.ts` reads as in-repo and is
-      // emitted under repoA's name while naming a file that belongs to repoB. That is
-      // another repository's directory structure entering this one's capture.
+      // Containment, decided by the filesystem instead of by string prefix. A repo can
+      // contain a symlink that leaves it — `repoA/vendor` pointing at `repoB` is an
+      // ordinary thing for a checkout to have — and every rule inside sessionPaths is a
+      // string rule, so `<repoA>/vendor/src/secret.ts` reads as in-repo and is emitted
+      // under repoA's name while naming a file that belongs to repoB. That is another
+      // repository's directory structure entering this one's capture.
       //
-      // We answer by walking the path for real under each root and asking where it
-      // came out. Any root that resolves it INSIDE the repo settles it — a file may
-      // legitimately exist in only one of several worktrees, and one confirmation is
-      // enough. A CONTRADICTION — it resolved, and every resolution landed outside —
-      // is what drops it. Resolving nowhere is neither: a file the session deleted is
-      // gone from disk, and requiring existence here would quietly extend the shell
-      // path rule to path-named tool inputs, which have never carried it, and lose
-      // every removed file's path. Memoised, like `exists`, for the same reason.
+      // WE FOLLOW THE DIRECTORY, NOT THE FILE. What leaks is a path DESCENDING THROUGH
+      // a link: only `vendor` exists in repoA, so `vendor/src/secret.ts` is repoB's
+      // structure wearing repoA's name. A symlinked FILE at a name this repo really has
+      // — `src/linked.ts` pointing anywhere at all — is different in kind: that name is
+      // in repoA's own tree, git tracks it, and the path gives away nothing about where
+      // its contents live. Resolving the full path would drop it too, which is losing
+      // our own metadata to a rule aimed at somebody else's.
       //
-      // WE FOLLOW THE DIRECTORY, NOT THE FILE, AND THE DIFFERENCE IS THE WHOLE POINT.
-      // What leaks is a path DESCENDING THROUGH a link into another repo: only
-      // `vendor` exists in repoA, so `vendor/src/secret.ts` is repoB's directory
-      // structure wearing repoA's name. A symlinked FILE at a path this repo really
-      // has — `src/linked.ts` pointing anywhere at all — is different in kind: that
-      // name is in repoA's own tree, git tracks it, and the path gives away nothing
-      // about wherever its contents live. Resolving the full path would drop it too,
-      // which is losing our own metadata to a rule aimed at somebody else's. So the
-      // question asked is where the containing DIRECTORY comes out, which admits the
-      // repo's own leaf names and still refuses every path whose parent chain leaves.
-      escapesRepo: (rel) => {
+      // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME root
+      // resolves it inside — is wrong, and wrong in the way that reopens the leak it is
+      // meant to close. Roots are checkouts of one repo, so every tracked directory
+      // exists in all of them: put the escaping link at a name the repo genuinely has
+      // (`ln -s ../../other packages/foo`, with `packages/foo` a real directory in a
+      // sibling worktree) and the sibling vouches for it, laundering the escape. So the
+      // question asked is the opposite one, and a single contradiction drops the path.
+      //
+      // AND WE CLIMB TO THE DEEPEST ANCESTOR THAT EXISTS. Asking only about the
+      // immediate parent means a link into a directory that is MISSING answers
+      // "resolves nowhere", which is an absence, which keeps the path — so
+      // `<repoA>/vendor/gone/secret.ts` leaked while `<repoA>/vendor/src/secret.ts` did
+      // not, purely because of what happened to be on the far side of the link.
+      // Climbing until something resolves reaches `vendor` itself, which is a link out,
+      // and refuses it. It leaves the deleted-file case exactly where it was:
+      // `src/deleted.ts` climbs to `src`, which is inside, so the path survives.
+      escapesRepo: (rel, roots) => {
         const parent = dirname4(rel);
         const hit = escapesCache.get(parent);
         if (hit !== void 0) return hit;
-        let resolvedAnywhere = false;
-        let insideSomeRoot = false;
-        for (const root of repoRoots) {
-          const real = doRealPath(join13(root, parent));
+        const realRoots = realRootsOf(roots);
+        let escapes = false;
+        for (const root of roots) {
+          const segments = parent === "." || parent === "" ? [] : parent.split(/[\\/]/);
+          let real = null;
+          for (; ; ) {
+            real = realOf(segments.length > 0 ? join13(root, ...segments) : root);
+            if (real !== null || segments.length === 0) break;
+            segments.pop();
+          }
           if (real === null) continue;
-          resolvedAnywhere = true;
-          if (realRoots.some((r) => real === r || real.startsWith(r + "/"))) {
-            insideSomeRoot = true;
+          if (!inside(real, realRoots)) {
+            escapes = true;
             break;
           }
         }
-        const escapes = resolvedAnywhere && !insideSomeRoot;
         escapesCache.set(parent, escapes);
         return escapes;
       }

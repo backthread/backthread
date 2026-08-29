@@ -13,7 +13,7 @@
 //   • Repo         — a connected repo slug (owner/name) resolves                      [warn]
 //   • Capture hook — the SessionEnd/Stop hook is wired for a host agent, and NOT      [warn]
 //                    only project-scoped (the ARP-680 worktree-blind trap)
-//   • Capture      — anything the last capture had to say for itself. It runs         [warn]
+//   • Capture notes— anything the last capture had to say for itself. It runs         [warn]
 //                    detached with its stdio discarded, so a file is the only way
 //                    it can tell anyone anything, and this is where that is read
 //   • Connectivity — the worker + Functions origins are reachable (honors overrides)  [warn]
@@ -283,11 +283,17 @@ function captureNoticeCheck(deps: DoctorDeps, env: NodeJS.ProcessEnv): Check {
   const read = deps.readCaptureNoticeImpl ?? readCaptureNotice;
   const notice = read(env);
   if (!notice) {
-    return { key: 'capture', label: 'Capture', status: 'ok', detail: 'nothing left unsaid by the last capture' };
+    // NOT 'the last capture had nothing to say' — an absent notice is also what a
+    // machine looks like when the hook has never fired, or is misconfigured, or cannot
+    // write to the config directory. Claiming something about a capture that may never
+    // have happened is exactly the reassurance a broken install does not deserve. This
+    // line reports the state of the mailbox, and the Capture hook check above is what
+    // speaks to whether anything is posting to it.
+    return { key: 'capture', label: 'Capture notes', status: 'ok', detail: 'no notice from capture' };
   }
   const when = new Date(notice.at);
   const stamp = Number.isFinite(when.getTime()) ? when.toISOString().slice(0, 10) : notice.at;
-  return { key: 'capture', label: 'Capture', status: 'warn', detail: `${notice.message} (${stamp})` };
+  return { key: 'capture', label: 'Capture notes', status: 'warn', detail: `${notice.message} (${stamp})` };
 }
 
 // --- orchestration + formatting ----------------------------------------------

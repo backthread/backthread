@@ -15,16 +15,23 @@ then a file your agent opened through it read as one of yours by every rule the 
 applies, and was sent as `vendor/src/whatever.ts` against this repo, while the file it
 named belonged to the other one. Nothing about it looked wrong from the outside.
 
-Containment is now settled by the filesystem rather than by the shape of the string. A
-path is followed for real, through every link, and kept only when it comes out inside one
-of your repo's checkouts. The three properties the previous release bought are all still
-here and are tested against real git repos and real symlinks: a file edited in a sibling
-worktree still counts, a file in a genuinely different repo still does not, and a checkout
-you reach through a symlinked parent still works.
+Containment is now settled by the filesystem rather than by the shape of the string. The
+**directory** a path sits in is followed for real, through every link, and if any of your
+checkouts says it comes out somewhere that is not one of them, the path is dropped. The
+three properties the previous release bought are all still here and are tested against
+real git repos and real symlinks: a file edited in a sibling worktree still counts, a file
+in a genuinely different repo still does not, and a checkout you reach through a symlinked
+parent still works.
 
-One thing this deliberately does **not** do: it does not require a file to still exist.
-Resolving to somewhere else is a reason to drop a path; resolving to nothing is not.
-A file you deleted during the session keeps its path, exactly as before.
+Two things this deliberately does **not** do, both worth stating rather than letting you
+discover:
+
+- **It does not require a file to still exist.** A file you deleted during the session
+  keeps its path, exactly as before. Only its directory has to hold up.
+- **It does not drop a symlinked file at one of your own names.** If `src/adapter.ts` is
+  a link pointing anywhere at all, that name is still in your tree and git still tracks
+  it, so it is still yours. What gets refused is a path that *descends through* a link
+  into somebody else's repository.
 
 **Paths containing a NUL byte are refused.** No filesystem this runs on can name such a
 file — the syscall layer stops reading at the NUL — so the path named nothing, and it was
@@ -47,6 +54,13 @@ nothing whatsoever. Following that advice produced no visible change and taught 
 nothing. It now tells you how many worktrees you have, how many were checked, how many
 were left out, and that which ones is decided by git's listing order rather than by
 anything you did. There is no command that fixes it, so it no longer pretends there is.
+
+And the reason there is no longer a command to name: **worktree registrations git has
+already marked prunable are skipped before the cap applies.** A registration whose
+directory you deleted was still being listed, still spending one of the checked slots,
+and still counted in the number reported back to you — so stale entries could push your
+*live* worktrees past the limit. That was the one case where the old advice was right,
+and it is now handled for you rather than handed to you.
 
 ## 0.23.0
 

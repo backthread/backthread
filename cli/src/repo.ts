@@ -221,16 +221,45 @@ function withLogicalAlias(cwd: string, roots: string[]): string[] {
   return out;
 }
 
-/** The `<path>` of each `worktree <path>` line in `git worktree list --porcelain`. */
+/**
+ * The `<path>` of each `worktree <path>` record in `git worktree list --porcelain`,
+ * EXCEPT the ones git has already marked `prunable`.
+ *
+ * Porcelain is `<label> <value>` lines with a blank line between records, and only the
+ * `worktree` label carries a path — HEAD/branch/detached/locked/prunable do not. But
+ * `prunable` is the label that matters here: git still lists a registration whose
+ * directory has been deleted, annotated with the reason, and taking it at face value
+ * costs twice. It spends one of the capped verification slots on a directory that is
+ * not there, so on a machine with stale registrations the LIVE worktrees are the ones
+ * pushed past the cap. And it makes the count we report to the reader a count of
+ * registrations rather than of checkouts, which is not the thing they have.
+ *
+ * Dropping them here is also what makes the over-cap message true when it says there is
+ * no command that fixes the situation. For a stale registration there IS one —
+ * `git worktree prune` — and it is this line, run automatically, so nobody has to be
+ * told. What is left over the cap is genuinely live worktrees, and for those nothing
+ * but the cap itself is responsible.
+ */
 function parseWorktreePorcelain(out: string): string[] {
   const paths: string[] = [];
+  let current: string | null = null;
+  let prunable = false;
+  const flush = (): void => {
+    if (current !== null && !prunable) paths.push(current);
+    current = null;
+    prunable = false;
+  };
   for (const line of out.split('\n')) {
-    // Porcelain is `<label> <value>`; the record separator is a blank line. Only the
-    // `worktree` label carries a path — HEAD/branch/detached/locked/prunable do not.
-    if (!line.startsWith('worktree ')) continue;
-    const p = line.slice('worktree '.length).trim();
-    if (p.length > 0) paths.push(p);
+    if (line.startsWith('worktree ')) {
+      flush(); // a new record begins; the previous one is complete
+      const p = line.slice('worktree '.length).trim();
+      current = p.length > 0 ? p : null;
+      continue;
+    }
+    // `prunable` appears bare or as `prunable <reason>`; both mean the same thing.
+    if (line === 'prunable' || line.startsWith('prunable ')) prunable = true;
   }
+  flush(); // the last record has no trailing `worktree` line to close it
   return paths;
 }
 

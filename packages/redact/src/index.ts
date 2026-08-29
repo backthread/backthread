@@ -470,11 +470,26 @@ export interface SessionPathsOptions {
    * removed file. The predicate that decides EXISTENCE is `exists`; this one decides
    * DESTINATION.
    *
+   * ONE ROOT DISAGREEING IS ENOUGH TO DROP IT, and that is not the same as asking
+   * whether SOME root can vouch for it. Roots are checkouts of one repo, so every
+   * tracked directory exists in all of them — which means a sibling worktree will
+   * happily confirm a name whose spelling in THIS checkout is a link to somebody
+   * else's repo. Answering "is it inside anywhere?" lets that confirmation launder
+   * the escape; answering "does anything say it left?" does not.
+   *
+   * IT IS GIVEN THE ROOTS THE HARVEST ACTUALLY USED, not the ones the caller passed
+   * in. When the caller supplies none, this module falls back to a root it found in
+   * the transcript — and a predicate closed over the caller's empty list would then
+   * be measuring against directories that had nothing to do with the paths being
+   * relativized, and could only ever answer "no escape". Handing the effective roots
+   * to the predicate is what keeps the promise that there is no second, weaker route
+   * into the output.
+   *
    * Omit it and containment stays string-only — the long-standing behaviour, kept so
    * this remains a compatible addition to a published API. The shipped CLI always
    * supplies it. Should memoise: one session asks thousands of times.
    */
-  escapesRepo?: (repoRelativePath: string) => boolean;
+  escapesRepo?: (repoRelativePath: string, roots: readonly string[]) => boolean;
 }
 
 /**
@@ -743,7 +758,7 @@ export function sessionPaths(
       // — after the cheap string gates have already rejected what they can, and
       // BEFORE the shell budget is charged, so a path that is about to be dropped
       // never consumes the quota of one that would have been kept.
-      if (escapesRepo?.(norm)) continue;
+      if (escapesRepo?.(norm, roots)) continue;
       // Cap in ENCOUNTER order (see MAX_SHELL_PATHS) — never after the sort.
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;

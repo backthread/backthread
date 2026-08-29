@@ -218,14 +218,80 @@ test('resolveRepoRoots reads only the `worktree` lines of the porcelain record',
         'HEAD 2222222222222222222222222222222222222222',
         'detached',
         'locked',
-        'prunable gitdir file points to non-existent location',
         '',
       ].join('\n');
     }
     return null;
   };
-  // `HEAD …`, `branch …`, `detached`, `locked` and `prunable …` are not paths.
+  // `HEAD …`, `branch …`, `detached` and `locked` are not paths.
   assert.deepEqual(resolveRepoRoots('/work/app', run), ['/work/app', '/work/lane1']);
+});
+
+// A registration whose directory has been deleted is still LISTED, annotated with the
+// reason. Taking it at face value costs twice: it spends one of the capped verification
+// slots on a directory that is not there — so on a machine with stale registrations the
+// LIVE worktrees are the ones pushed past the cap — and it inflates the count reported
+// to the reader into a count of registrations rather than of checkouts. It is also the
+// one case where `git worktree prune` was the right answer, which is why doing it here
+// is what lets the over-cap message stop naming a command.
+test('resolveRepoRoots skips worktree registrations git has marked prunable', () => {
+  const probed: string[] = [];
+  const run: GitRunner = (cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') {
+      probed.push(cwd);
+      return '/work/app/.git\n';
+    }
+    if (args[0] === 'worktree') {
+      return [
+        'worktree /work/app',
+        'HEAD 1111111111111111111111111111111111111111',
+        'branch refs/heads/main',
+        '',
+        'worktree /work/stale',
+        'HEAD 2222222222222222222222222222222222222222',
+        'prunable gitdir file points to non-existent location',
+        '',
+        'worktree /work/live',
+        'HEAD 3333333333333333333333333333333333333333',
+        'branch refs/heads/live',
+        '',
+        'worktree /work/stale-bare',
+        'prunable', // the bare spelling means the same thing
+        '',
+      ].join('\n');
+    }
+    return null;
+  };
+  assert.deepEqual(resolveRepoRoots('/work/app', run), ['/work/app', '/work/live']);
+  // Not merely absent from the result — never probed at all, which is the cap slot the
+  // fix is about. (`/work/app` is the session's own identity probe.)
+  assert.deepEqual(probed, ['/work/app', '/work/live']);
+});
+
+// The annotation belongs to the record it appears in and must not bleed into the next
+// one. A parser that latches `prunable` and never clears it would silently drop every
+// worktree listed after the first stale registration.
+test('a prunable annotation does not condemn the worktrees listed after it', () => {
+  const run: GitRunner = (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return '/work/app/.git\n';
+    if (args[0] === 'worktree') {
+      return [
+        'worktree /work/app',
+        '',
+        'worktree /work/stale',
+        'prunable gitdir file points to non-existent location',
+        '',
+        'worktree /work/after-one',
+        '',
+        'worktree /work/after-two',
+        '',
+      ].join('\n');
+    }
+    return null;
+  };
+  assert.deepEqual(resolveRepoRoots('/work/app', run), ['/work/app', '/work/after-one', '/work/after-two']);
 });
 
 // A hook payload's `cwd` is whatever the host agent reported, which is not guaranteed
