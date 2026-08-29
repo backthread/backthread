@@ -46,8 +46,11 @@ it under a real shell and reading the other repository's bytes:
 * **24 spellings invented before the redesign — all refused.** The same probe leaks all 24 on
   0.25.0.
 * **24 more invented after it, aimed at the new rule — all refused**, with no further change.
-* **14 more found by an independent adversarial review of the redesign itself — all refused**,
-  after the fixes described above.
+* **14 more from a second independent review, and 7 more from a third — all refused.** The
+  third round found the sharpest of them: `cd sub; cd nonexist` leaves a real shell in `sub`,
+  because a failed `cd` moves nothing, and reading only the final spelling sent the path back
+  to the top of the repo. `CDPATH` and a shell function whose body runs at each call site came
+  from the same round.
 * Everything closed by 0.24.0 and 0.25.0 stays closed; a file in a sibling worktree of the same
   repository is still recorded.
 
@@ -60,12 +63,14 @@ guarantee against a transcript deliberately written to defeat it.
 **What this costs, stated plainly.** Two separate reductions, measured over 73,800 real shell
 commands:
 
-* **6.8% of relative paths from shell commands are now dropped as unplaceable** — the command
+* **8.1% of relative paths from shell commands are now dropped as unplaceable** — the command
   contained something that could change directory and could not be read. Most of that is
-  `source`/`.` running a script, which can `cd` anywhere and says nothing about where. It also
-  includes commands where nothing actually moved (a `cd` written inside a heredoc, a
-  `--include=cd` flag). Over-detecting costs paths; under-detecting leaks them, so it errs the
-  first way on purpose.
+  `source`/`.` running a script, which can `cd` anywhere and says nothing about where, plus
+  shell function definitions and `CDPATH`. It also includes commands where nothing actually
+  moved (a `cd` written inside a heredoc). Over-detecting costs paths; under-detecting leaks
+  them, so it errs the first way on purpose — but only where the doubt is real: a bare `-C`
+  is an everyday flag of `grep`, `git`, `tar` and `sort`, and `source` as an argument is not a
+  command, and refusing those cost 1,800 commands for nothing.
 * **A further ~1.2% are dropped because the directory they were written in resolves outside
   your repository.** About seven in ten of those are the misattribution being corrected.
 

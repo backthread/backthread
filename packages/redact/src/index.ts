@@ -598,22 +598,38 @@ export interface PathCandidate {
    * remaining source of that difference, so the originating directory now travels WITH
    * the candidate rather than being inferred after the fact.
    *
-   * Each entry is a composed directory SPELLING: POSIX-absolute when the tool call stated
-   * an absolute one, otherwise relative to whatever the caller measures relative paths
-   * against. They are spellings, not resolved paths, for exactly the reason `raw` is:
-   * this package is pure and cannot ask the filesystem anything, and a reduction applied
-   * before the filesystem has spoken is a reduction that a symlink can make wrong.
+   * An ORDERED CHAIN, shallowest first: the tool call's own directory, then the result of
+   * each `cd` that precedes the token. Each entry is a composed directory SPELLING —
+   * POSIX-absolute when the tool call stated an absolute one, otherwise relative to whatever
+   * the caller measures relative paths against. They are spellings, not resolved paths, for
+   * exactly the reason `raw` is: this package is pure and cannot ask the filesystem anything,
+   * and a reduction applied before the filesystem has spoken is a reduction a symlink can
+   * make wrong.
    *
-   * ANY ONE OF THEM CONTRADICTING IS ENOUGH TO DROP THE PATH — the same rule the caller
-   * already applies to roots, and for the same reason. Usually there is exactly one entry
-   * (the tool call's directory, moved by whatever `cd`s precede the token). More than one
-   * means the command could not be read positionally — a `cd "$VAR"`, a subshell — and
-   * the list is then a conservative superset rather than an answer.
+   * How to read the chain is `exact`'s job. The chain rather than a single answer, because
+   * only the filesystem knows which of the `cd`s SUCCEEDED, and a `cd` that fails leaves the
+   * shell where it already was.
    *
    * Empty means the tool call named no directory at all, and the caller's existing bases
    * are all there is. That is the pre-existing behaviour, unchanged.
    */
   bases: readonly string[];
+  /**
+   * Is `bases` the sequence the shell actually walked, or only the set of places it might
+   * have been?
+   *
+   * True means the chain is ordered and complete, so the directory in effect is the DEEPEST
+   * entry that exists on disk. That last qualification is the whole point: `cd sub; cd
+   * nonexist` leaves a real shell in `sub`, because the second `cd` fails and a failed `cd`
+   * does not move anything. Resolving only the final spelling finds nothing, and treating
+   * "nothing" as "no opinion" hands the token back to the repo root — which is how a token
+   * read from `sub` was recorded as though it had been read from the top of the repo.
+   *
+   * False means a branch we could not resolve (`if … then cd x; fi`) left us with a superset
+   * rather than an answer. Every entry is then a place the command might have been, and one
+   * contradiction is enough to drop the path.
+   */
+  exact: boolean;
   /**
    * Can this candidate be placed at all?
    *
@@ -629,17 +645,6 @@ export interface PathCandidate {
    * is an explicit act by the agent rather than a token scraped out of a shell string.
    */
   locatable: boolean;
-  /**
-   * Did a `cd` actually move the shell before this token?
-   *
-   * This separates two things that look alike and are not. A base that is merely where the
-   * session was standing is subject to the caller's long-standing rule that a cwd outside the
-   * repo is not a base this repo's paths can be measured from — using it would contradict
-   * everything and empty the harvest. A base a command MOVED to is the opposite case: if it
-   * left the repo, that is the leak itself, and the token must be dropped precisely because
-   * the base is outside.
-   */
-  moved: boolean;
 }
 
 /**
@@ -718,8 +723,8 @@ interface CandidatePath {
   raw: string;
   fromShell: boolean;
   bases: readonly string[];
+  exact: boolean;
   locatable: boolean;
-  moved: boolean;
 }
 
 /**
@@ -734,14 +739,37 @@ interface CandidatePath {
  * exactly how the path fence kept losing before it started asking the filesystem.
  *
  * So the question asked here is the CLOSED one: can we prove the command did NOT move? This
- * pattern only has to over-detect. A false positive costs recall — measured at 6.8% of
- * relative shell tokens, most of it `source` — while a false negative is a leak, so every
- * doubt is spelled as a
+ * pattern only has to over-detect. A false positive costs recall — measured at 8.1% of
+ * relative shell tokens — while a false negative is a leak, so every doubt is spelled as a
  * hit. Whatever it finds, `SHELL_CD` below must be able to ACCOUNT for, or the command is
  * unlocatable and its relative tokens are dropped.
  */
-const MIGHT_CHANGE_DIRECTORY =
-  /(?:^|[^\w.\-/])(?:cd|pushd|popd|chdir|source)(?![\w.\-/])|(?:^|[;&|(\n]|&&|\|\|)\s*\.\s|(?:^|\s)(?:-C|--chdir|--directory)(?:[=\s])/g;
+const MIGHT_CHANGE_DIRECTORY = new RegExp(
+  [
+    // The builtins, anywhere: `cd`, and the stack pair whose state this scan does not model.
+    String.raw`(?:^|[^\w.\-/])(?:cd|pushd|popd|chdir)(?![\w.\-/])`,
+    // Running a script IN THIS SHELL. The script can `cd` anywhere and the line invoking it
+    // says nothing about where. Only at a command position — `grep source file` is an
+    // argument, not a command, and refusing it cost 1,121 commands for nothing.
+    String.raw`(?:^|[;&|(){}\n]|&&|\|\||\bthen\b|\bdo\b|\belse\b)\s*source\s`,
+    // The `.` spelling of `source` needs a TIGHTER anchor than the word does. A bare dot is
+    // ordinary punctuation, and admitting `)` or `}` or an `else` before it matched `).` and
+    // `}.` inside heredoc'd source code 2,400 times — refusing thousands of commands over a
+    // method call. Only a statement start counts.
+    String.raw`(?:^|[;&|\n]|&&|\|\|)[ \t]*\.\s`,
+    // `env -C dir cmd` runs `cmd` somewhere else, so a path argument to it is relative to
+    // there. Tied to `env` rather than matching a bare `-C`, which is an everyday flag of
+    // `grep`, `git`, `tar` and `sort` and cost 668 commands to no purpose.
+    String.raw`(?:^|[^\w.\-/])(?:env|chroot)(?![\w.\-/])[^;&|\n]*?\s(?:-C|--chdir|--directory)(?:[=\s])`,
+    // CDPATH turns a perfectly readable `cd sub` into a move to somewhere else entirely, and
+    // where it points is not in the transcript at all.
+    String.raw`(?:^|[^\w.\-/])CDPATH(?![\w.\-/])`,
+    // A FUNCTION DEFINITION. Its body runs at each call site, not where it is written, so the
+    // offset order this scan relies on stops meaning execution order.
+    String.raw`(?:function\s+[\w.-]+|[\w.-]+\s*\(\s*\))\s*\{`,
+  ].join('|'),
+  'g',
+);
 
 /**
  * The command as the shell will see it once QUOTE REMOVAL has run — `\`, `"` and `'` deleted.
@@ -928,40 +956,34 @@ function pathsFromRecord(rec: unknown, sessionCwd: string | null): CandidatePath
     if (text === null || text.length === 0) return;
 
     const { events, locatable, exact } = shellCdBases(text, cwd);
+    const head = cwd !== null ? [cwd] : [];
     // Every base at once, for a reading that is a superset rather than an answer.
-    const conservative = [...(cwd !== null ? [cwd] : []), ...events.map((e) => e.base)];
+    const conservative = [...head, ...events.map((e) => e.base)];
     for (const m of text.matchAll(SHELL_PATH_TOKEN)) {
       if (!locatable) {
         // WE DO NOT KNOW WHERE THIS COMMAND WAS STANDING. Something in it could change the
         // working directory and could not be read, so there is no directory to measure the
         // token against and no honest answer but to drop it. The alternative — falling back
         // to the record's own cwd — is a confident answer to a question we cannot answer,
-        // and it is what put eleven spellings on the wire.
-        out.push({ raw: m[0], fromShell: true, bases: [], locatable: false, moved: false });
+        // and it is what put twenty-two spellings on the wire.
+        out.push({ raw: m[0], fromShell: true, bases: [], exact: true, locatable: false });
         continue;
       }
-      let bases: readonly string[];
-      let moved: boolean;
-      if (!exact) {
-        // A branch we cannot resolve: `if [ -d x ]; then cd x; fi` moves only when the test
-        // passed. Measured against every directory it could have been in, one contradiction
-        // drops it.
-        bases = conservative;
-        moved = events.length > 0;
-      } else {
-        // The directory in effect AT THIS OFFSET — the last `cd` preceding the token, or the
-        // tool call's own directory when none does.
-        let base: string | null = cwd;
-        let shifted = false;
-        for (const e of events) {
-          if (e.at > (m.index ?? 0)) break;
-          base = e.base;
-          shifted = true;
-        }
-        bases = base === null ? [] : [base];
-        moved = shifted;
+      // The chain UP TO THIS OFFSET: the tool call's directory, then each `cd` that precedes
+      // the token. Which link of it the shell is actually standing on depends on which of
+      // those `cd`s succeeded, and only the caller can find that out.
+      const chain = [...head];
+      for (const e of events) {
+        if (e.at > (m.index ?? 0)) break;
+        chain.push(e.base);
       }
-      out.push({ raw: m[0], fromShell: true, bases, locatable: true, moved });
+      out.push({
+        raw: m[0],
+        fromShell: true,
+        bases: exact ? chain : conservative,
+        exact,
+        locatable: true,
+      });
     }
   };
 
@@ -994,7 +1016,7 @@ function pathsFromRecord(rec: unknown, sessionCwd: string | null): CandidatePath
       // cost real paths. A LEADING control character is not trimmed here and is refused
       // outright by `CONTROL_CHARACTER` below.
       if (typeof v === 'string' && v.trim().length > 0)
-        out.push({ raw: v.trimEnd(), fromShell: false, bases: inputBases, locatable: true, moved: false });
+        out.push({ raw: v.trimEnd(), fromShell: false, bases: inputBases, exact: true, locatable: true });
     }
     pushFromCommand(i.command, blockCwd);
   };
@@ -1098,7 +1120,7 @@ export function sessionPaths(
   const seen = new Set<string>();
   let shellPathCount = 0;
   for (const rec of records) {
-    for (const { raw: p, fromShell, bases, locatable, moved } of pathsFromRecord(rec, sessionCwd)) {
+    for (const { raw: p, fromShell, bases, exact, locatable } of pathsFromRecord(rec, sessionCwd)) {
       // FAIL CLOSED. A shell token is a guess until something confirms it names a
       // real file in this repo. A consumer that hasn't opted in by supplying
       // `exists` gets the pre-scan behaviour rather than unverified guesses — the
@@ -1193,7 +1215,7 @@ export function sessionPaths(
       // the roots — and the kernel uses the working directory of the tool call that
       // produced it. `bases` is that directory, carried down from the record rather than
       // guessed at after the fact; see `PathCandidate.bases`.
-      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p), bases, locatable, moved }, roots)) continue;
+      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p), bases, exact, locatable }, roots)) continue;
       // Cap in ENCOUNTER order (see MAX_SHELL_PATHS) — never after the sort.
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;

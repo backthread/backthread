@@ -1122,6 +1122,10 @@ test('a command that could have moved and could not be read is refused, not gues
     symlinkSync(join(foreign, 'src'), join(app, 'sub/src'), 'dir');
     // A script that changes directory, and the `s3x` the mis-read targets really land in.
     writeFileSync(join(app, 'setup.sh'), `cd ${foreign}\n`);
+    // `other` both beside the repo and inside it: with CDPATH=.. the shell picks the outside
+    // one, so the same `cd other` reads a different `src` than the text suggests.
+    mkdirSync(join(tmp, 'other/src'), { recursive: true });
+    mkdirSync(join(app, 'other/src'), { recursive: true });
     mkdirSync(join(app, 's3'), { recursive: true });
     mkdirSync(join(app, 's3x'), { recursive: true });
     symlinkSync(join(foreign, 'src'), join(app, 's3x/src'), 'dir');
@@ -1134,13 +1138,23 @@ test('a command that could have moved and could not be read is refused, not gues
 
     // One colliding name per spelling, so a leak is a row in the output rather than a
     // misattribution hidden behind an honest record contributing the same string.
+    // The rows that genuinely move the shell, and are proven below to do so.
     const ids = [
-      'u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8', 'u9', 'u10', 'u11', 'u12', 'u13',
+      'u1', 'u2', 'u3', 'u4', 'u5', 'u8', 'u9', 'u10', 'u11', 'u12', 'u13',
       'u14', 'u15', 'u16', 'u17', 'u18', 'u19', 'u20', 'u21', 'u22', 'u23', 'u24',
+      'u25', 'u26', 'u27', 'u28',
     ];
-    for (const n of [...ids, 'keep', 'brace', 'codex', 'cond']) {
+    // `env -C` moves the command it runs, but only where `env` supports the flag — BSD `env`
+    // does not have it at all, so this row cannot be proven by running it here. It is still
+    // refused, on the possibility, because a transcript can come from a machine where it
+    // works. Listed apart from `ids` so that the proof loop below never claims to have
+    // demonstrated something it did not run.
+    const unprovableHere = ['u6'];
+    for (const n of [...ids, ...unprovableHere, 'u7', 'keep', 'brace', 'codex', 'cond']) {
       writeFileSync(join(foreign, `src/${n}.ts`), 'export const v = 1; // THEIRS\n');
       writeFileSync(join(app, `src/${n}.ts`), `export const ${n} = 1; // OURS\n`);
+      writeFileSync(join(tmp, `other/src/${n}.ts`), 'export const v = 1; // THEIRS\n');
+      writeFileSync(join(app, `other/src/${n}.ts`), `export const ${n} = 1; // OURS\n`);
     }
     writeFileSync(join(foreign, 'lib/cond.ts'), 'export const v = 1; // THEIRS\n');
     writeFileSync(join(app, 'sub/lib/cond.ts'), 'export const cond = 1; // OURS\n');
@@ -1176,6 +1190,10 @@ test('a command that could have moved and could not be read is refused, not gues
       rec(app, 'cd - && cat src/u4.ts'), // returns somewhere that is nowhere in the text
       rec(app, '\\cd sub && cat src/u5.ts'), // the word escaped
       rec(app, 'env -C sub cat src/u6.ts'), // a different mechanism entirely
+      // `make -C` changes the directory MAKE works in, not the shell's — measured: the `cat`
+      // after it reads our own file. It is here as a control, not an escape: the detector
+      // deliberately does NOT fire on a bare `-C`, because `grep -C`, `git -C`, `tar -C` and
+      // `sort -C` are everyday flags and refusing them cost 668 commands for nothing.
       rec(app, 'make -C sub && cat src/u7.ts'),
       rec(app, "bash -c 'cd sub && cat src/u8.ts'"), // an inner shell we do not read
       rec(app, 'cd "$SUB" && cat src/u9.ts'), // a variable we cannot expand
@@ -1198,6 +1216,14 @@ test('a command that could have moved and could not be read is refused, not gues
       // says nothing about where. Neither spelling of it is readable.
       rec(app, 'source ./setup.sh && cat src/u18.ts'),
       rec(app, '. ./setup.sh && cat src/u19.ts'),
+      // CDPATH REDIRECTS A PERFECTLY READABLE `cd`. `cd other` is read correctly and still
+      // lands somewhere else entirely, and where it points is not in the transcript at all.
+      rec(app, 'export CDPATH=..; cd other; cat src/u25.ts'),
+      rec(app, 'CDPATH=.. cd other; cat src/u26.ts'),
+      // A FUNCTION BODY RUNS WHERE IT IS CALLED, not where it is written, so the offset order
+      // this scan relies on stops meaning execution order.
+      rec(app, 'f(){ cat src/u27.ts; cd sub; }; f; f'),
+      rec(app, 'function g { cat src/u28.ts; }; cd sub; g'),
       // A TARGET THAT IS NOT THE WHOLE WORD. `cd "s3"x` is `s3x` to the shell; a reader that
       // takes `"s3"` and stops composes a base that is not where the command went. The
       // residue after the match is the evidence, and there is no safe reading of it.
@@ -1231,6 +1257,12 @@ test('a command that could have moved and could not be read is refused, not gues
       // READ, not refused, so a `cd` that stays inside the repo still yields its paths.
       rec(app, '{ cd honest; cat src/keep.ts; }'),
       rec(app, 'time cd honest && cat src/brace.ts'),
+      // …and the recall the narrowed detectors buy back. `-C` is an everyday flag of `grep`,
+      // `git`, `tar` and `sort`, and `make -C` moves MAKE rather than the shell; refusing a
+      // bare `-C` cost 668 commands for nothing. `source` as an ARGUMENT is not a command.
+      rec(app, 'grep -C 3 foo src/keep.ts'),
+      rec(app, 'git -C sub log && cat src/brace.ts'),
+      rec(app, 'grep source src/keep.ts'),
     ].join('\n');
 
     let sentBody: unknown = null;
@@ -1250,7 +1282,7 @@ test('a command that could have moved and could not be read is refused, not gues
     // Twelve unreadable spellings and a conditional one: none on the wire. `src/keep.ts` and
     // `src/brace.ts` survive ONLY on the strength of the two readable in-repo `cd`s — which
     // is what stops this test passing by simply refusing everything.
-    assert.deepEqual(filePaths, ['src/brace.ts', 'src/codex.ts', 'src/keep.ts']);
+    assert.deepEqual(filePaths, ['src/brace.ts', 'src/codex.ts', 'src/keep.ts', 'src/u7.ts']);
     assert.doesNotMatch(JSON.stringify(sentBody), /other-repo|THEIRS/i);
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -1423,6 +1455,161 @@ test('a conditional `cd` is measured as every directory it could have been in', 
 
     const filePaths = ((sentBody as { filePaths?: unknown }).filePaths as string[]) ?? [];
     assert.deepEqual(filePaths, []);
+    assert.doesNotMatch(JSON.stringify(sentBody), /other-repo|THEIRS/i);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// READING THE CHAIN AS A CHAIN IS WORTH RECALL, and reading it as a superset is worth
+// safety, so the two are not interchangeable and the memo cannot forget which one it used.
+//
+// The fixture is one name that is ours from the bottom of the chain and theirs from the top:
+// `<app>/zlink` is a link out, `<app>/sub/zlink` is an honest directory. A command that
+// definitely ran `cd sub` is standing at the bottom and the path is ours. A command whose
+// `cd` sits behind an `if` might be standing at either end, and one contradiction drops it.
+// Same spelling, same chain, opposite answers.
+test('an exact chain is read as a chain, and a conditional one as a superset', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-exact-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    writeFileSync(join(foreign, 'src/x.ts'), 'export const v = 1; // THEIRS\n');
+    mkdirSync(join(app, 'sub/zlink/src'), { recursive: true });
+    writeFileSync(join(app, 'sub/zlink/src/x.ts'), 'export const x = 1; // OURS\n');
+    symlinkSync(foreign, join(app, 'zlink'), 'dir');
+    // From `sub` the name is ours; from the checkout root the same name leaves the repo.
+    assert.match(readFileSync(join(app, 'sub/zlink/src/x.ts'), 'utf8'), /OURS/);
+    assert.match(readFileSync(join(app, 'zlink/src/x.ts'), 'utf8'), /THEIRS/);
+
+    const rec = (command: string) =>
+      JSON.stringify({
+        type: 'assistant',
+        cwd: app,
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] },
+      });
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-ex', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'text', text: 'Because the reasoning outlives the diff.' }] },
+      }),
+      // The CONDITIONAL one comes first deliberately: its verdict is the refusal, and a memo
+      // that forgot how the chain was read would hand that refusal to the record below.
+      rec('if [ -d sub ]; then cd sub; fi; cat zlink/src/x.ts'),
+      // …and the unconditional one, which definitely did move, keeps the path.
+      rec('cd sub && cat zlink/src/x.ts'),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-ex' }, base);
+
+    const filePaths = ((sentBody as { filePaths?: unknown }).filePaths as string[]) ?? [];
+    assert.deepEqual(filePaths, ['zlink/src/x.ts']);
+    assert.doesNotMatch(JSON.stringify(sentBody), /THEIRS/i);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// A FAILED `cd` LEAVES THE SHELL WHERE THE LAST SUCCESSFUL ONE PUT IT — not back at the top
+// of the repo. `cd sub; cd nonexist` is standing in `sub`, and if `sub` holds a link out, a
+// token read from there belongs to another repository.
+//
+// This is why the chain crosses the boundary instead of a single answer. Composing only the
+// final spelling gives `<app>/sub/nonexist`, which resolves to nothing; reading "nothing" as
+// "no opinion" hands the token back to the repo root and publishes it under our name. The
+// caller walks BACK up the chain to the deepest link that exists, which is what the shell did.
+test('a failed `cd` falls back to the last one that worked, not to the repo root', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-chain-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    writeFileSync(join(foreign, 'src/c1.ts'), 'export const v = 1; // THEIRS\n');
+    mkdirSync(join(app, 'sub'), { recursive: true });
+    mkdirSync(join(app, 'zlink/src'), { recursive: true });
+    // Our own `zlink/src/c1.ts` at the checkout root — the collision that makes the leak look
+    // like one of our files. Inside `sub`, the same name is a link into the other repository.
+    writeFileSync(join(app, 'zlink/src/c1.ts'), 'export const c1 = 1; // OURS\n');
+    writeFileSync(join(app, 'zlink/src/c2.ts'), 'export const c2 = 1; // OURS\n');
+    symlinkSync(foreign, join(app, 'sub/zlink'), 'dir');
+    assert.match(readFileSync(join(app, 'sub/zlink/src/c1.ts'), 'utf8'), /THEIRS/);
+    assert.match(readFileSync(join(app, 'zlink/src/c1.ts'), 'utf8'), /OURS/);
+    assert.ok(!existsSync(join(app, 'sub/nonexist')));
+
+    const rec = (command: string) =>
+      JSON.stringify({
+        type: 'assistant',
+        cwd: app,
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] },
+      });
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-ch', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'text', text: 'Because the reasoning outlives the diff.' }] },
+      }),
+      // The shell is in `sub` when this runs, so the file is the other repository's.
+      rec('cd sub; cd nonexist; cat zlink/src/c1.ts'),
+      // …and a chain that never moved at all still reads from the root, so ours survives.
+      rec('cat zlink/src/c2.ts'),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-ch' }, base);
+
+    const filePaths = ((sentBody as { filePaths?: unknown }).filePaths as string[]) ?? [];
+    assert.deepEqual(filePaths, ['zlink/src/c2.ts']);
     assert.doesNotMatch(JSON.stringify(sentBody), /other-repo|THEIRS/i);
   } finally {
     await rm(tmp, { recursive: true, force: true });

@@ -761,7 +761,7 @@ test('the escape check receives the RAW spelling, not the one that would be emit
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: './dlink/../src/b.ts' } }] } },
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'cat dlink/../src/c.ts' } }] } },
   ];
-  const seen: { raw: string; absolute: boolean; bases: readonly string[]; locatable: boolean; moved: boolean }[] = [];
+  const seen: { raw: string; absolute: boolean; bases: readonly string[]; exact: boolean; locatable: boolean }[] = [];
   const out = sessionPaths(records, '/work/app', {
     exists: () => true,
     escapesRepo: (candidate) => {
@@ -774,9 +774,9 @@ test('the escape check receives the RAW spelling, not the one that would be emit
   // no cwd must leave the caller measuring against exactly what it measured before.
   // `locatable` is true because none of these commands can change directory at all.
   assert.deepEqual(seen, [
-    { raw: '/work/app/dlink/../src/a.ts', absolute: true, bases: [], locatable: true, moved: false },
-    { raw: './dlink/../src/b.ts', absolute: false, bases: [], locatable: true, moved: false },
-    { raw: 'dlink/../src/c.ts', absolute: false, bases: [], locatable: true, moved: false },
+    { raw: '/work/app/dlink/../src/a.ts', absolute: true, bases: [], exact: true, locatable: true },
+    { raw: './dlink/../src/b.ts', absolute: false, bases: [], exact: true, locatable: true },
+    { raw: 'dlink/../src/c.ts', absolute: false, bases: [], exact: true, locatable: true },
   ]);
   // …while what is EMITTED is still the normalized spelling. Both are true at once, and
   // that is exactly the separation the previous signature did not have.
@@ -832,8 +832,12 @@ test('a `cd` inside the scanned command moves the base, positionally', () => {
   ]);
   // A token BEFORE the `cd` is relative to where the shell still was. Measuring both
   // against the union would drop the first one for a move that had not happened yet.
+  //
+  // What crosses is the CHAIN up to the token, shallowest first — not a single answer —
+  // because which link the shell is standing on depends on which `cd`s SUCCEEDED, and only
+  // the caller can ask the filesystem that.
   assert.deepEqual(seen['before/a.ts'], ['/work/app']);
-  assert.deepEqual(seen['after/b.ts'], ['/work/app/sub']);
+  assert.deepEqual(seen['after/b.ts'], ['/work/app', '/work/app/sub']);
 });
 
 test('an absolute `cd` replaces the base; relative `cd`s chain', () => {
@@ -849,8 +853,9 @@ test('an absolute `cd` replaces the base; relative `cd`s chain', () => {
       },
     },
   ]);
-  assert.deepEqual(seen['one/x.ts'], ['/work/app/a/b']);
-  assert.deepEqual(seen['two/y.ts'], ['/elsewhere']);
+  assert.deepEqual(seen['one/x.ts'], ['/work/app', '/work/app/a', '/work/app/a/b']);
+  // An absolute `cd` REPLACES rather than descends, so the link it contributes is itself.
+  assert.deepEqual(seen['two/y.ts'], ['/work/app', '/elsewhere']);
 });
 
 test('an unreadable `cd` target makes the command UNLOCATABLE, not merely cautious', () => {
