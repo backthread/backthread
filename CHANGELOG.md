@@ -5,6 +5,98 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.26.0
+
+**A relative path is now measured from the directory the command actually ran in — and where
+that cannot be worked out, the path is dropped instead of guessed at.**
+
+`src/config.ts` means nothing on its own. It means something different in every directory.
+Your agent runs `cd packages/api && cat src/config.ts`, and the shell reads
+`packages/api/src/config.ts`; the fence, which only knew the directory your *session* started
+in, read it as `src/config.ts` at the top of your repo. Usually that is merely the wrong file.
+When the directory it moved into is a link to another repository — or is another repository,
+because the command said `cd ../other-project` — it is that project's file, recorded under
+your project's name.
+
+Two things were on hand the whole time and were not being read: your agent stamps the working
+directory on every record it writes, and a `cd` inside the command is right there in the text
+being scanned. Both now travel with the path they belong to.
+
+**The harder half was knowing when not to trust that reading.** The first attempt looked for
+`cd` and, when it did not find one, confidently used the record's directory. Review found
+eleven ways to move a shell that it did not recognise, and a second round found eleven more —
+`pushd`, `cd -P`, `cd --`, `{ cd x; }`, `\cd`, `env -C`, `then cd`, `time cd`,
+`bash -c 'cd x'`, `cd -`, `source ./script.sh`, and — worst of all — `c\d`, `c"d"` and
+`c'd'`, which contain no `cd` for anything to find and run it anyway, because the shell strips
+quoting before it looks the word up. Every one produced a confident answer that was wrong.
+That is not twenty-two bugs; it is one. Reading a command to find out where it moved is an
+open-ended question and there is always another spelling.
+
+So the question is now the closed one: **can we prove the command did not move?** Anything
+that might change a directory is detected deliberately over-eagerly — and detected on the
+command as the *shell* will see it, with quoting removed and expansions collapsed, so a `cd`
+spliced together out of pieces is still a `cd`. The part of the reader that actually
+interprets `cd` must then account for every one of those detections. Whatever it cannot
+explain makes the command *unplaceable*, and an unplaceable relative path is dropped rather
+than attributed to a directory nobody can name.
+
+Measured against real repositories and real symlinks, each spelling first confirmed by running
+it under a real shell and reading the other repository's bytes:
+
+* **24 spellings invented before the redesign — all refused.** The same probe leaks all 24 on
+  0.25.0.
+* **24 more invented after it, aimed at the new rule — all refused**, with no further change.
+* **14 more from a second independent review, and 7 more from a third — all refused.** The
+  third round found the sharpest of them: `cd sub; cd nonexist` leaves a real shell in `sub`,
+  because a failed `cd` moves nothing, and reading only the final spelling sent the path back
+  to the top of the repo. `CDPATH` and a shell function whose body runs at each call site came
+  from the same round.
+* Everything closed by 0.24.0 and 0.25.0 stays closed; a file in a sibling worktree of the same
+  repository is still recorded.
+
+**This is a much stronger fence, not a proof, and the difference is deliberate.** A shell can
+name a command in more ways than any scan of text can enumerate — quoting, expansion and
+aliasing between them make "does this command change directory?" undecidable from the text.
+That is a property of the problem, not of how hard anyone looked. So the claim is bounded:
+every construct found across three rounds of adversarial review is refused, and detection now
+covers the two *mechanisms* that hide a word — quoting and expansion — rather than a list of
+spellings. **We do not claim that no path from another repository can reach the wire.** The
+residual class is a directory change whose command word cannot be recovered from the text at
+all: an alias, or an expansion whose value is not in the transcript.
+
+**The absolute version of this was considered and rejected, and we would rather say so than
+have it proposed as an obvious improvement later.** Dropping every relative path scraped from
+a shell command *would* close the class completely — nothing measured could escape a route
+that no longer exists. It would also discard about **84% of the file paths shell commands
+contribute**, and shell-derived paths are the reason this tool can anchor a decision to code at
+all: on one measured machine, harvesting them moved the share of decisions anchored to real
+files from **5.3% to 93.0%**. Buying a completeness claim with the capability the product
+exists to provide is the wrong trade. A bounded, measured, honestly-stated fence beats an
+absolute one that has nothing left to protect.
+
+**What this costs, stated plainly.** Two separate reductions, measured over 73,800 real shell
+commands:
+
+* **8.1% of relative paths from shell commands are now dropped as unplaceable** — the command
+  contained something that could change directory and could not be read. Most of that is
+  `source`/`.` running a script, which can `cd` anywhere and says nothing about where, plus
+  shell function definitions and `CDPATH`. It also includes commands where nothing actually
+  moved (a `cd` written inside a heredoc). Over-detecting costs paths; under-detecting leaks
+  them, so it errs the first way on purpose — but only where the doubt is real: a bare `-C`
+  is an everyday flag of `grep`, `git`, `tar` and `sort`, and `source` as an argument is not a
+  command, and refusing those cost 1,800 commands for nothing.
+* **A further ~1.2% are dropped because the directory they were written in resolves outside
+  your repository.** About seven in ten of those are the misattribution being corrected.
+
+**What is still open, and known.** A path that stays *inside* your repository but was written
+from a subdirectory is still recorded under the name it was spelled with, not the name your
+repository knows it by — `cd packages/api && cat src/config.ts` records `src/config.ts`.
+Nothing belonging to another repository escapes through this, but the file it names may be the
+wrong one. Files you **deleted** during a session still lose their paths, unchanged and for the
+unchanged reason. If your agent's shell kept its working directory between commands, a `cd` in
+one would govern the next; measured across 4,055 real cases where the two readings disagree,
+the shell had reset in 96.1%, so each command is read from its own stamped directory.
+
 ## 0.25.0
 
 **The `..` hole 0.24.0 told you about is closed.** That release said, in as many words,

@@ -632,6 +632,90 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       basesCache.set(key, out);
       return out;
     };
+    // Every segment of a spelling that names a DIRECTORY, so nothing is popped. The path
+    // variant drops its leaf because the walk must not follow a symlinked FILE at one of
+    // our own names; a base has no leaf to spare — `cd sub/dlink` moves INTO `dlink`, and
+    // a walk that stopped at `sub` would measure the token from a directory the shell had
+    // already left.
+    const allSegments = (raw: string): string[] => raw.split('/').filter((s) => s !== '' && s !== '.');
+    // A base has to name a directory that IS THERE. `resolveWalk` deliberately walks past a
+    // segment the filesystem says is absent, because for a PATH that is the deleted-file case
+    // and absence is an answer. For a BASE it is not: `cd` to a directory that does not exist
+    // fails and the shell stays where it was, so a phantom like `<repo>/gone/src` is a place
+    // nothing was ever measured from. Taking it as one both invents contradictions (a phantom
+    // outside the repo drops honest paths — the scratch worktree deleted since capture, which
+    // is 98.4% of what a naive reading would have dropped) and invents safety (a phantom
+    // INSIDE the repo silently confirms a base that never existed).
+    const resolveDir = (start: string, spelling: string): string | null => {
+      const dest = resolveWalk(start, allSegments(spelling));
+      if (dest === null) return null;
+      return realOf(dest) === null ? null : dest;
+    };
+    // Resolve the directories the TOOL CALL named into physical places on this machine.
+    //
+    // WHEN THE CHAIN IS EXACT, THE ANSWER IS THE DEEPEST LINK THAT EXISTS — not the last one.
+    // `cd sub; cd nonexist` leaves a real shell in `sub`, because a `cd` to somewhere that is
+    // not there fails and moves nothing. Resolving only the final spelling finds nothing, and
+    // reading "nothing" as "no opinion" hands the token back to the repo root: a path read
+    // from `sub` gets recorded as though it had been read from the top of the repo, and if
+    // `sub` holds a link out, that is another repository's file under this repo's name.
+    // Walking back up the chain is what a failed `cd` actually does.
+    //
+    // WHEN IT IS NOT EXACT the chain is a superset — a branch we could not resolve — so every
+    // link that resolves is a place the command might have been, and one contradiction drops
+    // the path.
+    //
+    // A LINK THAT RESOLVES OUTSIDE THE REPO IS STILL RETURNED. It contradicts in the loop
+    // below, which is the right answer both for a directory a command moved to and for one a
+    // record merely sat in: neither can vouch for one of this repo's paths.
+    const declaredCache = new Map<string, string[]>();
+    const declaredBases = (
+      declared: readonly string[],
+      exact: boolean,
+      roots: readonly string[],
+      realRoots: readonly string[],
+    ): string[] => {
+      if (declared.length === 0) return [];
+      // Keyed on the roots as well, exactly like `basesCache` and `realRootsCache` above. The
+      // roots cannot in fact vary within one capture — `sessionPaths` computes them once — so
+      // this half of the key is symmetry with those two caches rather than a live guard. It
+      // stays because the alternative is a cache whose correctness depends on a caller
+      // contract it does not state.
+      const key = `${JSON.stringify(declared)}\0${exact}\0${JSON.stringify(roots)}`;
+      const hit = declaredCache.get(key);
+      if (hit !== undefined) return hit;
+      const resolveOne = (spelling: string): string[] => {
+        if (spelling.startsWith('/')) {
+          const dest = resolveDir('/', spelling);
+          return dest === null ? [] : [dest];
+        }
+        // A relative link can only arise when the tool call named no directory of its own and
+        // a `cd` moved it, so it is relative to the same places any other relative spelling
+        // is. Every one of them that resolves is a place it could be.
+        const out: string[] = [];
+        for (const from of relativeBases(roots, realRoots)) {
+          const dest = resolveDir(from, spelling);
+          if (dest !== null && !out.includes(dest)) out.push(dest);
+        }
+        return out;
+      };
+      let out: string[] = [];
+      if (exact) {
+        for (let i = declared.length - 1; i >= 0; i -= 1) {
+          const resolved = resolveOne(declared[i]);
+          if (resolved.length > 0) {
+            out = resolved;
+            break;
+          }
+        }
+      } else {
+        for (const spelling of declared) {
+          for (const dest of resolveOne(spelling)) if (!out.includes(dest)) out.push(dest);
+        }
+      }
+      declaredCache.set(key, out);
+      return out;
+    };
     const escapesCache = new Map<string, boolean>();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -678,12 +762,27 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       //      unable to answer at the point the fence asks.
       // `resolveWalk` closes both by following the raw spelling segment by segment and
       // failing closed on any segment that will not resolve.
-      escapesRepo: ({ raw, absolute }, roots) => {
-        // Memoised on the raw spelling. It needs no other key: `absolute` is a pure
-        // function of `raw` (it IS `raw.startsWith('/')`), so an absolute and a relative
-        // spelling can never collide on one entry, and a kind prefix here would be dead
-        // code dressed as a precaution.
-        const key = raw;
+      // `locatable` is deliberately NOT read here. A relative spelling out of a command whose
+      // working directory could not be read is refused inside `sessionPaths`, before any
+      // predicate is consulted, so that a consumer without this callback gets the same answer
+      // as one with it. Re-checking it here would be a branch no test could turn red.
+      escapesRepo: ({ raw, absolute, bases, exact }, roots) => {
+        // Memoised on the raw spelling AND the directories it was harvested relative to.
+        // The spelling alone is NOT a key any more, and that correction is load-bearing:
+        // one session runs `cat src/x.ts` from a dozen directories, the answer differs by
+        // directory, and keying on the spelling alone would let the first one answer for
+        // all the rest — reinstating the exact confusion of contexts this change removes.
+        // The bases are JSON-encoded rather than joined on a separator. A directory name may
+        // legally contain almost anything, so any literal joiner can be forged to make two
+        // different (spelling, bases) pairs collide on one key — and the collision would be
+        // silent, handing one pair the other's verdict. JSON escapes what would otherwise
+        // collide, so no screening of the base spellings is needed to make this sound.
+        //
+        // `exact` IS part of the key, and it has to be: the same chain is read one way as the
+        // sequence the shell walked and another as a set of places it might have been, and
+        // those two get different answers. Keyed without it, whichever came first would
+        // answer for the other.
+        const key = `${raw}\0${exact ? 'e' : ''}\0${JSON.stringify(bases)}`;
         const hit = escapesCache.get(key);
         if (hit !== undefined) return hit;
         const realRoots = realRootsOf(roots);
@@ -715,19 +814,24 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           // under our name. Both close for the SESSION's cwd, because both were one
           // missing base.
           //
-          // WHAT IS STILL OPEN, MEASURED, AND NOT A REGRESSION. The bases here are the
-          // session's cwd and the roots. The kernel resolves a relative path from the
-          // working directory of the TOOL CALL that produced it, and that is not always
-          // one of these: a `cd` inside the very command string we scan moves it, a Bash
-          // tool input carries its own `cwd` field (which `pathsFromRecord` reads as a
-          // path CANDIDATE and never as a base), and a Codex transcript states one in
-          // `session_meta.payload.cwd` (used as a root fallback, never as a base). With
-          // the session at `<repo>` and a link at `<repo>/sub/zlink`, `cd sub && cat
-          // zlink/src/secret.ts` still reaches the wire. Closing it means carrying the
-          // originating directory ALONGSIDE each candidate — a third change to the shape
-          // that crosses the `sessionPaths` boundary — so it is its own change, not a
-          // line bolted onto this one. The same spellings get through on the previous
-          // release; nothing here made them worse.
+          // THE DIRECTORY THE TOOL CALL NAMED IS NOW ONE OF THOSE BASES, AND IT IS THE
+          // ONE THE KERNEL ACTUALLY USED. This was the fifth escape in this family and
+          // the same shape as the other four: the previous release measured against the
+          // SESSION's cwd and the roots, while the kernel resolves a relative path from
+          // the working directory of the TOOL CALL — which a `cd` inside the very command
+          // string moves. With the session at `<repo>` and a link at `<repo>/sub/zlink`,
+          // `cd sub && cat zlink/src/secret.ts` reached the wire, because `<repo>/zlink`
+          // does not exist, and absent ground inside the repo reads as no contradiction.
+          // The originating directory now travels WITH the candidate (`PathCandidate.
+          // bases`) instead of being inferred here, which is the only way the fence and
+          // the filesystem can be reading the same string from the same place.
+          //
+          // MEASURED SO THE TRADE IS STATED, NOT INHERITED. Over 73,800 real shell
+          // commands, 71.9% contain a `cd`. Of the 51,174 relative shell tokens the
+          // previous release puts on the wire, this rule drops 606 — 1.2%. 425 of those
+          // resolve into a DIFFERENT git repository or into no repository at all, which is
+          // the leak being closed rather than a cost; the remaining 181 are commands whose
+          // `cd` could not be read (`cd "$VAR"`) and are dropped conservatively.
           //
           // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME
           // root resolves it inside — is wrong, and wrong in the way that reopens the
@@ -739,7 +843,30 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           // contradiction drops the path. It has a real cost, and it is deliberate: an
           // honest file at a colliding name in a sibling checkout is dropped with it.
           const segments = walkableSegments(raw);
-          for (const base of relativeBases(roots, realRoots)) {
+          const declared = declaredBases(bases, exact, roots, realRoots);
+          // THE TOOL CALL NAMED A DIRECTORY AND NONE OF IT SURVIVED. Either it resolves
+          // outside this repo, or it no longer resolves at all — and in both cases the one
+          // thing we know is that this spelling is NOT relative to our own root. Falling
+          // through to `relativeBases` here lets the root vouch for a token the record
+          // itself said was written somewhere else, which is a leak needing no exotic
+          // spelling at all: a session working inside a DIFFERENT repository emits that
+          // repository's paths under this one's name.
+          //
+          // NOT ONE LINK OF THE CHAIN EXISTS. The tool call named where it was standing and
+          // none of it is on disk — so the one thing we know is that this spelling is not
+          // relative to our own root. Falling through to `relativeBases` here would let the
+          // root vouch for a token the record itself said was written somewhere else.
+          //
+          // A failed `cd` does NOT reach this line: the chain still carries the directories
+          // before it, and `declaredBases` walks back to the deepest one that exists.
+          if (bases.length > 0 && declared.length === 0) return true;
+          // WHEN THE TOOL CALL SAID WHERE IT WAS STANDING, THAT IS THE ANSWER — the session's
+          // cwd and the roots are the fallback for a record that said nothing, not a second
+          // opinion to be stacked on top of one that did. Appending them here put the guess
+          // back: a command that definitely ran `cd sub` was still measured from the checkout
+          // root as well, so an escaping link at the root dropped a path that was honest
+          // where the command actually stood.
+          for (const base of declared.length > 0 ? declared : relativeBases(roots, realRoots)) {
             const dest = resolveWalk(base, segments);
             if (dest === null || !inside(dest, realRoots)) return true;
           }

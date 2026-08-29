@@ -7118,8 +7118,8 @@ function cliVersion() {
 var cachedRedact = null;
 function redactVersion() {
   if (cachedRedact !== null) return cachedRedact;
-  if ("0.1.5".length > 0) {
-    cachedRedact = "0.1.5";
+  if ("0.1.6".length > 0) {
+    cachedRedact = "0.1.6";
     return cachedRedact;
   }
   cachedRedact = readRedactVersionFromDisk();
@@ -8290,22 +8290,114 @@ var SHELL_PATH_TOKEN = new RegExp(
   `(?<![\\w.@~$+/\\\\-])/?[\\w.@~+-]+(?:/[\\w.@~+-]+)+\\.(?:${EXT_ALTERNATION})(?![\\w.@~+/\\\\-])`,
   "g"
 );
-function pathsFromRecord(rec) {
+var MIGHT_CHANGE_DIRECTORY = new RegExp(
+  [
+    // The builtins, anywhere: `cd`, and the stack pair whose state this scan does not model.
+    String.raw`(?:^|[^\w.\-/])(?:cd|pushd|popd|chdir)(?![\w.\-/])`,
+    // Running a script IN THIS SHELL. The script can `cd` anywhere and the line invoking it
+    // says nothing about where. Only at a command position — `grep source file` is an
+    // argument, not a command, and refusing it cost 1,121 commands for nothing.
+    String.raw`(?:^|[;&|(){}\n]|&&|\|\||\bthen\b|\bdo\b|\belse\b)\s*source\s`,
+    // The `.` spelling of `source` needs a TIGHTER anchor than the word does. A bare dot is
+    // ordinary punctuation, and admitting `)` or `}` or an `else` before it matched `).` and
+    // `}.` inside heredoc'd source code 2,400 times — refusing thousands of commands over a
+    // method call. Only a statement start counts.
+    String.raw`(?:^|[;&|\n]|&&|\|\|)[ \t]*\.\s`,
+    // `env -C dir cmd` runs `cmd` somewhere else, so a path argument to it is relative to
+    // there. Tied to `env` rather than matching a bare `-C`, which is an everyday flag of
+    // `grep`, `git`, `tar` and `sort` and cost 668 commands to no purpose.
+    String.raw`(?:^|[^\w.\-/])(?:env|chroot)(?![\w.\-/])[^;&|\n]*?\s(?:-C|--chdir|--directory)(?:[=\s])`,
+    // CDPATH turns a perfectly readable `cd sub` into a move to somewhere else entirely, and
+    // where it points is not in the transcript at all.
+    String.raw`(?:^|[^\w.\-/])CDPATH(?![\w.\-/])`,
+    // A FUNCTION DEFINITION. Its body runs at each call site, not where it is written, so the
+    // offset order this scan relies on stops meaning execution order.
+    String.raw`(?:function\s+[\w.-]+|[\w.-]+\s*\(\s*\))\s*\{`
+  ].join("|"),
+  "g"
+);
+function withoutShellQuoting(text) {
+  return text.replace(/\\(.)/g, "$1").replace(/\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`/g, "").replace(/['"]/g, "");
+}
+var SHELL_CD = /(?:^|[;&|(){}\n]|&&|\|\||\bthen\b|\bdo\b|\belse\b|\btime\b|\\)\s*(cd|pushd)\s+(?!-)(?:"([^"]*)"|'([^']*)'|([^\s;&|)}]+))/g;
+var UNREADABLE_CD_TARGET = /[$`~*?[\]{}\\'"<>]/;
+var CONDITIONAL_SHELL = /(?:^|[^\w.-])(?:if|elif|while|until|for|case)(?![\w.-])/;
+function composeBase(current, target) {
+  if (target.startsWith("/")) return target;
+  if (current === null || current.length === 0) return target;
+  return `${current.replace(/\/+$/, "")}/${target}`;
+}
+function shellCdBases(text, cwd) {
+  const crude = [...text.matchAll(MIGHT_CHANGE_DIRECTORY)];
+  const unquoted = [...withoutShellQuoting(text).matchAll(MIGHT_CHANGE_DIRECTORY)];
+  if (unquoted.length > crude.length) return { events: [], locatable: false, exact: false };
+  if (crude.length === 0) return { events: [], locatable: true, exact: true };
+  const refined = [...text.matchAll(SHELL_CD)];
+  const events = [];
+  let chain = cwd;
+  for (const m of refined) {
+    const target = m[2] ?? m[3] ?? m[4] ?? "";
+    if (m[1] === "pushd" || target.length === 0 || UNREADABLE_CD_TARGET.test(target)) {
+      return { events: [], locatable: false, exact: false };
+    }
+    const after = text.slice((m.index ?? 0) + m[0].length);
+    if (/^[^\s;&|)}<>]/.test(after)) return { events: [], locatable: false, exact: false };
+    chain = composeBase(chain, target);
+    events.push({ at: (m.index ?? 0) + m[0].length, base: chain });
+  }
+  for (const c of crude) {
+    const at = c.index ?? 0;
+    const covered = refined.some((r) => at >= (r.index ?? 0) && at < (r.index ?? 0) + r[0].length);
+    if (!covered) return { events: [], locatable: false, exact: false };
+  }
+  return { events, locatable: true, exact: !CONDITIONAL_SHELL.test(text) };
+}
+function pathsFromRecord(rec, sessionCwd) {
   if (!rec || typeof rec !== "object") return [];
   const out = [];
   const r = rec;
-  const pushFromCommand = (command) => {
-    const text = typeof command === "string" ? command : Array.isArray(command) ? command.filter((c) => typeof c === "string").join(" ") : null;
+  const recordCwd = typeof r.cwd === "string" && r.cwd.trim().length > 0 ? r.cwd.trim() : sessionCwd;
+  const pushFromCommand = (command, cwd) => {
+    let text = null;
+    if (typeof command === "string") text = command;
+    else if (Array.isArray(command)) {
+      const parts = command.filter((c) => typeof c === "string");
+      const flag = parts.findIndex((c) => /^-{1,2}[a-z]*c$/i.test(c));
+      text = flag >= 0 && flag + 1 < parts.length ? parts[flag + 1] : parts.join(" ");
+    }
     if (text === null || text.length === 0) return;
-    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push({ raw: m[0], fromShell: true });
+    const { events, locatable, exact } = shellCdBases(text, cwd);
+    const head = cwd !== null ? [cwd] : [];
+    const conservative = [...head, ...events.map((e) => e.base)];
+    for (const m of text.matchAll(SHELL_PATH_TOKEN)) {
+      if (!locatable) {
+        out.push({ raw: m[0], fromShell: true, bases: [], exact: true, locatable: false });
+        continue;
+      }
+      const chain = [...head];
+      for (const e of events) {
+        if (e.at > (m.index ?? 0)) break;
+        chain.push(e.base);
+      }
+      out.push({
+        raw: m[0],
+        fromShell: true,
+        bases: exact ? chain : conservative,
+        exact,
+        locatable: true
+      });
+    }
   };
   const pushFromInput = (input) => {
     if (!input || typeof input !== "object") return;
     const i = input;
+    const blockCwd = typeof i.cwd === "string" && i.cwd.trim().length > 0 ? i.cwd.trim() : recordCwd;
+    const inputBases = blockCwd === null ? [] : [blockCwd];
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
-      if (typeof v === "string" && v.trim().length > 0) out.push({ raw: v.trimEnd(), fromShell: false });
+      if (typeof v === "string" && v.trim().length > 0)
+        out.push({ raw: v.trimEnd(), fromShell: false, bases: inputBases, exact: true, locatable: true });
     }
-    pushFromCommand(i.command);
+    pushFromCommand(i.command, blockCwd);
   };
   const content = r.message?.content;
   if (Array.isArray(content)) {
@@ -8342,13 +8434,14 @@ function sessionPaths(records, repoRoot, options) {
   const supplied = normalizeRoots(
     typeof repoRoot === "string" ? [repoRoot] : Array.isArray(repoRoot) ? repoRoot : []
   );
-  const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? ""]);
+  const sessionCwd = codexSessionCwd(records);
+  const roots = supplied.length > 0 ? supplied : normalizeRoots([sessionCwd ?? ""]);
   const exists = options?.exists;
   const escapesRepo = options?.escapesRepo;
   const seen = /* @__PURE__ */ new Set();
   let shellPathCount = 0;
   for (const rec of records) {
-    for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
+    for (const { raw: p, fromShell, bases, exact, locatable } of pathsFromRecord(rec, sessionCwd)) {
       if (fromShell && exists === void 0) continue;
       if (CONTROL_CHARACTER.test(p)) continue;
       if (ENCODED_PATH_SEPARATOR.test(p)) continue;
@@ -8364,11 +8457,12 @@ function sessionPaths(records, repoRoot, options) {
         continue;
       }
       if (norm === null || norm.length === 0) continue;
+      if (!locatable && !isAbsolute(p)) continue;
       if (fromShell) {
         if (norm.split("/").some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
         if (!exists(norm)) continue;
       }
-      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p) }, roots)) continue;
+      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p), bases, exact, locatable }, roots)) continue;
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;
         shellPathCount += 1;
@@ -10393,6 +10487,47 @@ async function runCapture(input, deps = {}) {
       basesCache.set(key, out2);
       return out2;
     };
+    const allSegments = (raw) => raw.split("/").filter((s) => s !== "" && s !== ".");
+    const resolveDir = (start, spelling) => {
+      const dest = resolveWalk(start, allSegments(spelling));
+      if (dest === null) return null;
+      return realOf(dest) === null ? null : dest;
+    };
+    const declaredCache = /* @__PURE__ */ new Map();
+    const declaredBases = (declared, exact, roots, realRoots) => {
+      if (declared.length === 0) return [];
+      const key = `${JSON.stringify(declared)}\0${exact}\0${JSON.stringify(roots)}`;
+      const hit = declaredCache.get(key);
+      if (hit !== void 0) return hit;
+      const resolveOne = (spelling) => {
+        if (spelling.startsWith("/")) {
+          const dest = resolveDir("/", spelling);
+          return dest === null ? [] : [dest];
+        }
+        const out3 = [];
+        for (const from of relativeBases(roots, realRoots)) {
+          const dest = resolveDir(from, spelling);
+          if (dest !== null && !out3.includes(dest)) out3.push(dest);
+        }
+        return out3;
+      };
+      let out2 = [];
+      if (exact) {
+        for (let i = declared.length - 1; i >= 0; i -= 1) {
+          const resolved = resolveOne(declared[i]);
+          if (resolved.length > 0) {
+            out2 = resolved;
+            break;
+          }
+        }
+      } else {
+        for (const spelling of declared) {
+          for (const dest of resolveOne(spelling)) if (!out2.includes(dest)) out2.push(dest);
+        }
+      }
+      declaredCache.set(key, out2);
+      return out2;
+    };
     const escapesCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -10435,8 +10570,12 @@ async function runCapture(input, deps = {}) {
       //      unable to answer at the point the fence asks.
       // `resolveWalk` closes both by following the raw spelling segment by segment and
       // failing closed on any segment that will not resolve.
-      escapesRepo: ({ raw, absolute }, roots) => {
-        const key = raw;
+      // `locatable` is deliberately NOT read here. A relative spelling out of a command whose
+      // working directory could not be read is refused inside `sessionPaths`, before any
+      // predicate is consulted, so that a consumer without this callback gets the same answer
+      // as one with it. Re-checking it here would be a branch no test could turn red.
+      escapesRepo: ({ raw, absolute, bases, exact }, roots) => {
+        const key = `${raw}\0${exact ? "e" : ""}\0${JSON.stringify(bases)}`;
         const hit = escapesCache.get(key);
         if (hit !== void 0) return hit;
         const realRoots = realRootsOf(roots);
@@ -10447,7 +10586,9 @@ async function runCapture(input, deps = {}) {
             return dest === null || !inside(dest, realRoots);
           }
           const segments = walkableSegments(raw);
-          for (const base of relativeBases(roots, realRoots)) {
+          const declared = declaredBases(bases, exact, roots, realRoots);
+          if (bases.length > 0 && declared.length === 0) return true;
+          for (const base of declared.length > 0 ? declared : relativeBases(roots, realRoots)) {
             const dest = resolveWalk(base, segments);
             if (dest === null || !inside(dest, realRoots)) return true;
           }

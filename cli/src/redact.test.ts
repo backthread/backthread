@@ -761,22 +761,185 @@ test('the escape check receives the RAW spelling, not the one that would be emit
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: './dlink/../src/b.ts' } }] } },
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'cat dlink/../src/c.ts' } }] } },
   ];
-  const seen: { raw: string; absolute: boolean }[] = [];
+  const seen: { raw: string; absolute: boolean; bases: readonly string[]; exact: boolean; locatable: boolean }[] = [];
   const out = sessionPaths(records, '/work/app', {
     exists: () => true,
     escapesRepo: (candidate) => {
-      seen.push({ ...candidate });
+      seen.push({ ...candidate, bases: [...candidate.bases] });
       return false;
     },
   });
+  // `bases` is empty here because none of these records names a working directory. That
+  // is the pre-existing behaviour and it has to stay reachable: a transcript that states
+  // no cwd must leave the caller measuring against exactly what it measured before.
+  // `locatable` is true because none of these commands can change directory at all.
   assert.deepEqual(seen, [
-    { raw: '/work/app/dlink/../src/a.ts', absolute: true },
-    { raw: './dlink/../src/b.ts', absolute: false },
-    { raw: 'dlink/../src/c.ts', absolute: false },
+    { raw: '/work/app/dlink/../src/a.ts', absolute: true, bases: [], exact: true, locatable: true },
+    { raw: './dlink/../src/b.ts', absolute: false, bases: [], exact: true, locatable: true },
+    { raw: 'dlink/../src/c.ts', absolute: false, bases: [], exact: true, locatable: true },
   ]);
   // …while what is EMITTED is still the normalized spelling. Both are true at once, and
   // that is exactly the separation the previous signature did not have.
   assert.deepEqual(out, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+});
+
+// THE DIRECTORY THE TOOL CALL NAMED must cross the boundary with the candidate. Every
+// escape in this family is the fence measuring a different path from the one the kernel
+// opens, and a relative spelling measured from the wrong directory IS a different path.
+// These pin what arrives, because the caller cannot recover it later.
+const basesOf = (records: unknown[], roots?: string | string[]): Record<string, string[]> => {
+  const seen: Record<string, string[]> = {};
+  sessionPaths(records, roots ?? '/work/app', {
+    exists: () => true,
+    escapesRepo: ({ raw, bases }) => {
+      seen[raw] = [...bases];
+      return false;
+    },
+  });
+  return seen;
+};
+
+test('a candidate carries the working directory its own record stamped', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app/sub',
+      message: { content: [{ type: 'tool_use', input: { command: 'cat pkg/a.ts' } }] },
+    },
+    {
+      type: 'assistant',
+      cwd: '/work/app/other',
+      message: { content: [{ type: 'tool_use', input: { file_path: 'pkg/b.ts' } }] },
+    },
+  ]);
+  // The SAME spelling from two records must not collapse onto one answer — which is why
+  // the caller's memo is keyed on the bases too.
+  assert.deepEqual(seen['pkg/a.ts'], ['/work/app/sub']);
+  assert.deepEqual(seen['pkg/b.ts'], ['/work/app/other']);
+});
+
+test('a `cd` inside the scanned command moves the base, positionally', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [
+          { type: 'tool_use', input: { command: 'cat before/a.ts && cd sub && cat after/b.ts' } },
+        ],
+      },
+    },
+  ]);
+  // A token BEFORE the `cd` is relative to where the shell still was. Measuring both
+  // against the union would drop the first one for a move that had not happened yet.
+  //
+  // What crosses is the CHAIN up to the token, shallowest first — not a single answer —
+  // because which link the shell is standing on depends on which `cd`s SUCCEEDED, and only
+  // the caller can ask the filesystem that.
+  assert.deepEqual(seen['before/a.ts'], ['/work/app']);
+  assert.deepEqual(seen['after/b.ts'], ['/work/app', '/work/app/sub']);
+});
+
+test('an absolute `cd` replaces the base; relative `cd`s chain', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [
+          { type: 'tool_use', input: { command: 'cd a && cd b && cat one/x.ts' } },
+          { type: 'tool_use', input: { command: 'cd /elsewhere && cat two/y.ts' } },
+        ],
+      },
+    },
+  ]);
+  assert.deepEqual(seen['one/x.ts'], ['/work/app', '/work/app/a', '/work/app/a/b']);
+  // An absolute `cd` REPLACES rather than descends, so the link it contributes is itself.
+  assert.deepEqual(seen['two/y.ts'], ['/work/app', '/elsewhere']);
+});
+
+test('an unreadable `cd` target makes the command UNLOCATABLE, not merely cautious', () => {
+  const records = [
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [
+          { type: 'tool_use', input: { command: 'cd "$TARGET" && cd known && cat z/x.ts' } },
+        ],
+      },
+    },
+  ];
+  const seen = basesOf(records);
+  // `cd "$TARGET"` cannot be read, so there is no directory this token can be placed in.
+  // The earlier answer here was a conservative BASE LIST, and that was still an answer to
+  // a question nobody can answer: it silently assumed the command had ended up in one of
+  // the directories it could name, when `$TARGET` could be anywhere on the machine. The
+  // honest outcome is that the token is not placeable at all.
+  // It never even reaches the caller's predicate: an unplaceable relative spelling is
+  // refused inside the module, so a consumer that supplies no `escapesRepo` gets the same
+  // answer as one that does. The absence of a check must never be why something leaks.
+  assert.equal(seen['z/x.ts'], undefined);
+  assert.deepEqual(sessionPaths(records, '/work/app', { exists: () => true }), []);
+});
+
+// OVER-DETECTION IS THE POINT, and it has a price that is paid deliberately. The crude
+// pass flags anything that could change a directory, including a `cd` that is plainly not
+// a command. Refusing the command is the wrong answer for THIS string and the right rule
+// for the class: a missed `cd` is a leak, a false one costs a path. Measured, the whole
+// over-detection budget is 2.5% of relative shell tokens.
+test('a `cd` that is not a command still refuses the command, deliberately', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [{ type: 'tool_use', input: { command: 'grep --include=cd notes other/a.ts' } }],
+      },
+    },
+  ]);
+  assert.equal(seen['other/a.ts'], undefined);
+});
+
+// …while a token that merely CONTAINS the letters cd, with no word boundary, is untouched.
+test('a path segment containing the letters cd does not refuse the command', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [{ type: 'tool_use', input: { command: 'cat src/abcdef.ts docs/cd-notes.ts' } }],
+      },
+    },
+  ]);
+  assert.deepEqual(seen['src/abcdef.ts'], ['/work/app']);
+});
+
+test('an input `cwd` field outranks the record stamp for its own block', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [{ type: 'tool_use', input: { cwd: '/work/app/inner', command: 'cat q/a.ts' } }],
+      },
+    },
+  ]);
+  assert.deepEqual(seen['q/a.ts'], ['/work/app/inner']);
+});
+
+test('a Codex session cwd becomes a base, not only a root fallback', () => {
+  const seen = basesOf(
+    [
+      { type: 'session_meta', payload: { cwd: '/work/app' } },
+      {
+        type: 'response_item',
+        payload: { type: 'function_call', arguments: JSON.stringify({ command: ['bash', '-lc', 'cat deep/a.ts'] }) },
+      },
+    ],
+    '/work/app',
+  );
+  assert.deepEqual(seen['deep/a.ts'], ['/work/app']);
 });
 
 // A URI scheme is not a path this module can measure, and one of them was leaving as a
