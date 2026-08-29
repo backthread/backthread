@@ -510,6 +510,116 @@ test('END TO END with real symlinks: a link out of the checkout cannot carry ano
   }
 });
 
+// A CHECKOUT REACHED THROUGH A SYMLINKED PARENT still works — the property the
+// previous release bought, now that containment asks the filesystem instead of
+// comparing strings. Git answers with physical paths; the agent reports the ones the
+// person actually typed. The root set carries both spellings for exactly that reason,
+// and the escape check has to compare a RESOLVED path against RESOLVED roots or the
+// logical spelling matches nothing and every path is judged to have left the repo.
+test('END TO END with real git: a repo reached through a symlinked parent keeps its paths', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-parent-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const real = join(tmp, 'real');
+    const app = join(real, 'app');
+    mkdirSync(app, { recursive: true });
+    runGit(app, 'init', '-q', '-b', 'main');
+    runGit(app, 'config', 'user.email', 'test@example.com');
+    runGit(app, 'config', 'user.name', 'Test');
+    writeFileSync(join(app, 'README.md'), '# fixture\n');
+    runGit(app, 'add', '.');
+    runGit(app, 'commit', '-qm', 'init');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+    // The link is ABOVE the checkout — `<tmp>/link/app` is `<tmp>/real/app`.
+    symlinkSync(real, join(tmp, 'link'), 'dir');
+    const viaLink = join(tmp, 'link', 'app');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-p', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            // Reported under the spelling the session used, not the one git answers with.
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(viaLink, 'src/mine.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: viaLink, session_id: 'sess-p' }, base);
+
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/mine.ts']);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// The same property where there is NO git at all. Capture works in a directory that is
+// not a repo, and then the root set is just the session's cwd — the LOGICAL spelling,
+// with no physical counterpart alongside it. Comparing a resolved path against that
+// string matches nothing, so every path would be read as having left a repo that does
+// not exist. This is the case that makes resolving the roots load-bearing rather than
+// belt-and-braces, and it is reachable on any machine whose temp dir is a symlink.
+test('a non-git directory reached through a symlink still keeps its paths', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-nogit-'));
+  try {
+    const real = join(tmp, 'real');
+    const proj = join(real, 'proj');
+    mkdirSync(join(proj, 'src'), { recursive: true });
+    writeFileSync(join(proj, 'src/a.ts'), 'export const a = 1;\n');
+    symlinkSync(real, join(tmp, 'link'), 'dir');
+    const viaLink = join(tmp, 'link', 'proj');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-n', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(viaLink, 'src/a.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    // Real root resolution, real filesystem — but there is no git here, so the root set
+    // is `[resolve(cwd)]` and carries the symlinked spelling only.
+    delete base.resolveRepoRootsImpl;
+    delete base.fileExistsImpl;
+    base.readGitImpl = () => null; // no git anywhere on this path
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: viaLink, session_id: 'sess-n' }, base);
+
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/a.ts']);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 // --- what capture has to say, and whether anyone can hear it -----------------
 //
 // The shipped SessionEnd/Stop hook re-spawns its worker with `stdio: 'ignore'`, so a

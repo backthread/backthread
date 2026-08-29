@@ -524,6 +524,35 @@ test('resolveRepoRoots stays quiet when it is under the cap', () => {
   assert.deepEqual(warnings, []);
 });
 
+// THE BOUNDARY ITSELF. The two tests above sit at 1 and 500, which leaves the only
+// interesting numbers unguarded: `skipped > 0` could be `skipped > -1` and both would
+// still pass while the message fired at exactly the cap claiming "the other 0". Off by
+// one here is a line that appears on a machine that lost nothing, which is precisely
+// the kind of noise that teaches people to ignore it.
+test('resolveRepoRoots speaks at exactly one over the cap and not one under', () => {
+  const runWith = (linked: number): GitRunner => (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return '/work/app/.git\n';
+    if (args[0] === 'worktree') {
+      const lines = ['worktree /work/app', ''];
+      for (let i = 0; i < linked; i += 1) lines.push(`worktree /work/lane${i}`, '');
+      return lines.join('\n');
+    }
+    return null;
+  };
+  const warningsAt = (linked: number): string[] => {
+    const out: string[] = [];
+    resolveRepoRoots('/work/app', runWith(linked), (m) => out.push(m));
+    return out;
+  };
+  assert.deepEqual(warningsAt(63), []);
+  assert.deepEqual(warningsAt(64), []); // every one of them was checked — nothing to say
+  const at65 = warningsAt(65);
+  assert.equal(at65.length, 1);
+  assert.match(at65[0], /has 65 linked worktrees/);
+  assert.match(at65[0], /other 1 /); // never "the other 0"
+});
+
 test('resolveRepoRoots degrades to the toplevel alone when git cannot list worktrees', () => {
   const run: GitRunner = (_cwd, args) => {
     if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';

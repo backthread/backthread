@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { claudeProjectsDir, runBackfill, type BackfillDeps } from './backfill.js';
 import { runCapture, type CaptureDeps } from './capture.js';
 import type { SweepState } from './sweep.js';
@@ -97,11 +100,20 @@ test('runBackfill drives the REAL runCapture pipeline; source never leaves the m
     return { ok: true, status: 200, json: async () => body } as Response;
   }) as typeof fetch;
 
+  // ISOLATED FROM THIS MACHINE, both ways. `CWD` is a real path on the author's
+  // laptop, and running the REAL pipeline against it used to shell out to real git
+  // there — so what this test did depended on how many worktrees that checkout
+  // happened to have, and capture wrote its own state into the developer's home
+  // directory as a side effect. Pin the root set (this test is about the redaction
+  // fence, not about worktree discovery) and point the config dir at a temp dir, so
+  // the pipeline has nowhere real to write.
+  const cfgDir = await mkdtemp(join(tmpdir(), 'bt-backfill-'));
   const captureDeps: CaptureDeps = {
-    env: {} as NodeJS.ProcessEnv,
+    env: { BACKTHREAD_CONFIG_DIR: cfgDir } as NodeJS.ProcessEnv,
     readConfigImpl: async () => ({ account: 'acc', device_token: 'backthread_pat_secret' }),
     readFileImpl: async () => TRANSCRIPT,
     ensureAuthImpl: () => {},
+    resolveRepoRootsImpl: (cwd) => [cwd],
     fetchImpl,
     log: () => {},
   };
