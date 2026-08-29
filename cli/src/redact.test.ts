@@ -248,6 +248,29 @@ test('sessionPaths with an EMPTY root list falls back to the transcript cwd, not
   assert.deepEqual(sessionPaths(records, ['', '   ']), ['src/changed.ts']);
 });
 
+// ...and when it falls back, the escape check has to be told about the root it fell back
+// TO. A predicate handed the caller's empty list is measuring against no directories at
+// all, so it can only ever answer "nothing left the repo" -- a second, weaker route into
+// the output through the one door the caller cannot see. The claim is in the option's
+// own documentation; this is what makes it true.
+test('the escape check is given the roots the harvest actually used, not the caller list', () => {
+  const records = [
+    { type: 'session_meta', payload: { id: 'cx-1', cwd: '/Users/me/proj' } },
+    { type: 'response_item', payload: { type: 'function_call', arguments: JSON.stringify({ file_path: '/Users/me/proj/vendor/secret.ts' }) } },
+  ];
+  const seen: string[][] = [];
+  const out = sessionPaths(records, [], {
+    escapesRepo: (rel, roots) => {
+      seen.push([...roots]);
+      return rel.startsWith('vendor/');
+    },
+  });
+  // The predicate was handed the fallback root, not the empty list the caller passed.
+  assert.deepEqual(seen, [['/Users/me/proj']]);
+  // And its answer was obeyed, against a path relativized against that same root.
+  assert.deepEqual(out, []);
+});
+
 // A root of `/` is not a root. It claims the whole filesystem as the repo, and the
 // only honest reading is that the caller supplied nothing usable — so it is treated
 // exactly like an omitted root and the transcript's own cwd decides. Stated as a test
