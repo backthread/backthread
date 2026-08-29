@@ -221,16 +221,45 @@ function withLogicalAlias(cwd: string, roots: string[]): string[] {
   return out;
 }
 
-/** The `<path>` of each `worktree <path>` line in `git worktree list --porcelain`. */
+/**
+ * The `<path>` of each `worktree <path>` record in `git worktree list --porcelain`,
+ * EXCEPT the ones git has already marked `prunable`.
+ *
+ * Porcelain is `<label> <value>` lines with a blank line between records, and only the
+ * `worktree` label carries a path — HEAD/branch/detached/locked/prunable do not. But
+ * `prunable` is the label that matters here: git still lists a registration whose
+ * directory has been deleted, annotated with the reason, and taking it at face value
+ * costs twice. It spends one of the capped verification slots on a directory that is
+ * not there, so on a machine with stale registrations the LIVE worktrees are the ones
+ * pushed past the cap. And it makes the count we report to the reader a count of
+ * registrations rather than of checkouts, which is not the thing they have.
+ *
+ * Dropping them here is also what makes the over-cap message true when it says there is
+ * no command that fixes the situation. For a stale registration there IS one —
+ * `git worktree prune` — and it is this line, run automatically, so nobody has to be
+ * told. What is left over the cap is genuinely live worktrees, and for those nothing
+ * but the cap itself is responsible.
+ */
 function parseWorktreePorcelain(out: string): string[] {
   const paths: string[] = [];
+  let current: string | null = null;
+  let prunable = false;
+  const flush = (): void => {
+    if (current !== null && !prunable) paths.push(current);
+    current = null;
+    prunable = false;
+  };
   for (const line of out.split('\n')) {
-    // Porcelain is `<label> <value>`; the record separator is a blank line. Only the
-    // `worktree` label carries a path — HEAD/branch/detached/locked/prunable do not.
-    if (!line.startsWith('worktree ')) continue;
-    const p = line.slice('worktree '.length).trim();
-    if (p.length > 0) paths.push(p);
+    if (line.startsWith('worktree ')) {
+      flush(); // a new record begins; the previous one is complete
+      const p = line.slice('worktree '.length).trim();
+      current = p.length > 0 ? p : null;
+      continue;
+    }
+    // `prunable` appears bare or as `prunable <reason>`; both mean the same thing.
+    if (line === 'prunable' || line.startsWith('prunable ')) prunable = true;
   }
+  flush(); // the last record has no trailing `worktree` line to close it
   return paths;
 }
 
@@ -283,31 +312,50 @@ export function resolveRepoRoots(
   const listed = run(primary, ['worktree', 'list', '--porcelain']);
   if (listed === null) return withLogicalAlias(cwd, [primary]);
 
-  const roots = [primary];
-  let checked = 0;
+  // Take the whole listing FIRST, then apply the cap to it. Counting before cutting is
+  // what lets the message below say how many were left out instead of only that some
+  // were: "more than 64" is a fact about the constant, and the reader needs a fact
+  // about their machine. It costs one pass over a list git has already produced — the
+  // subprocess bound the cap exists for is on the verification loop underneath, which
+  // is still capped.
+  const candidates: string[] = [];
+  const listedOnce = new Set<string>([primary]);
   for (const raw of parseWorktreePorcelain(listed)) {
     const candidate = resolve(raw);
-    if (roots.includes(candidate)) continue;
+    if (listedOnce.has(candidate)) continue;
+    listedOnce.add(candidate);
     // Asked from inside a submodule, `worktree list` names the submodule's GITDIR
     // (`<host>/.git/modules/<name>`). It shares the common dir, so it would pass the
     // check below — but it is git's own storage, never a checkout, and no file a
     // session edits lives under it.
     if (candidate === identity || candidate.startsWith(identity + '/')) continue;
-    if (checked >= MAX_LINKED_WORKTREES) {
-      // Say so. Past the cap, paths in the remaining worktrees go back to being
-      // dropped as foreign — this function's own bug, reappearing at scale — and
-      // WHICH worktrees survive is decided by git's listing order, not by which ones
-      // the session touched. Silent truncation leaves that undiagnosable from the
-      // outside; one line on stderr makes it a one-line diagnosis. It can only fire
-      // on a machine that has outgrown the bound, so it is not noise.
-      warn(
-        `backthread: more than ${MAX_LINKED_WORKTREES} linked worktrees; file paths in the ` +
-          'remainder will not be recognised as belonging to this repo. Run `git worktree prune` ' +
-          'to drop stale registrations and restore full coverage.',
-      );
-      break;
-    }
-    checked += 1;
+    candidates.push(candidate);
+  }
+
+  const skipped = candidates.length - MAX_LINKED_WORKTREES;
+  if (skipped > 0) {
+    // Say what was left out, and stop there. Past the cap, paths in the remaining
+    // worktrees go back to being dropped as foreign — this function's own bug,
+    // reappearing at scale — and WHICH worktrees survive is decided by git's listing
+    // order, not by which ones the session touched. That is the whole of what a reader
+    // can act on, so it is the whole of what this says.
+    //
+    // IT DELIBERATELY PRESCRIBES NO COMMAND. It used to end by telling the reader to
+    // run `git worktree prune`, which drops stale REGISTRATIONS — it neither shows nor
+    // recovers a single skipped path, and on a machine whose worktrees are all live it
+    // changes nothing at all. Somebody who followed it would see no difference and
+    // learn nothing, which is worse than being told only what happened. There is no
+    // command that fixes this; there is a number, and it belongs to them.
+    warn(
+      `backthread: this repo has ${candidates.length} linked worktrees and only the first ` +
+        `${MAX_LINKED_WORKTREES} were checked, so file paths in the other ${skipped} were not ` +
+        'recognised as belonging to it and were left out of this capture. Which ones is decided ' +
+        "by git's listing order, not by what the session touched.",
+    );
+  }
+
+  const roots = [primary];
+  for (const candidate of candidates.slice(0, MAX_LINKED_WORKTREES)) {
     const candidateCommon = (run(candidate, ['rev-parse', '--git-common-dir']) ?? '').trim();
     if (candidateCommon.length === 0) continue; // gone, or no longer a repo → not us
     if (resolve(candidate, candidateCommon) !== identity) continue; // a DIFFERENT repo

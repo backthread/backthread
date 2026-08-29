@@ -105,6 +105,39 @@ test('no repo connected → warn (repo-less capture is still supported)', async 
   assert.match(find(checks, 'repo').detail, /no repo connected/);
 });
 
+// --- the notice capture leaves behind ----------------------------------------
+
+// An absent notice is ALSO what a machine looks like when the hook has never fired, is
+// misconfigured, or cannot write to the config directory. The wording must therefore
+// report the state of the mailbox and claim nothing about a capture that may never have
+// happened -- doctor.ts says so in a comment, and a comment is not a guard.
+test('an absent notice reports the mailbox, never a claim about the last capture', async () => {
+  const checks = await collectChecks({
+    env: await tempCfgDir(),
+    readCaptureNoticeImpl: () => null,
+  });
+  const capture = checks.find((c) => c.key === 'capture');
+  assert.equal(capture?.status, 'ok');
+  assert.equal(capture?.detail, 'no notice from capture');
+  // The sentence the comment forbids, in every spelling that asserts something happened.
+  assert.doesNotMatch(capture?.detail ?? '', /last capture/i);
+  assert.doesNotMatch(capture?.detail ?? '', /nothing (left unsaid|to say|to report)/i);
+  // And it is never the thing that fails a scriptable setup check.
+  assert.notEqual(capture?.critical, true);
+});
+
+test('a notice is shown with its date and warns, without failing the exit code', async () => {
+  const checks = await collectChecks({
+    env: await tempCfgDir(),
+    readCaptureNoticeImpl: () => ({ at: '2026-08-29T10:00:00.000Z', message: 'six worktrees were left out' }),
+  });
+  const capture = checks.find((c) => c.key === 'capture');
+  assert.equal(capture?.status, 'warn');
+  assert.match(capture?.detail ?? '', /six worktrees were left out/);
+  assert.match(capture?.detail ?? '', /2026-08-29/);
+  assert.notEqual(capture?.critical, true);
+});
+
 // --- capture-hook detection --------------------------------------------------
 
 test('hook not detected anywhere → warn with install hint', async () => {

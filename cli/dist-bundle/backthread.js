@@ -6917,7 +6917,7 @@ var require_dist = __commonJS({
 
 // src/bin/backthread.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { realpathSync as realpathSync3 } from "node:fs";
+import { realpathSync as realpathSync4 } from "node:fs";
 
 // src/login.ts
 import { hostname } from "node:os";
@@ -7118,8 +7118,8 @@ function cliVersion() {
 var cachedRedact = null;
 function redactVersion() {
   if (cachedRedact !== null) return cachedRedact;
-  if ("0.1.4".length > 0) {
-    cachedRedact = "0.1.4";
+  if ("0.1.5".length > 0) {
+    cachedRedact = "0.1.5";
     return cachedRedact;
   }
   cachedRedact = readRedactVersionFromDisk();
@@ -7834,8 +7834,53 @@ Your current install (${current}) is untouched. If this is a permissions error, 
 
 // src/doctor.ts
 import { homedir as homedir2 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 import { readFile as readFile3, stat } from "node:fs/promises";
+
+// src/captureNotice.ts
+import { join as join4 } from "node:path";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+var CAPTURE_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
+function captureNoticePath(env = process.env) {
+  return join4(configDir(env), "capture-notice.json");
+}
+function recordCaptureNotice(message, env = process.env, now = /* @__PURE__ */ new Date()) {
+  const trimmed = message.trim();
+  if (trimmed.length === 0) return false;
+  try {
+    const dir = configDir(env);
+    mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+    const notice = { at: now.toISOString(), message: trimmed };
+    writeFileSync(captureNoticePath(env), JSON.stringify(notice, null, 2) + "\n", { mode: CONFIG_MODE });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function readCaptureNotice(env = process.env, now = /* @__PURE__ */ new Date()) {
+  let raw;
+  try {
+    raw = readFileSync2(captureNoticePath(env), "utf8");
+  } catch {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const { at, message } = parsed;
+  if (typeof at !== "string" || typeof message !== "string") return null;
+  if (message.trim().length === 0) return null;
+  const when = Date.parse(at);
+  if (!Number.isFinite(when)) return null;
+  if (now.getTime() - when > CAPTURE_NOTICE_MAX_AGE_MS) return null;
+  return { at, message: message.trim() };
+}
+
+// src/doctor.ts
 var SEMVER_RE2 = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 var REPO_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
 async function loadConfig(env) {
@@ -7905,10 +7950,10 @@ function repoCheck(loaded) {
   return { key: "repo", label: "Repo", status: "warn", detail: "no repo connected \u2014 run `backthread install` (or connect it in the web app)" };
 }
 var AGENT_HOOK_FILES = [
-  { agent: "claude-code", files: (h) => [join4(h, ".claude", "settings.json")] },
-  { agent: "gemini", files: (h) => [join4(h, ".gemini", "settings.json")] },
-  { agent: "codex", files: (h) => [join4(h, ".codex", "hooks.json"), join4(h, ".codex", "config.toml")] },
-  { agent: "cursor", files: (h) => [join4(h, ".cursor", "hooks.json"), join4(h, ".cursor", "mcp.json")] }
+  { agent: "claude-code", files: (h) => [join5(h, ".claude", "settings.json")] },
+  { agent: "gemini", files: (h) => [join5(h, ".gemini", "settings.json")] },
+  { agent: "codex", files: (h) => [join5(h, ".codex", "hooks.json"), join5(h, ".codex", "config.toml")] },
+  { agent: "cursor", files: (h) => [join5(h, ".cursor", "hooks.json"), join5(h, ".cursor", "mcp.json")] }
 ];
 async function hookCheck(deps, env) {
   const home = deps.home ?? homedir2();
@@ -7932,8 +7977,8 @@ async function hookCheck(deps, env) {
       }
     }
   }
-  const projectScoped = await mentions(join4(cwd, ".claude", "settings.json")) || await mentions(join4(cwd, ".claude", "settings.local.json"));
-  const userScopedCC = asPlugin || await mentions(join4(home, ".claude", "settings.json"));
+  const projectScoped = await mentions(join5(cwd, ".claude", "settings.json")) || await mentions(join5(cwd, ".claude", "settings.local.json"));
+  const userScopedCC = asPlugin || await mentions(join5(home, ".claude", "settings.json"));
   const uniqueWired = Array.from(new Set(wired));
   if (projectScoped && !userScopedCC) {
     return {
@@ -8002,6 +8047,16 @@ async function versionCheck(deps) {
   }
   return { key: "version", label: "Version", status: "info", detail: `${base} \u2014 update available (${latest}): \`backthread update\`` };
 }
+function captureNoticeCheck(deps, env) {
+  const read = deps.readCaptureNoticeImpl ?? readCaptureNotice;
+  const notice = read(env);
+  if (!notice) {
+    return { key: "capture", label: "Capture notes", status: "ok", detail: "no notice from capture" };
+  }
+  const when = new Date(notice.at);
+  const stamp = Number.isFinite(when.getTime()) ? when.toISOString().slice(0, 10) : notice.at;
+  return { key: "capture", label: "Capture notes", status: "warn", detail: `${notice.message} (${stamp})` };
+}
 async function collectChecks(deps = {}) {
   const env = deps.env ?? process.env;
   const loaded = await loadConfig(env);
@@ -8011,7 +8066,15 @@ async function collectChecks(deps = {}) {
     connectivityCheck(deps, env),
     versionCheck(deps)
   ]);
-  return [authCheck(loaded, env), perms, repoCheck(loaded), hook, connectivity, version2];
+  return [
+    authCheck(loaded, env),
+    perms,
+    repoCheck(loaded),
+    hook,
+    captureNoticeCheck(deps, env),
+    connectivity,
+    version2
+  ];
 }
 var GLYPH = { ok: "\u2713", fail: "\u2717", warn: "\u26A0", info: "\u2139" };
 function formatReport(checks) {
@@ -8042,8 +8105,8 @@ function configHint(env) {
 
 // src/capture.ts
 import { readFile as readFile10 } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { join as join12 } from "node:path";
+import { existsSync, realpathSync as realpathSync3 } from "node:fs";
+import { dirname as dirname4, join as join13, sep } from "node:path";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -8279,11 +8342,13 @@ function sessionPaths(records, repoRoot, options) {
   );
   const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? ""]);
   const exists = options?.exists;
+  const escapesRepo = options?.escapesRepo;
   const seen = /* @__PURE__ */ new Set();
   let shellPathCount = 0;
   for (const rec of records) {
     for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
       if (fromShell && exists === void 0) continue;
+      if (p.includes("\0")) continue;
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
       let norm;
       if (isAbsolute(p)) {
@@ -8298,10 +8363,11 @@ function sessionPaths(records, repoRoot, options) {
       if (fromShell) {
         if (norm.split("/").some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
         if (!exists(norm)) continue;
-        if (!seen.has(norm)) {
-          if (shellPathCount >= MAX_SHELL_PATHS) continue;
-          shellPathCount += 1;
-        }
+      }
+      if (escapesRepo?.(norm, roots)) continue;
+      if (fromShell && !seen.has(norm)) {
+        if (shellPathCount >= MAX_SHELL_PATHS) continue;
+        shellPathCount += 1;
       }
       seen.add(norm);
     }
@@ -8407,11 +8473,23 @@ function withLogicalAlias(cwd, roots) {
 }
 function parseWorktreePorcelain(out) {
   const paths = [];
+  let current = null;
+  let prunable = false;
+  const flush = () => {
+    if (current !== null && !prunable) paths.push(current);
+    current = null;
+    prunable = false;
+  };
   for (const line of out.split("\n")) {
-    if (!line.startsWith("worktree ")) continue;
-    const p = line.slice("worktree ".length).trim();
-    if (p.length > 0) paths.push(p);
+    if (line.startsWith("worktree ")) {
+      flush();
+      const p = line.slice("worktree ".length).trim();
+      current = p.length > 0 ? p : null;
+      continue;
+    }
+    if (line === "prunable" || line.startsWith("prunable ")) prunable = true;
   }
+  flush();
   return paths;
 }
 function resolveRepoRoots(cwd, run = defaultGitRunner, warn = (m) => console.warn(m)) {
@@ -8423,19 +8501,23 @@ function resolveRepoRoots(cwd, run = defaultGitRunner, warn = (m) => console.war
   const identity = resolve(primary, commonDir);
   const listed = run(primary, ["worktree", "list", "--porcelain"]);
   if (listed === null) return withLogicalAlias(cwd, [primary]);
-  const roots = [primary];
-  let checked = 0;
+  const candidates = [];
+  const listedOnce = /* @__PURE__ */ new Set([primary]);
   for (const raw of parseWorktreePorcelain(listed)) {
     const candidate = resolve(raw);
-    if (roots.includes(candidate)) continue;
+    if (listedOnce.has(candidate)) continue;
+    listedOnce.add(candidate);
     if (candidate === identity || candidate.startsWith(identity + "/")) continue;
-    if (checked >= MAX_LINKED_WORKTREES) {
-      warn(
-        `backthread: more than ${MAX_LINKED_WORKTREES} linked worktrees; file paths in the remainder will not be recognised as belonging to this repo. Run \`git worktree prune\` to drop stale registrations and restore full coverage.`
-      );
-      break;
-    }
-    checked += 1;
+    candidates.push(candidate);
+  }
+  const skipped = candidates.length - MAX_LINKED_WORKTREES;
+  if (skipped > 0) {
+    warn(
+      `backthread: this repo has ${candidates.length} linked worktrees and only the first ${MAX_LINKED_WORKTREES} were checked, so file paths in the other ${skipped} were not recognised as belonging to it and were left out of this capture. Which ones is decided by git's listing order, not by what the session touched.`
+    );
+  }
+  const roots = [primary];
+  for (const candidate of candidates.slice(0, MAX_LINKED_WORKTREES)) {
     const candidateCommon = (run(candidate, ["rev-parse", "--git-common-dir"]) ?? "").trim();
     if (candidateCommon.length === 0) continue;
     if (resolve(candidate, candidateCommon) !== identity) continue;
@@ -8625,11 +8707,11 @@ async function checkCaptureScope(repo, config2, deps = {}) {
 }
 
 // src/sessionThrottle.ts
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 import { readFile as readFile4, writeFile as writeFile3, mkdir as mkdir3, chmod as chmod3 } from "node:fs/promises";
 var MAX_REMEMBERED_SESSIONS = 50;
 function throttleStatePath(fileName, env = process.env) {
-  return join5(configDir(env), fileName);
+  return join6(configDir(env), fileName);
 }
 function parseSessionRing(raw) {
   try {
@@ -8771,24 +8853,24 @@ async function maybeUnconnectedNudge(repo, sessionId, deps = {}) {
 }
 
 // src/firstRun.ts
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 import { readFile as readFile9, writeFile as writeFile7, mkdir as mkdir7, chmod as chmod6 } from "node:fs/promises";
 
 // src/install.ts
 import { readFile as readFile8, writeFile as writeFile6, mkdir as mkdir6 } from "node:fs/promises";
 import { homedir as homedir6 } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 
 // src/captureCommand.ts
 import { stat as stat2 } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 function slugifyCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function deriveTranscriptPath(sessionId, cwd, home) {
   if (!sessionId || sessionId.trim().length === 0) return null;
-  return join6(home, ".claude", "projects", slugifyCwd(cwd), `${sessionId}.jsonl`);
+  return join7(home, ".claude", "projects", slugifyCwd(cwd), `${sessionId}.jsonl`);
 }
 async function defaultStat(path) {
   try {
@@ -8895,14 +8977,14 @@ function parseManualArgs(argv) {
 import { readFile as readFile6, stat as stat3, readdir } from "node:fs/promises";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { homedir as homedir4 } from "node:os";
-import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join8 } from "node:path";
+import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join9 } from "node:path";
 
 // src/sweepLedger.ts
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 import { readFile as readFile5, writeFile as writeFile4, mkdir as mkdir4, chmod as chmod4 } from "node:fs/promises";
 var MAX_PROCESSED = 2e4;
 function sweepStatePath(env = process.env) {
-  return join7(configDir(env), "sweep-state.json");
+  return join8(configDir(env), "sweep-state.json");
 }
 function parseSweepState(raw) {
   try {
@@ -9044,7 +9126,7 @@ function defaultMainRoot(cwd) {
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
     if (!out) return null;
-    const abs = isAbsolute2(out) ? out : join8(cwd, out);
+    const abs = isAbsolute2(out) ? out : join9(cwd, out);
     return dirname2(abs.replace(/\/+$/, ""));
   } catch {
     return null;
@@ -9119,7 +9201,7 @@ async function runSweep(input = {}, deps = {}) {
     }
     const mainRoot = doMainRoot(cwd) ?? cwd;
     const mainSlug = slugifyCwd(mainRoot);
-    const projectsRoot = join8(home, ".claude", "projects");
+    const projectsRoot = join9(home, ".claude", "projects");
     const entries = await doReadDir(projectsRoot);
     const candidates = entries.filter((n) => n === mainSlug || n.startsWith(mainSlug + "-")).sort();
     const skip = new Set(state.processed);
@@ -9132,12 +9214,12 @@ async function runSweep(input = {}, deps = {}) {
     let captured = 0;
     let decisions = 0;
     for (const dirName of candidates) {
-      const dir = join8(projectsRoot, dirName);
+      const dir = join9(projectsRoot, dirName);
       const files = (await doReadDir(dir)).filter((n) => n.endsWith(".jsonl")).sort();
       if (files.length === 0) continue;
       let embeddedCwd = null;
       for (const file2 of files) {
-        embeddedCwd = extractCwdFromRaw(await doReadFile(join8(dir, file2)));
+        embeddedCwd = extractCwdFromRaw(await doReadFile(join9(dir, file2)));
         if (embeddedCwd) break;
       }
       const cwdExists = embeddedCwd ? await doPathExists(embeddedCwd) : false;
@@ -9176,7 +9258,7 @@ async function runSweep(input = {}, deps = {}) {
         try {
           outcome = await run(
             {
-              transcript_path: join8(dir, file2),
+              transcript_path: join9(dir, file2),
               cwd: cls.cwd ?? mainRoot,
               session_id: sid,
               hook_event_name: "SessionEnd"
@@ -9240,7 +9322,7 @@ async function runBackfill(input = {}, deps = {}) {
 import { execFile as execFile2 } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir as homedir5 } from "node:os";
-import { join as join9, dirname as dirname3 } from "node:path";
+import { join as join10, dirname as dirname3 } from "node:path";
 import { readFile as readFile7, writeFile as writeFile5, mkdir as mkdir5, chmod as chmod5 } from "node:fs/promises";
 var execFileP = promisify(execFile2);
 var MCP_COMMAND = "npx";
@@ -9338,7 +9420,7 @@ async function writeJson(deps, path, obj) {
 }
 async function installGemini(home, deps) {
   const doRead = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
-  const path = join9(home, ".gemini", "settings.json");
+  const path = join10(home, ".gemini", "settings.json");
   const current = await loadJsonObject(doRead, path);
   const a = withMcpServer(current);
   const b = withNestedHook(a.next, "SessionEnd", hookCommand("gemini-cli"), { name: "backthread-capture" }, [
@@ -9350,7 +9432,7 @@ async function installGemini(home, deps) {
 async function installCodex(home, deps) {
   const doRead = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
   const writes = [];
-  const tomlPath = join9(home, ".codex", "config.toml");
+  const tomlPath = join10(home, ".codex", "config.toml");
   let toml = "";
   try {
     toml = await doRead(tomlPath);
@@ -9364,14 +9446,14 @@ async function installCodex(home, deps) {
 command = "${MCP_COMMAND}"
 args = [${MCP_ARGS.map((a) => `"${a}"`).join(", ")}]
 `;
-    const sep = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
+    const sep2 = toml.length === 0 ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
     const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir5(d, { recursive: true }));
     const doWrite = deps.writeFileImpl ?? ((p, d) => writeFile5(p, d));
     await doMkdir(dirname3(tomlPath));
-    await doWrite(tomlPath, toml + sep + block);
+    await doWrite(tomlPath, toml + sep2 + block);
     writes.push({ path: tomlPath, wrote: true });
   }
-  const hooksPath = join9(home, ".codex", "hooks.json");
+  const hooksPath = join10(home, ".codex", "hooks.json");
   const current = await loadJsonObject(doRead, hooksPath);
   const h = withNestedHook(current, "Stop", hookCommand("codex"), { timeout: 60 }, [legacyHookCommand("codex")]);
   if (h.changed) await writeJson(deps, hooksPath, h.next);
@@ -9382,9 +9464,9 @@ async function installCursor(home, deps) {
   const doRead = deps.readFileImpl ?? ((p) => readFile7(p, "utf8"));
   const nodeBinDir = deps.nodeBinDir ?? dirname3(process.execPath);
   const writes = [];
-  const scriptDir = join9(home, ".cursor", "hooks");
-  const captureScriptPath = join9(scriptDir, "backthread-capture.sh");
-  const mcpScriptPath = join9(scriptDir, "backthread-mcp.sh");
+  const scriptDir = join10(home, ".cursor", "hooks");
+  const captureScriptPath = join10(scriptDir, "backthread-capture.sh");
+  const mcpScriptPath = join10(scriptDir, "backthread-mcp.sh");
   writes.push(
     await writeCursorScript(
       deps,
@@ -9394,12 +9476,12 @@ async function installCursor(home, deps) {
     )
   );
   writes.push(await writeCursorScript(deps, mcpScriptPath, cursorWrapperScript(nodeBinDir, "mcp")));
-  const mcpPath = join9(home, ".cursor", "mcp.json");
+  const mcpPath = join10(home, ".cursor", "mcp.json");
   const mcpCurrent = await loadJsonObject(doRead, mcpPath);
   const m = withCursorMcpServer(mcpCurrent, mcpScriptPath);
   if (m.changed) await writeJson(deps, mcpPath, m.next);
   writes.push({ path: mcpPath, wrote: m.changed });
-  const hooksPath = join9(home, ".cursor", "hooks.json");
+  const hooksPath = join10(home, ".cursor", "hooks.json");
   const hooksCurrent = await loadJsonObject(doRead, hooksPath);
   const c = withCursorStopHook(hooksCurrent, captureScriptPath);
   if (c.changed) await writeJson(deps, hooksPath, c.next);
@@ -9553,8 +9635,8 @@ async function registerHook(deps = {}) {
   const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile6(p, d));
   const doMkdir = deps.mkdirImpl ?? (async (d) => void await mkdir6(d, { recursive: true }));
   const home = deps.home ?? homedir6();
-  const settingsDir = join10(home, ".claude");
-  const settingsPath = join10(settingsDir, "settings.json");
+  const settingsDir = join11(home, ".claude");
+  const settingsPath = join11(settingsDir, "settings.json");
   let settings = {};
   let raw = null;
   try {
@@ -9684,7 +9766,7 @@ function stripSessionEndHook(settings) {
 async function unregisterProjectHook(cwd, deps = {}) {
   const doReadFile = deps.readFileImpl ?? ((p) => readFile8(p, "utf8"));
   const doWriteFile = deps.writeFileImpl ?? ((p, d) => writeFile6(p, d));
-  const settingsPath = join10(cwd, ".claude", "settings.json");
+  const settingsPath = join11(cwd, ".claude", "settings.json");
   let raw;
   try {
     raw = await doReadFile(settingsPath);
@@ -9964,7 +10046,7 @@ function normalizeState(raw) {
 
 // src/firstRun.ts
 function firstRunStatePath(env = process.env) {
-  return join11(configDir(env), "first-run.json");
+  return join12(configDir(env), "first-run.json");
 }
 function parseFirstRunState(raw) {
   try {
@@ -10129,6 +10211,9 @@ async function maybeFirstCaptureConfirm(count, repoConnected, repo, deps = {}) {
 }
 
 // src/capture.ts
+function isInsideRoot(real, roots, separator = sep) {
+  return roots.some((r) => real === r || real.startsWith(r + separator));
+}
 async function readHookInput(env = process.env, stdin = process.stdin) {
   return parseHookInput(await readRawHookInput(env, stdin));
 }
@@ -10160,6 +10245,13 @@ async function runCapture(input, deps = {}) {
   const log = deps.log ?? ((m) => console.error(m));
   const doReadFile = deps.readFileImpl ?? ((p) => readFile10(p, "utf8"));
   const doFileExists = deps.fileExistsImpl ?? existsSync;
+  const doRealPath = deps.realPathImpl ?? ((p) => {
+    try {
+      return realpathSync3(p);
+    } catch {
+      return null;
+    }
+  });
   const doResolveRepoRoots = deps.resolveRepoRootsImpl ?? resolveRepoRoots;
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
@@ -10208,15 +10300,111 @@ async function runCapture(input, deps = {}) {
     const records = parseJsonl(rawTranscript);
     const redacted = redactTranscript(records);
     const decidedAt = sessionTimestamp(records) ?? void 0;
-    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, log) : [];
+    const doRecordNotice = deps.recordNoticeImpl ?? ((m) => void recordCaptureNotice(m, env));
+    const warnAboutRoots = (message) => {
+      log(message);
+      doRecordNotice(message);
+    };
+    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, warnAboutRoots) : [];
     const existsCache = /* @__PURE__ */ new Map();
+    const realPathCache = /* @__PURE__ */ new Map();
+    const realOf = (abs) => {
+      const hit = realPathCache.get(abs);
+      if (hit !== void 0) return hit;
+      const real = doRealPath(abs);
+      realPathCache.set(abs, real);
+      return real;
+    };
+    const realRootsCache = /* @__PURE__ */ new Map();
+    const realRootsOf = (roots) => {
+      const key = JSON.stringify(roots);
+      const hit = realRootsCache.get(key);
+      if (hit !== void 0) return hit;
+      const out2 = [];
+      for (const root of roots) {
+        const real = realOf(root);
+        if (real !== null && !out2.includes(real)) out2.push(real);
+      }
+      realRootsCache.set(key, out2);
+      return out2;
+    };
+    const inside = (real, realRoots) => isInsideRoot(real, realRoots);
+    const escapesCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
         const hit = existsCache.get(rel);
         if (hit !== void 0) return hit;
-        const ok = repoRoots.some((root) => doFileExists(join12(root, rel)));
+        const ok = repoRoots.some((root) => doFileExists(join13(root, rel)));
         existsCache.set(rel, ok);
         return ok;
+      },
+      // Containment, decided by the filesystem instead of by string prefix. A repo can
+      // contain a symlink that leaves it — `repoA/vendor` pointing at `repoB` is an
+      // ordinary thing for a checkout to have — and every rule inside sessionPaths is a
+      // string rule, so `<repoA>/vendor/src/secret.ts` reads as in-repo and is emitted
+      // under repoA's name while naming a file that belongs to repoB. That is another
+      // repository's directory structure entering this one's capture.
+      //
+      // WE FOLLOW THE DIRECTORY, NOT THE FILE. What leaks is a path DESCENDING THROUGH
+      // a link: only `vendor` exists in repoA, so `vendor/src/secret.ts` is repoB's
+      // structure wearing repoA's name. A symlinked FILE at a name this repo really has
+      // — `src/linked.ts` pointing anywhere at all — is different in kind: that name is
+      // in repoA's own tree, git tracks it, and the path gives away nothing about where
+      // its contents live. Resolving the full path would drop it too, which is losing
+      // our own metadata to a rule aimed at somebody else's.
+      //
+      // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME root
+      // resolves it inside — is wrong, and wrong in the way that reopens the leak it is
+      // meant to close. Roots are checkouts of one repo, so every tracked directory
+      // exists in all of them: put the escaping link at a name the repo genuinely has
+      // (`ln -s ../../other packages/foo`, with `packages/foo` a real directory in a
+      // sibling worktree) and the sibling vouches for it, laundering the escape. So the
+      // question asked is the opposite one, and a single contradiction drops the path.
+      //
+      // AND WE CLIMB TO THE DEEPEST ANCESTOR THAT EXISTS. Asking only about the
+      // immediate parent means a link into a directory that is MISSING answers
+      // "resolves nowhere", which is an absence, which keeps the path — so
+      // `<repoA>/vendor/gone/secret.ts` leaked while `<repoA>/vendor/src/secret.ts` did
+      // not, purely because of what happened to be on the far side of the link.
+      // Climbing until something resolves reaches `vendor` itself, which is a link out,
+      // and refuses it. It leaves the deleted-file case exactly where it was:
+      // `src/deleted.ts` climbs to `src`, which is inside, so the path survives.
+      //
+      // TWO LIMITS OF THIS, both measured, both open, neither a regression — the same
+      // spellings get through on the previous release. Say them here rather than let
+      // the next reader infer a guarantee from the paragraph above.
+      //   1. A DANGLING link resolves nowhere at every level, so the climb walks PAST
+      //      it to an ancestor that is inside, and the path is kept. The sentence above
+      //      holds only while the link's target exists.
+      //   2. A `..` that cancels a symlinked segment defeats all of this before we are
+      //      asked at all: `normalizeRepoRelative` reduces the path arithmetically, so
+      //      `dlink/../src/a.ts` arrives here already spelled `src/a.ts` and there is
+      //      nothing left to detect. The predicate cannot see it — it receives the
+      //      POST-normalization path, and the evidence was destroyed upstream.
+      // Closing either one means resolving against the filesystem BEFORE normalizing,
+      // which changes what crosses the `sessionPaths` boundary. That is its own change.
+      escapesRepo: (rel, roots) => {
+        const parent = dirname4(rel);
+        const hit = escapesCache.get(parent);
+        if (hit !== void 0) return hit;
+        const realRoots = realRootsOf(roots);
+        let escapes = false;
+        for (const root of roots) {
+          const segments = parent === "." || parent === "" ? [] : parent.split(/[\\/]/);
+          let real = null;
+          for (; ; ) {
+            real = realOf(segments.length > 0 ? join13(root, ...segments) : root);
+            if (real !== null || segments.length === 0) break;
+            segments.pop();
+          }
+          if (real === null) continue;
+          if (!inside(real, realRoots)) {
+            escapes = true;
+            break;
+          }
+        }
+        escapesCache.set(parent, escapes);
+        return escapes;
       }
     });
     const sessionId = redacted.sessionId ?? input.session_id ?? null;
@@ -10387,7 +10575,7 @@ async function persistDerived(decisions, repo, config2, decidedAt, ctx) {
 
 // src/fromHook.ts
 import { spawn as spawn2 } from "node:child_process";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 import { readFile as readFile11, writeFile as writeFile8, mkdir as mkdir8, chmod as chmod7 } from "node:fs/promises";
 var KNOWN_AGENTS = /* @__PURE__ */ new Set([
   "claude-code",
@@ -10429,7 +10617,7 @@ function normalizeHookInput(payload, _agent) {
   return out;
 }
 function captureStatePath(env = process.env) {
-  return join13(configDir(env), "capture-sessions.json");
+  return join14(configDir(env), "capture-sessions.json");
 }
 var MAX_REMEMBERED = 200;
 function parseState2(raw) {
@@ -35031,11 +35219,11 @@ async function startMcpServer(deps = {}) {
 }
 
 // src/routingStats.ts
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 import { readFile as readFile12, writeFile as writeFile9, mkdir as mkdir9, chmod as chmod8 } from "node:fs/promises";
 var STATS_FILE = "routing-stats.json";
 function statsPath(env) {
-  return join14(configDir(env), STATS_FILE);
+  return join15(configDir(env), STATS_FILE);
 }
 async function readRoutingStats(deps = {}) {
   const env = deps.env ?? process.env;
@@ -35136,21 +35324,21 @@ async function runSessionStart(input = {}, deps = {}) {
 // src/localGraph.ts
 import { statSync } from "node:fs";
 import { readdirSync } from "node:fs";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 
 // src/localCache.ts
 import { mkdir as mkdir10, readFile as readFile13, writeFile as writeFile10, rename } from "node:fs/promises";
 import { existsSync as existsSync2 } from "node:fs";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { join as join15, resolve as resolve2 } from "node:path";
+import { join as join16, resolve as resolve2 } from "node:path";
 var CACHE_SCHEMA_VERSION = 1;
 var CACHE_DIR = ".backthread";
 var CACHE_FILE = "cache.json";
 function cacheDir(repoRoot) {
-  return join15(repoRoot, CACHE_DIR);
+  return join16(repoRoot, CACHE_DIR);
 }
 function cachePath(repoRoot) {
-  return join15(cacheDir(repoRoot), CACHE_FILE);
+  return join16(cacheDir(repoRoot), CACHE_FILE);
 }
 var defaultTopLevelReader = (cwd) => {
   try {
@@ -35202,7 +35390,7 @@ function isObject2(v) {
 async function ensureCacheDir(repoRoot) {
   const dir = cacheDir(repoRoot);
   await mkdir10(dir, { recursive: true });
-  const ignore = join15(dir, ".gitignore");
+  const ignore = join16(dir, ".gitignore");
   if (!existsSync2(ignore)) {
     await writeFile10(ignore, "*\n").catch(() => {
     });
@@ -35243,7 +35431,7 @@ function scanInvalidators(root, ext, layout) {
   for (const pkg of layout.packages) if (pkg.root) dirs.add(pkg.root);
   const out = [];
   for (const rel of dirs) {
-    const abs = rel ? join16(root, rel) : root;
+    const abs = rel ? join17(root, rel) : root;
     let entries;
     try {
       entries = readdirSync(abs, { withFileTypes: true });
@@ -35266,7 +35454,7 @@ function collectSignatures(root, ext, layout) {
   for (const id of scanInvalidators(root, ext, layout)) ids.add(id);
   const sigs = {};
   for (const id of ids) {
-    const sig = fileSignature(join16(root, id));
+    const sig = fileSignature(join17(root, id));
     if (sig !== null) sigs[id] = sig;
   }
   return sigs;
@@ -36880,7 +37068,7 @@ function isEntryPoint() {
     const self = fileURLToPath2(import.meta.url);
     const resolve3 = (p) => {
       try {
-        return realpathSync3(p);
+        return realpathSync4(p);
       } catch {
         return p;
       }

@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   classifyDir,
   extractCwdFromRaw,
@@ -417,11 +420,20 @@ test('runSweep drives the REAL runCapture pipeline; the redact fence holds', asy
   });
   // the sweep reads the transcript for cwd-probe AND runCapture reads it again: thread
   // the transcript-reading seam into captureDeps too.
+  // ISOLATED FROM THIS MACHINE, both ways. `MAIN` is a real path on the author's
+  // laptop, and running the REAL pipeline against it used to shell out to real git
+  // there — so what this test did depended on how many worktrees that checkout
+  // happened to have, and capture wrote its own state into the developer's home
+  // directory as a side effect. Pin the root set (this test is about the redaction
+  // fence, not about worktree discovery) and point the config dir at a temp dir, so
+  // the pipeline has nowhere real to write.
+  const cfgDir = await mkdtemp(join(tmpdir(), 'bt-sweep-'));
   f.deps.captureDeps = {
-    env: {} as NodeJS.ProcessEnv,
+    env: { BACKTHREAD_CONFIG_DIR: cfgDir } as NodeJS.ProcessEnv,
     readConfigImpl: async () => ({ account: 'acc', device_token: 'backthread_pat_secret' }),
     readFileImpl: async () => TRANSCRIPT,
     ensureAuthImpl: () => {},
+    resolveRepoRootsImpl: (cwd) => [cwd],
     fetchImpl,
     log: () => {},
   };

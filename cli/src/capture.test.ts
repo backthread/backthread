@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseHookInput, runCapture, type CaptureDeps, type HookInput } from './capture.js';
+import { isInsideRoot, parseHookInput, runCapture, type CaptureDeps, type HookInput } from './capture.js';
 import type { BackthreadConfig } from './config.js';
+import { runDoctor } from './doctor.js';
 
 // --- helpers -----------------------------------------------------------------
 
@@ -407,6 +408,458 @@ test('END TO END with real git: a sibling worktree edit reaches the wire, a fore
     for (const p of filePaths) assert.ok(!p.startsWith('/') && !p.includes('..'), p);
   } finally {
     await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// THE SYMLINK LEAK, end to end with real git, real symlinks and real files on disk.
+//
+// A checkout can contain a link that leaves it — `vendor -> ../other-repo` is an
+// ordinary thing to find in one — and containment used to be decided by string
+// prefix, which walks straight through a link. So a file belonging to ANOTHER
+// repository, opened through this repo's own directory, was relativized against this
+// repo's root and sent as one of its paths. Nothing in the pure fence can see that;
+// only the filesystem can, and this is the test that it is asked.
+//
+// The same session also edits a real file in a sibling WORKTREE and a real file in
+// the checkout itself. Both must survive: a fix that closed the leak by tightening
+// containment would take those with it and undo the reason the root set exists.
+// THE LAUNDERING CASE. Roots are checkouts of ONE repo, so every tracked directory
+// exists in all of them. Put the escaping link at a name the repo genuinely has — the
+// ordinary `ln -s ../../other-repo packages/foo` trick, where `packages/foo` is a real
+// directory in the sibling worktree — and a rule that keeps a path as soon as SOME root
+// resolves it inside will let the sibling vouch for the escape. The sibling is telling
+// the truth about its own directory; it simply is not being asked about the one the path
+// came from. Only "does any root say this left?" survives the collision.
+test('END TO END with real symlinks: a sibling worktree cannot vouch for an escaping link', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-launder-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const lane = join(tmp, 'app-lane');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    runGit(app, 'worktree', 'add', '-q', '-b', 'lane', lane);
+
+    // The foreign repo, reachable through a name this repo really uses.
+    mkdirSync(join(foreign, 'vendorish'), { recursive: true });
+    writeFileSync(join(foreign, 'vendorish/secret.ts'), 'export const secret = 1;\n');
+    symlinkSync(foreign, join(app, 'vendor'), 'dir');
+    // …and the SAME name, as a genuine directory, in the sibling worktree. This is the
+    // root that would otherwise confirm the path.
+    mkdirSync(join(lane, 'vendor/vendorish'), { recursive: true });
+    // A real file of our own, so a green result cannot mean "the capture emitted
+    // nothing at all".
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-l', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Read', input: { file_path: join(app, 'vendor/vendorish/secret.ts') } },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/mine.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-l' }, base);
+
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/mine.ts']);
+    const wire = JSON.stringify(sentBody);
+    assert.doesNotMatch(wire, /vendorish/);
+    assert.doesNotMatch(wire, /secret/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// THE DANGLING CASE. Asking only about the immediate parent makes the fence depend on
+// what happens to be on the far side of the link: `vendor/src/secret.ts` was refused
+// because `vendor/src` resolved and landed outside, while `vendor/gone/secret.ts` was
+// KEPT, because `vendor/gone` resolved nowhere and "nowhere" is an absence rather than a
+// contradiction. Same link, same escape, opposite answer. Climbing to the deepest
+// ancestor that does exist reaches `vendor` itself, which is the link, and settles both.
+test('END TO END with real symlinks: a link into a missing directory is still a link out', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-dangle-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    symlinkSync(foreign, join(app, 'vendor'), 'dir');
+    // `other-repo/gone/` deliberately does NOT exist.
+    // A real file of our own, so the test cannot pass by emitting nothing at all.
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-d', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Read', input: { file_path: join(app, 'vendor/gone/secret.ts') } },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/mine.ts') } },
+            // A file of OURS that no longer exists must still survive — the deleted-file
+            // property, which the ancestor climb must not quietly take away.
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/deleted.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-d' }, base);
+
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/deleted.ts', 'src/mine.ts']);
+    assert.doesNotMatch(JSON.stringify(sentBody), /vendor|secret/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// The containment comparison decides whether a path stayed in the repo, and it is wrong
+// on Windows in a way nothing running on this machine can see: `realpathSync` and `join`
+// answer in the platform's separator, so a root is `C:\repo` and a path below it is
+// `C:\repo\src`. Compared against a hardcoded '/', every path with a directory component
+// reads as an escape and the whole harvest silently empties. An end-to-end test here
+// cannot tell `sep` from '/', so the separator is exercised directly.
+test('isInsideRoot compares with the given separator, on both platform spellings', () => {
+  // POSIX — what this machine runs.
+  assert.equal(isInsideRoot('/repo/src/a.ts', ['/repo'], '/'), true);
+  assert.equal(isInsideRoot('/repo', ['/repo'], '/'), true); // the root itself
+  assert.equal(isInsideRoot('/repo-other/a.ts', ['/repo'], '/'), false); // prefix look-alike
+  assert.equal(isInsideRoot('/elsewhere/a.ts', ['/repo'], '/'), false);
+
+  // win32 — the case that cannot be reached from here, and the one that broke.
+  assert.equal(isInsideRoot('C:\\repo\\src\\a.ts', ['C:\\repo'], '\\'), true);
+  assert.equal(isInsideRoot('C:\\repo', ['C:\\repo'], '\\'), true);
+  assert.equal(isInsideRoot('C:\\repo-other\\a.ts', ['C:\\repo'], '\\'), false);
+  assert.equal(isInsideRoot('D:\\elsewhere\\a.ts', ['C:\\repo'], '\\'), false);
+
+  // And the mutation this exists to catch: a win32 path judged with a POSIX separator
+  // loses everything below the root while the root itself still matches — which is
+  // exactly why the bug would look like "capture stopped finding files" and not like a
+  // crash.
+  assert.equal(isInsideRoot('C:\\repo\\src\\a.ts', ['C:\\repo'], '/'), false);
+
+  // The default is the running platform's separator, not a literal.
+  assert.equal(isInsideRoot(join('/repo', 'src'), ['/repo']), true);
+});
+
+test('END TO END with real symlinks: a link out of the checkout cannot carry another repo in', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-link-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const lane = join(tmp, 'app-lane');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    runGit(app, 'worktree', 'add', '-q', '-b', 'lane', lane);
+
+    // The foreign repo's file EXISTS — the leak needs a real file behind the link,
+    // and so does the proof that it is gone.
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    writeFileSync(join(foreign, 'src/secret.ts'), 'export const secret = 1;\n');
+    // The link that escapes: `<app>/vendor` IS `<other-repo>`.
+    symlinkSync(foreign, join(app, 'vendor'), 'dir');
+    // Two files that really are this repo's, in two of its checkouts.
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+    // A symlinked FILE at a name this repo really has. `src/linked.ts` is in repoA's
+    // own tree and git tracks it; where its contents happen to live is not something
+    // the path gives away. It must survive — the leak is a path DESCENDING THROUGH a
+    // link into somebody else's directory structure, not a leaf name of our own.
+    symlinkSync(join(foreign, 'src/secret.ts'), join(app, 'src/linked.ts'), 'file');
+    mkdirSync(join(lane, 'src'), { recursive: true });
+    writeFileSync(join(lane, 'src/lane.ts'), 'export const lane = 1;\n');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-link', message: { content: 'why hold until merge?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Holding until merge keeps unmerged reasoning out of the record.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/mine.ts') } },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(lane, 'src/lane.ts') } },
+            // Through the link, so it reads as in-repo by every string rule.
+            { type: 'tool_use', name: 'Read', input: { file_path: join(app, 'vendor/src/secret.ts') } },
+            // And again as a shell token, the other route into the output.
+            { type: 'tool_use', name: 'Bash', input: { command: 'cat vendor/src/secret.ts' } },
+            // A name this repo genuinely has, whose file happens to be a link out.
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/linked.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'hold' }] } };
+      },
+    });
+
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    // Real git, real filesystem: the only stubs left are the network and the transcript.
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-link' }, base);
+
+    const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
+    // The checkout's own file, the sibling worktree's file, and this repo's own name
+    // for a file that is a link out, all survive…
+    assert.deepEqual(filePaths, ['src/lane.ts', 'src/linked.ts', 'src/mine.ts']);
+    // …and nothing that belongs to the other repository went anywhere.
+    const wire = JSON.stringify(sentBody);
+    assert.doesNotMatch(wire, /other-repo/);
+    assert.doesNotMatch(wire, /secret/);
+    assert.doesNotMatch(wire, /vendor/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// A CHECKOUT REACHED THROUGH A SYMLINKED PARENT still works — the property the
+// previous release bought, now that containment asks the filesystem instead of
+// comparing strings. Git answers with physical paths; the agent reports the ones the
+// person actually typed. The root set carries both spellings for exactly that reason,
+// and the escape check has to compare a RESOLVED path against RESOLVED roots or the
+// logical spelling matches nothing and every path is judged to have left the repo.
+test('END TO END with real git: a repo reached through a symlinked parent keeps its paths', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-parent-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const real = join(tmp, 'real');
+    const app = join(real, 'app');
+    mkdirSync(app, { recursive: true });
+    runGit(app, 'init', '-q', '-b', 'main');
+    runGit(app, 'config', 'user.email', 'test@example.com');
+    runGit(app, 'config', 'user.name', 'Test');
+    writeFileSync(join(app, 'README.md'), '# fixture\n');
+    runGit(app, 'add', '.');
+    runGit(app, 'commit', '-qm', 'init');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+    // The link is ABOVE the checkout — `<tmp>/link/app` is `<tmp>/real/app`.
+    symlinkSync(real, join(tmp, 'link'), 'dir');
+    const viaLink = join(tmp, 'link', 'app');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-p', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            // Reported under the spelling the session used, not the one git answers with.
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(viaLink, 'src/mine.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: viaLink, session_id: 'sess-p' }, base);
+
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/mine.ts']);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// The same property where there is NO git at all. Capture works in a directory that is
+// not a repo, and then the root set is just the session's cwd — the LOGICAL spelling,
+// with no physical counterpart alongside it. Comparing a resolved path against that
+// string matches nothing, so every path would be read as having left a repo that does
+// not exist. This is the case that makes resolving the roots load-bearing rather than
+// belt-and-braces, and it is reachable on any machine whose temp dir is a symlink.
+test('a non-git directory reached through a symlink still keeps its paths', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-nogit-'));
+  try {
+    const real = join(tmp, 'real');
+    const proj = join(real, 'proj');
+    mkdirSync(join(proj, 'src'), { recursive: true });
+    writeFileSync(join(proj, 'src/a.ts'), 'export const a = 1;\n');
+    symlinkSync(real, join(tmp, 'link'), 'dir');
+    const viaLink = join(tmp, 'link', 'proj');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-n', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(viaLink, 'src/a.ts') } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    // Real root resolution, real filesystem — but there is no git here, so the root set
+    // is `[resolve(cwd)]` and carries the symlinked spelling only.
+    delete base.resolveRepoRootsImpl;
+    delete base.fileExistsImpl;
+    base.readGitImpl = () => null; // no git anywhere on this path
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: viaLink, session_id: 'sess-n' }, base);
+
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/a.ts']);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// --- what capture has to say, and whether anyone can hear it -----------------
+//
+// The shipped SessionEnd/Stop hook re-spawns its worker with `stdio: 'ignore'`, so a
+// line capture writes to stderr is not a quiet channel — it is no channel. These pin
+// the OTHER end: that the warning root resolution produces travels all the way to the
+// surface a person actually reads, without either test knowing how it got there.
+
+test('a warning from root resolution reaches BOTH channels, not only the dead one', async () => {
+  const logged: string[] = [];
+  const recorded: string[] = [];
+  const { fetch: fetchImpl } = stubFetch({});
+  await runCapture(
+    HOOK,
+    deps({
+      fetchImpl,
+      log: (m) => logged.push(m),
+      recordNoticeImpl: (m) => recorded.push(m),
+      resolveRepoRootsImpl: (cwd, _run, warn) => {
+        warn?.('backthread: 6 worktrees were left out of this capture.');
+        return [cwd];
+      },
+    }),
+  );
+  // stderr, for `backthread capture` run by hand with a terminal attached…
+  assert.ok(
+    logged.includes('backthread: 6 worktrees were left out of this capture.'),
+    `not on stderr: ${JSON.stringify(logged)}`,
+  );
+  // …and the file, which is the only one of the two the shipped hook can use.
+  assert.deepEqual(recorded, ['backthread: 6 worktrees were left out of this capture.']);
+});
+
+// END TO END across the two modules, with a real config directory on disk and no
+// knowledge on either side of how the other works. A guard that stopped at "capture
+// called the recorder" would sit one layer above the break: the question is whether
+// the sentence reaches the report somebody reads.
+test('END TO END: what a detached capture leaves behind is what `backthread doctor` shows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bt-notice-e2e-'));
+  try {
+    const env = { BACKTHREAD_CONFIG_DIR: join(dir, 'cfg') } as NodeJS.ProcessEnv;
+    const message =
+      'backthread: this repo has 70 linked worktrees and only the first 64 were checked, so ' +
+      'file paths in the other 6 were left out of this capture.';
+    const { fetch: fetchImpl } = stubFetch({});
+    const base = deps({
+      fetchImpl,
+      env,
+      // The detached worker's stdio is discarded; model that by throwing the log away.
+      log: () => {},
+      resolveRepoRootsImpl: (cwd, _run, warn) => {
+        warn?.(message);
+        return [cwd];
+      },
+    });
+    // The real recorder — this is the wiring under test.
+    delete base.recordNoticeImpl;
+    await runCapture(HOOK, base);
+
+    const report = await runDoctor({ env, home: dir, cwd: dir, fetchImpl, runNpm: async () => ({ ok: false, stdout: '', stderr: '' }) });
+    assert.match(report.text, /this repo has 70 linked worktrees/);
+    assert.match(report.text, /other 6 were left out/);
+    // A partial capture is not a broken install: it must never drive the exit code.
+    assert.equal(report.exitCode, 1); // (the fail is the absent auth config, not this)
+    const capture = report.checks.find((c) => c.key === 'capture');
+    assert.equal(capture?.status, 'warn');
+    assert.notEqual(capture?.critical, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

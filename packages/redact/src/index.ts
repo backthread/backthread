@@ -441,6 +441,55 @@ export interface SessionPathsOptions {
    * nobody anything, and the alternative is trusting every unverifiable token.
    */
   exists?: (repoRelativePath: string) => boolean;
+
+  /**
+   * Does `repoRelativePath`, FOLLOWED ON DISK, land outside every root of this repo?
+   * Return true and the path is dropped.
+   *
+   * WHY THIS EXISTS. Containment above is decided by string prefix, and a string
+   * prefix does not survive a symlink. With `repoA/vendor` linked at `repoB`, the
+   * path `<repoA>/vendor/src/secret.ts` is under the root `<repoA>` by every rule
+   * this module can apply, so it relativizes to `vendor/src/secret.ts` and is
+   * emitted — as one of THIS repo's paths, while the file it names belongs to
+   * another repository. That is a cross-repo leak of exactly the thing the roots
+   * were introduced to get right, and no amount of string reasoning closes it: only
+   * the filesystem knows where a link goes. Same seam as `exists` and for the same
+   * reason — this package is pure and dependency-free (load-bearing for the
+   * esbuild-inlined bundle), so the caller, which already holds a filesystem and the
+   * roots, answers and this module obeys.
+   *
+   * Applies to EVERY origin, not just shell tokens. A `file_path` tool input reached
+   * through a link escapes just as completely as a scraped one, and the leak was
+   * measured on the tool-input route.
+   *
+   * IT REPORTS A CONTRADICTION, NOT AN ABSENCE. "The filesystem says this path leaves
+   * the repo" is a drop; "the filesystem cannot say" is not. A path that resolves
+   * nowhere under any root — the file the session DELETED, most often — must return
+   * false and be kept, because the alternative is to silently impose `exists` on
+   * path-named tool inputs, which have never required it, and lose the paths of every
+   * removed file. The predicate that decides EXISTENCE is `exists`; this one decides
+   * DESTINATION.
+   *
+   * ONE ROOT DISAGREEING IS ENOUGH TO DROP IT, and that is not the same as asking
+   * whether SOME root can vouch for it. Roots are checkouts of one repo, so every
+   * tracked directory exists in all of them — which means a sibling worktree will
+   * happily confirm a name whose spelling in THIS checkout is a link to somebody
+   * else's repo. Answering "is it inside anywhere?" lets that confirmation launder
+   * the escape; answering "does anything say it left?" does not.
+   *
+   * IT IS GIVEN THE ROOTS THE HARVEST ACTUALLY USED, not the ones the caller passed
+   * in. When the caller supplies none, this module falls back to a root it found in
+   * the transcript — and a predicate closed over the caller's empty list would then
+   * be measuring against directories that had nothing to do with the paths being
+   * relativized, and could only ever answer "no escape". Handing the effective roots
+   * to the predicate is what keeps the promise that there is no second, weaker route
+   * into the output.
+   *
+   * Omit it and containment stays string-only — the long-standing behaviour, kept so
+   * this remains a compatible addition to a published API. The shipped CLI always
+   * supplies it. Should memoise: one session asks thousands of times.
+   */
+  escapesRepo?: (repoRelativePath: string, roots: readonly string[]) => boolean;
 }
 
 /**
@@ -647,6 +696,7 @@ export function sessionPaths(
   // usable — an empty list is "I looked and found no roots", not "use the default".
   const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? '']);
   const exists = options?.exists;
+  const escapesRepo = options?.escapesRepo;
 
   const seen = new Set<string>();
   let shellPathCount = 0;
@@ -657,6 +707,14 @@ export function sessionPaths(
       // `exists` gets the pre-scan behaviour rather than unverified guesses — the
       // absence of a check must never be the reason something leaks.
       if (fromShell && exists === undefined) continue;
+      // A NUL byte is not part of any path on any filesystem this runs on — the
+      // syscall layer treats it as the end of the string, so nothing downstream can
+      // even name the file it claims to. It arrives only from a malformed or hostile
+      // tool-input field (the shell token class has never been able to carry one),
+      // and it is metadata that goes on to be stored, joined and rendered. Refuse it
+      // at the fence, where every candidate passes, rather than asking each consumer
+      // to cope with a string that cannot be a path.
+      if (p.includes('\0')) continue;
       // Length cap BEFORE the fence: a base64 blob is not a path, and there is no
       // reason to normalize 17 kilobytes of it to find that out.
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
@@ -692,11 +750,19 @@ export function sessionPaths(
         // word belongs to the caller's predicate, not to any string rule here.
         if (norm.split('/').some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
         if (!exists!(norm)) continue;
-        // Cap in ENCOUNTER order (see MAX_SHELL_PATHS) — never after the sort.
-        if (!seen.has(norm)) {
-          if (shellPathCount >= MAX_SHELL_PATHS) continue;
-          shellPathCount += 1;
-        }
+      }
+      // The last word on containment, for EVERY origin. Everything above decided it
+      // by string prefix, which a symlink walks straight through: a path under a root
+      // by every rule this pure module can apply can still name a file in another
+      // repository. Only the filesystem knows, so the caller's predicate answers here
+      // — after the cheap string gates have already rejected what they can, and
+      // BEFORE the shell budget is charged, so a path that is about to be dropped
+      // never consumes the quota of one that would have been kept.
+      if (escapesRepo?.(norm, roots)) continue;
+      // Cap in ENCOUNTER order (see MAX_SHELL_PATHS) — never after the sort.
+      if (fromShell && !seen.has(norm)) {
+        if (shellPathCount >= MAX_SHELL_PATHS) continue;
+        shellPathCount += 1;
       }
       seen.add(norm);
     }

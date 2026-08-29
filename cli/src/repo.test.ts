@@ -218,14 +218,80 @@ test('resolveRepoRoots reads only the `worktree` lines of the porcelain record',
         'HEAD 2222222222222222222222222222222222222222',
         'detached',
         'locked',
-        'prunable gitdir file points to non-existent location',
         '',
       ].join('\n');
     }
     return null;
   };
-  // `HEAD …`, `branch …`, `detached`, `locked` and `prunable …` are not paths.
+  // `HEAD …`, `branch …`, `detached` and `locked` are not paths.
   assert.deepEqual(resolveRepoRoots('/work/app', run), ['/work/app', '/work/lane1']);
+});
+
+// A registration whose directory has been deleted is still LISTED, annotated with the
+// reason. Taking it at face value costs twice: it spends one of the capped verification
+// slots on a directory that is not there — so on a machine with stale registrations the
+// LIVE worktrees are the ones pushed past the cap — and it inflates the count reported
+// to the reader into a count of registrations rather than of checkouts. It is also the
+// one case where `git worktree prune` was the right answer, which is why doing it here
+// is what lets the over-cap message stop naming a command.
+test('resolveRepoRoots skips worktree registrations git has marked prunable', () => {
+  const probed: string[] = [];
+  const run: GitRunner = (cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') {
+      probed.push(cwd);
+      return '/work/app/.git\n';
+    }
+    if (args[0] === 'worktree') {
+      return [
+        'worktree /work/app',
+        'HEAD 1111111111111111111111111111111111111111',
+        'branch refs/heads/main',
+        '',
+        'worktree /work/stale',
+        'HEAD 2222222222222222222222222222222222222222',
+        'prunable gitdir file points to non-existent location',
+        '',
+        'worktree /work/live',
+        'HEAD 3333333333333333333333333333333333333333',
+        'branch refs/heads/live',
+        '',
+        'worktree /work/stale-bare',
+        'prunable', // the bare spelling means the same thing
+        '',
+      ].join('\n');
+    }
+    return null;
+  };
+  assert.deepEqual(resolveRepoRoots('/work/app', run), ['/work/app', '/work/live']);
+  // Not merely absent from the result — never probed at all, which is the cap slot the
+  // fix is about. (`/work/app` is the session's own identity probe.)
+  assert.deepEqual(probed, ['/work/app', '/work/live']);
+});
+
+// The annotation belongs to the record it appears in and must not bleed into the next
+// one. A parser that latches `prunable` and never clears it would silently drop every
+// worktree listed after the first stale registration.
+test('a prunable annotation does not condemn the worktrees listed after it', () => {
+  const run: GitRunner = (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return '/work/app/.git\n';
+    if (args[0] === 'worktree') {
+      return [
+        'worktree /work/app',
+        '',
+        'worktree /work/stale',
+        'prunable gitdir file points to non-existent location',
+        '',
+        'worktree /work/after-one',
+        '',
+        'worktree /work/after-two',
+        '',
+      ].join('\n');
+    }
+    return null;
+  };
+  assert.deepEqual(resolveRepoRoots('/work/app', run), ['/work/app', '/work/after-one', '/work/after-two']);
 });
 
 // A hook payload's `cwd` is whatever the host agent reported, which is not guaranteed
@@ -496,8 +562,19 @@ test('resolveRepoRoots caps how many linked worktrees one call will probe', () =
   // And it SAYS SO. Past the cap the remaining worktrees' paths are dropped as foreign
   // again — this function's own bug at scale — so the truncation must not be silent.
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /64 linked worktrees/);
-  assert.match(warnings[0], /git worktree prune/);
+  // It has to report THIS MACHINE's numbers. "More than 64" is a fact about a constant
+  // in our source; 500 listed, 64 checked, 436 left out is a fact about the reader's
+  // repo, and it is the only version of the sentence they can do anything with.
+  assert.match(warnings[0], /500 linked worktrees/);
+  assert.match(warnings[0], /first 64 were checked/);
+  assert.match(warnings[0], /other 436/);
+  // AND IT PRESCRIBES NO COMMAND. It used to end by telling the reader to run
+  // `git worktree prune`, which drops stale registrations: it does not show a single
+  // skipped path, does not recover one, and on a machine whose worktrees are all live
+  // does nothing whatsoever. Following it produced no visible change and taught
+  // nothing, which is worse than being told only what happened.
+  assert.doesNotMatch(warnings[0], /prune/);
+  assert.doesNotMatch(warnings[0], /\bRun\b/);
 });
 
 test('resolveRepoRoots stays quiet when it is under the cap', () => {
@@ -511,6 +588,35 @@ test('resolveRepoRoots stays quiet when it is under the cap', () => {
   resolveRepoRoots('/work/app', run, (m) => warnings.push(m));
   // Otherwise the warning above is worthless: it has to mean something happened.
   assert.deepEqual(warnings, []);
+});
+
+// THE BOUNDARY ITSELF. The two tests above sit at 1 and 500, which leaves the only
+// interesting numbers unguarded: `skipped > 0` could be `skipped > -1` and both would
+// still pass while the message fired at exactly the cap claiming "the other 0". Off by
+// one here is a line that appears on a machine that lost nothing, which is precisely
+// the kind of noise that teaches people to ignore it.
+test('resolveRepoRoots speaks at exactly one over the cap and not one under', () => {
+  const runWith = (linked: number): GitRunner => (_cwd, args) => {
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return '/work/app\n';
+    if (args[0] === 'rev-parse' && args[1] === '--git-common-dir') return '/work/app/.git\n';
+    if (args[0] === 'worktree') {
+      const lines = ['worktree /work/app', ''];
+      for (let i = 0; i < linked; i += 1) lines.push(`worktree /work/lane${i}`, '');
+      return lines.join('\n');
+    }
+    return null;
+  };
+  const warningsAt = (linked: number): string[] => {
+    const out: string[] = [];
+    resolveRepoRoots('/work/app', runWith(linked), (m) => out.push(m));
+    return out;
+  };
+  assert.deepEqual(warningsAt(63), []);
+  assert.deepEqual(warningsAt(64), []); // every one of them was checked — nothing to say
+  const at65 = warningsAt(65);
+  assert.equal(at65.length, 1);
+  assert.match(at65[0], /has 65 linked worktrees/);
+  assert.match(at65[0], /other 1 /); // never "the other 0"
 });
 
 test('resolveRepoRoots degrades to the toplevel alone when git cannot list worktrees', () => {

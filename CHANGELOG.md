@@ -5,6 +5,85 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.24.0
+
+**A symlink pointing out of your checkout was carrying another repository's file paths
+into this one's record.** Whether a path belonged to your repo was decided by comparing
+strings, and a string comparison cannot see through a link. So if your checkout contains
+something like `vendor -> ../other-project` — an ordinary thing for a checkout to have —
+then a file your agent opened through it read as one of yours by every rule the harvest
+applies, and was sent as `vendor/src/whatever.ts` against this repo, while the file it
+named belonged to the other one. Nothing about it looked wrong from the outside.
+
+Containment is now settled by the filesystem rather than by the shape of the string. The
+**directory** a path sits in is followed for real, through every link, and if any of your
+checkouts says it comes out somewhere that is not one of them, the path is dropped. The
+three properties the previous release bought are all still here and are tested against
+real git repos and real symlinks: a file edited in a sibling worktree still counts, a file
+in a genuinely different repo still does not, and a checkout you reach through a symlinked
+parent still works.
+
+### This does not close the hole completely, and you should know where it still is
+
+Independent verification of this release measured 23 ways of spelling the escape that
+leak in 0.23.0 and are refused here — and **six that still get through**, unchanged from
+0.23.0. They are not a regression, and none of them is fixed by this release. We would
+rather you read that here than assume a guarantee we cannot make yet.
+
+All six need a `..` segment, or a URI scheme, in a path your agent passes to a
+file-reading tool. The cause is one thing: `..` is cancelled out *arithmetically*, on the
+string, before anything asks the filesystem — and cancelling `..` against a symlinked
+directory gives the wrong answer, because the link does not go where its name suggests.
+With `dlink` pointing at another repository's `src`, the path `dlink/../src/secret.ts`
+reduces on paper to `src/secret.ts`, which looks like your own file, while your computer
+opens the other repository's. A `file://` spelling gets through the same way, and emits an
+absolute path from your machine, which this code otherwise never does.
+
+The fix is to stop reducing the path on paper and resolve it against the disk first. That
+is a change to a published interface, so it is its own release rather than a hurried
+addition to this one. Until then: if you have a symlink pointing out of a checkout, a path
+your agent reaches *through* that link is refused, and a path that uses `..` to step back
+out of it may not be.
+
+Two things this deliberately does **not** do, both worth stating rather than letting you
+discover:
+
+- **It does not require a file to still exist.** A file you deleted during the session
+  keeps its path, exactly as before. Only its directory has to hold up.
+- **It does not drop a symlinked file at one of your own names.** If `src/adapter.ts` is
+  a link pointing anywhere at all, that name is still in your tree and git still tracks
+  it, so it is still yours. What gets refused is a path that *descends through* a link
+  into somebody else's repository.
+
+**Paths containing a NUL byte are refused.** No filesystem this runs on can name such a
+file — the syscall layer stops reading at the NUL — so the path named nothing, and it was
+being stored and rendered anyway.
+
+**`backthread doctor` gained a `Capture` line, because capture had no way to tell you
+anything.** The session-end hook re-spawns its real work as a detached process with its
+output discarded, which is what stops a slow capture being killed when your agent exits —
+and it also means anything capture printed went nowhere at all. The one thing it needed
+to say was that it had left some of your file paths out. It now leaves that on disk and
+`doctor` reads it, so the place you already go when Backthread seems to be doing less than
+you expected is the place that tells you. Nothing to dismiss: a condition that is still
+happening is re-recorded every capture, and one that has stopped ages out by itself.
+
+**That message is also a different message.** It used to say "more than 64 linked
+worktrees" — a fact about a constant in our source, not about your machine — and then tell
+you to run `git worktree prune`. Pruning drops stale *registrations*; it does not show you
+a single skipped path and does not recover one, and if your worktrees are all live it does
+nothing whatsoever. Following that advice produced no visible change and taught you
+nothing. It now tells you how many worktrees you have, how many were checked, how many
+were left out, and that which ones is decided by git's listing order rather than by
+anything you did. There is no command that fixes it, so it no longer pretends there is.
+
+And the reason there is no longer a command to name: **worktree registrations git has
+already marked prunable are skipped before the cap applies.** A registration whose
+directory you deleted was still being listed, still spending one of the checked slots,
+and still counted in the number reported back to you — so stale entries could push your
+*live* worktrees past the limit. That was the one case where the old advice was right,
+and it is now handled for you rather than handed to you.
+
 ## 0.23.0
 
 **If you work in more than one checkout of the same repo, capture was throwing away
