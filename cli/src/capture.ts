@@ -638,46 +638,63 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // a walk that stopped at `sub` would measure the token from a directory the shell had
     // already left.
     const allSegments = (raw: string): string[] => raw.split('/').filter((s) => s !== '' && s !== '.');
+    // A base has to name a directory that IS THERE. `resolveWalk` deliberately walks past a
+    // segment the filesystem says is absent, because for a PATH that is the deleted-file case
+    // and absence is an answer. For a BASE it is not: `cd` to a directory that does not exist
+    // fails and the shell stays where it was, so a phantom like `<repo>/gone/src` is a place
+    // nothing was ever measured from. Taking it as one both invents contradictions (a phantom
+    // outside the repo drops honest paths — the scratch worktree deleted since capture, which
+    // is 98.4% of what a naive reading would have dropped) and invents safety (a phantom
+    // INSIDE the repo silently confirms a base that never existed).
+    const resolveDir = (start: string, spelling: string): string | null => {
+      const dest = resolveWalk(start, allSegments(spelling));
+      if (dest === null) return null;
+      return realOf(dest) === null ? null : dest;
+    };
     // Resolve the directories the TOOL CALL named into physical places on this machine.
     //
-    // A BASE THAT WILL NOT RESOLVE IS SKIPPED, NOT TREATED AS A VERDICT — the same rule
-    // the roots already follow, and here it is also what the shell does: `cd` to a
-    // directory that is not there FAILS, and the shell stays where it was. So a base we
-    // cannot resolve is not a place the token was ever measured from, and treating it as
-    // one would drop honest paths for a move that never happened. Measured on real
-    // transcripts this is not a corner: 98.4% of the paths a naive reading would have
-    // dropped were relative to a scratch worktree that had since been deleted.
+    // A BASE THAT WILL NOT RESOLVE IS SKIPPED, NOT TREATED AS A VERDICT — the same rule the
+    // roots already follow, and here it is also what the shell does: a `cd` that fails leaves
+    // the shell where it was, so the token falls back to the caller's ordinary bases.
     //
-    // A BASE THAT RESOLVES OUTSIDE THE REPO IS KEPT, and that is the opposite of the rule
-    // for the session's cwd one function up. The difference is real. A SESSION cwd outside
-    // the repo is a session that has nothing to do with this repo, and admitting it would
-    // empty the harvest; a TRANSIENT `cd` outside the repo is the leak itself — the token
-    // that follows it names another directory's file, and the only right answer is to drop
-    // it. Admitting the base is what produces that drop.
+    // WHETHER AN OUT-OF-REPO BASE COUNTS DEPENDS ON WHETHER THE COMMAND MOVED, and the two
+    // cases are opposites. A base that is merely where the session was standing follows the
+    // rule one function up: a cwd outside the repo is not a base this repo's paths can be
+    // measured from, and admitting it would empty the harvest rather than protect it. A base
+    // a command MOVED to is the leak itself — the token after `cd ../other-project` names
+    // another repository's file — so it is admitted precisely so that it can contradict.
     const declaredCache = new Map<string, string[]>();
     const declaredBases = (
       declared: readonly string[],
+      moved: boolean,
       roots: readonly string[],
       realRoots: readonly string[],
     ): string[] => {
       if (declared.length === 0) return [];
-      const key = `${JSON.stringify(declared)}\0${JSON.stringify(roots)}`;
+      // Keyed on the roots as well, exactly like `basesCache` and `realRootsCache` above: the
+      // harvest can ask about a root set this function did not pass in, so a key that assumed
+      // one set per capture would be wrong the moment that happens.
+      const key = `${JSON.stringify(declared)}\0${moved}\0${JSON.stringify(roots)}`;
       const hit = declaredCache.get(key);
       if (hit !== undefined) return hit;
       const out: string[] = [];
+      const admit = (dest: string): void => {
+        // An unmoved base outside the repo can say nothing about this repo's paths.
+        if (!moved && !inside(dest, realRoots)) return;
+        if (!out.includes(dest)) out.push(dest);
+      };
       for (const spelling of declared) {
-        const segments = allSegments(spelling);
         if (spelling.startsWith('/')) {
-          const dest = resolveWalk('/', segments);
-          if (dest !== null && !out.includes(dest)) out.push(dest);
+          const dest = resolveDir('/', spelling);
+          if (dest !== null) admit(dest);
           continue;
         }
         // A relative base can only arise when the tool call named no directory of its own
         // and a `cd` moved it, so it is relative to the same places any other relative
         // spelling is. Every one of them that resolves is a place it could be.
         for (const from of relativeBases(roots, realRoots)) {
-          const dest = resolveWalk(from, segments);
-          if (dest !== null && !out.includes(dest)) out.push(dest);
+          const dest = resolveDir(from, spelling);
+          if (dest !== null) admit(dest);
         }
       }
       declaredCache.set(key, out);
@@ -729,17 +746,27 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       //      unable to answer at the point the fence asks.
       // `resolveWalk` closes both by following the raw spelling segment by segment and
       // failing closed on any segment that will not resolve.
-      escapesRepo: ({ raw, absolute, bases }, roots) => {
+      // `locatable` is deliberately NOT read here. A relative spelling out of a command whose
+      // working directory could not be read is refused inside `sessionPaths`, before any
+      // predicate is consulted, so that a consumer without this callback gets the same answer
+      // as one with it. Re-checking it here would be a branch no test could turn red.
+      escapesRepo: ({ raw, absolute, bases, moved }, roots) => {
         // Memoised on the raw spelling AND the directories it was harvested relative to.
         // The spelling alone is NOT a key any more, and that correction is load-bearing:
         // one session runs `cat src/x.ts` from a dozen directories, the answer differs by
         // directory, and keying on the spelling alone would let the first one answer for
         // all the rest — reinstating the exact confusion of contexts this change removes.
-        // NUL is the joiner, not a space: a path may legally contain a space, so joining
-        // on one lets two different (spelling, bases) pairs collide on a single key — and
-        // the collision would be silent and would answer the wrong question. Nothing here
-        // can contain a NUL, because `CONTROL_CHARACTER` refuses it from every origin.
-        const key = bases.length === 0 ? raw : `${raw}\0${bases.join('\0')}`;
+        // The bases are JSON-encoded rather than joined on a separator. A directory name may
+        // legally contain almost anything, so any literal joiner can be forged to make two
+        // different (spelling, bases) pairs collide on one key — and the collision would be
+        // silent, handing one pair the other's verdict. JSON escapes what would otherwise
+        // collide, so no screening of the base spellings is needed to make this sound.
+        //
+        // `moved` is deliberately NOT part of the key. It cannot vary while the bases stay
+        // equal: a moved candidate's base is `composeBase(cwd, target)`, which is never the
+        // string `cwd` for any target this scan accepts. Including it would be a key
+        // component no test could turn red.
+        const key = `${raw}\0${JSON.stringify(bases)}`;
         const hit = escapesCache.get(key);
         if (hit !== undefined) return hit;
         const realRoots = realRootsOf(roots);
@@ -801,7 +828,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           // honest file at a colliding name in a sibling checkout is dropped with it.
           const segments = walkableSegments(raw);
           for (const base of [
-            ...declaredBases(bases, roots, realRoots),
+            ...declaredBases(bases, moved, roots, realRoots),
             ...relativeBases(roots, realRoots),
           ]) {
             const dest = resolveWalk(base, segments);

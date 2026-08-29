@@ -1088,6 +1088,138 @@ test('a relative path is measured from the directory its own tool call ran in', 
   }
 });
 
+// THE CONSTRUCTS THAT DEFEATED THE FIRST ATTEMPT AT THIS. Independent review found eleven
+// spellings at once — `pushd`, `cd -P`, `cd --`, `{ cd x; }`, `\cd`, `env -C`, `then cd`,
+// `time cd`, `bash -c 'cd x'`, `cd -`, and a Codex argv array whose join hid the `cd` behind
+// a flag — every one of which produced a CONFIDENT base of the record's own cwd while the
+// kernel was somewhere else. They are not eleven bugs; they are one: reading a shell command
+// to find out where it moved is an open question, and the reader kept losing to a spelling.
+//
+// The rule now is the closed one. Anything that could change a directory is detected crudely
+// and must be ACCOUNTED FOR by the reader; whatever is not, refuses the command. So these
+// close as a class rather than one at a time, and a twelfth spelling refuses by default.
+test('a command that could have moved and could not be read is refused, not guessed at', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-unread-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    mkdirSync(join(app, 'src'), { recursive: true });
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    mkdirSync(join(app, 'sub'), { recursive: true });
+    mkdirSync(join(app, 'honest'), { recursive: true });
+    symlinkSync(join(foreign, 'src'), join(app, 'sub/src'), 'dir');
+    // `lib` escapes from the checkout root but is an ordinary directory one level down. So a
+    // token read from `<app>` leaves the repo while the same token read from `<app>/sub` does
+    // not — which is exactly the ambiguity a conditional `cd` leaves behind.
+    mkdirSync(join(foreign, 'lib'), { recursive: true });
+    mkdirSync(join(app, 'sub/lib'), { recursive: true });
+    symlinkSync(join(foreign, 'lib'), join(app, 'lib'), 'dir');
+
+    // One colliding name per spelling, so a leak is a row in the output rather than a
+    // misattribution hidden behind an honest record contributing the same string.
+    const ids = ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8', 'u9', 'u10', 'u11', 'u12', 'u13'];
+    for (const n of [...ids, 'keep', 'brace', 'codex', 'cond']) {
+      writeFileSync(join(foreign, `src/${n}.ts`), 'export const v = 1; // THEIRS\n');
+      writeFileSync(join(app, `src/${n}.ts`), `export const ${n} = 1; // OURS\n`);
+    }
+    writeFileSync(join(foreign, 'lib/cond.ts'), 'export const v = 1; // THEIRS\n');
+    writeFileSync(join(app, 'sub/lib/cond.ts'), 'export const cond = 1; // OURS\n');
+    // `cat` FIRST: each spelling really does open the other repository from where it ran.
+    for (const n of ids) assert.match(readFileSync(join(app, `sub/src/${n}.ts`), 'utf8'), /THEIRS/);
+    // …and the conditional row: from the root it is theirs, from `sub` it is ours.
+    assert.match(readFileSync(join(app, 'lib/cond.ts'), 'utf8'), /THEIRS/);
+    assert.match(readFileSync(join(app, 'sub/lib/cond.ts'), 'utf8'), /OURS/);
+
+    const rec = (cwd: string, command: string) =>
+      JSON.stringify({
+        type: 'assistant',
+        cwd,
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] },
+      });
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-u', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'text', text: 'Because the reasoning outlives the diff.' }] },
+      }),
+      rec(app, 'pushd sub && cat src/u1.ts'), // a stack this scan does not model
+      rec(app, 'cd -P sub && cat src/u2.ts'), // an option, not a target
+      rec(app, 'cd -- sub && cat src/u3.ts'),
+      rec(app, 'cd - && cat src/u4.ts'), // returns somewhere that is nowhere in the text
+      rec(app, '\\cd sub && cat src/u5.ts'), // the word escaped
+      rec(app, 'env -C sub cat src/u6.ts'), // a different mechanism entirely
+      rec(app, 'make -C sub && cat src/u7.ts'),
+      rec(app, "bash -c 'cd sub && cat src/u8.ts'"), // an inner shell we do not read
+      rec(app, 'cd "$SUB" && cat src/u9.ts'), // a variable we cannot expand
+      rec(app, 'cd $(echo sub) && cat src/u10.ts'), // a substitution we must not run
+      rec(app, 'popd && cat src/u11.ts'),
+      rec(app, 'chdir sub && cat src/u12.ts'),
+      // A CONDITIONAL `cd` is read, but only as a superset: we cannot tell whether the branch
+      // ran, so every directory it could have been in has to agree.
+      rec(app, 'if [ -d sub ]; then cd sub; fi && cat src/brace.ts'),
+      // A Codex argv array whose script ESCAPES, proving the same route in both directions.
+      JSON.stringify({
+        type: 'response_item',
+        cwd: app,
+        payload: {
+          type: 'function_call',
+          arguments: JSON.stringify({ command: ['bash', '-lc', 'cd sub && cat src/u13.ts'] }),
+        },
+      }),
+      // A Codex argv array. Joining it on a space hid the script's leading `cd` behind the
+      // `-lc` flag, so the whole script read as though it had never moved.
+      JSON.stringify({
+        type: 'response_item',
+        cwd: app,
+        payload: {
+          type: 'function_call',
+          arguments: JSON.stringify({ command: ['bash', '-lc', 'cd honest && cat src/codex.ts'] }),
+        },
+      }),
+      // …and the recall that the widened reader buys: a brace group and a `time` prefix are
+      // READ, not refused, so a `cd` that stays inside the repo still yields its paths.
+      rec(app, '{ cd honest; cat src/keep.ts; }'),
+      rec(app, 'time cd honest && cat src/brace.ts'),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-u' }, base);
+
+    const filePaths = ((sentBody as { filePaths?: unknown }).filePaths as string[]) ?? [];
+    // Twelve unreadable spellings and a conditional one: none on the wire. `src/keep.ts` and
+    // `src/brace.ts` survive ONLY on the strength of the two readable in-repo `cd`s — which
+    // is what stops this test passing by simply refusing everything.
+    assert.deepEqual(filePaths, ['src/brace.ts', 'src/codex.ts', 'src/keep.ts']);
+    assert.doesNotMatch(JSON.stringify(sentBody), /other-repo|THEIRS/i);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 // A `cd` TO A DIRECTORY THAT IS NOT THERE moves nothing — the shell reports an error and
 // stays where it was — so a base that will not resolve must be SKIPPED, not treated as a
 // place the token was measured from. Getting this backwards is not a corner case: measured
@@ -1111,6 +1243,7 @@ test('a `cd` to a directory that does not exist does not move the base', async (
     // A separate name per case, so that one of them being dropped is visible in the
     // output instead of being covered for by the other.
     writeFileSync(join(app, 'src/dead.ts'), 'export const dead = 1; // OURS\n');
+    writeFileSync(join(app, 'src/outside.ts'), 'export const outside = 1; // OURS\n');
     // Two ways a base fails to resolve, and they are NOT the same condition. `gone` is a
     // clean absence — nothing is there. `deadlink` IS there and will not say where it
     // goes, which is the case the walk fails closed on everywhere else. Both must leave
@@ -1136,6 +1269,20 @@ test('a `cd` to a directory that does not exist does not move the base', async (
         cwd: app,
         message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'cd deadlink && cat src/dead.ts' } }] },
       }),
+      // THE CASE THAT SEPARATES SKIPPING FROM WALKING THROUGH. `resolveWalk` continues past a
+      // segment the filesystem says is absent, because for a PATH that is the deleted-file
+      // case. For a BASE it invents a place: the phantom here lands OUTSIDE the repo, and
+      // taking it as real would contradict and drop an honest path — the scratch worktree
+      // deleted since capture, which is 98.4% of what a naive reading would have dropped.
+      JSON.stringify({
+        type: 'assistant',
+        cwd: app,
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Bash', input: { command: `cd ${join(tmp, 'gone-scratch')} && cat src/outside.ts` } },
+          ],
+        },
+      }),
     ].join('\n');
 
     let sentBody: unknown = null;
@@ -1152,7 +1299,152 @@ test('a `cd` to a directory that does not exist does not move the base', async (
     await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-dc' }, base);
 
     const filePaths = ((sentBody as { filePaths?: unknown }).filePaths as string[]) ?? [];
-    assert.deepEqual(filePaths, ['src/dead.ts', 'src/mine.ts']);
+    assert.deepEqual(filePaths, ['src/dead.ts', 'src/mine.ts', 'src/outside.ts']);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// A CONDITIONAL `cd` IS A SUPERSET, NOT AN ANSWER. `if [ -d x ]; then cd x; fi` moves only
+// when the test passed, and nothing in the transcript says whether it did. Reading it as an
+// answer picks one of the two directories and is confidently wrong half the time.
+//
+// This only shows when the RECORD's own directory is not the session's — which is exactly the
+// case this whole change is about. When they coincide, the session cwd is already among the
+// bases and supplies the contradiction on its own, so a test built there passes either way
+// and proves nothing.
+test('a conditional `cd` is measured as every directory it could have been in', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-cond-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+
+    // `zlib/cond.ts` exists at the checkout root (so `exists` is satisfied and the token is a
+    // real candidate), exists honestly under `pkg/sub`, and is a LINK OUT under `pkg`. So the
+    // spelling is ours from two of the three directories and theirs from the middle one.
+    mkdirSync(join(foreign, 'lib'), { recursive: true });
+    writeFileSync(join(foreign, 'lib/cond.ts'), 'export const v = 1; // THEIRS\n');
+    mkdirSync(join(app, 'zlib'), { recursive: true });
+    writeFileSync(join(app, 'zlib/cond.ts'), 'export const cond = 1; // OURS\n');
+    mkdirSync(join(app, 'pkg/sub/zlib'), { recursive: true });
+    writeFileSync(join(app, 'pkg/sub/zlib/cond.ts'), 'export const cond = 1; // OURS\n');
+    symlinkSync(join(foreign, 'lib'), join(app, 'pkg/zlib'), 'dir');
+
+    // `cat` proof of all three readings.
+    assert.match(readFileSync(join(app, 'zlib/cond.ts'), 'utf8'), /OURS/);
+    assert.match(readFileSync(join(app, 'pkg/sub/zlib/cond.ts'), 'utf8'), /OURS/);
+    assert.match(readFileSync(join(app, 'pkg/zlib/cond.ts'), 'utf8'), /THEIRS/);
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-cn', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'text', text: 'Because the reasoning outlives the diff.' }] },
+      }),
+      // Stamped in `pkg`. If the branch ran the shell is in `pkg/sub` and the path is ours;
+      // if it did not, the shell is in `pkg` and the same spelling is the other repository's.
+      JSON.stringify({
+        type: 'assistant',
+        cwd: join(app, 'pkg'),
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'Bash',
+              input: { command: 'if [ -d sub ]; then cd sub; fi; cat zlib/cond.ts' },
+            },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-cn' }, base);
+
+    const filePaths = ((sentBody as { filePaths?: unknown }).filePaths as string[]) ?? [];
+    assert.deepEqual(filePaths, []);
+    assert.doesNotMatch(JSON.stringify(sentBody), /other-repo|THEIRS/i);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// A RECORD WHOSE OWN cwd IS OUTSIDE THE REPO STILL CONTRIBUTES. This is the distinction
+// between a base the session merely SAT in and a base a command MOVED to, and the two want
+// opposite answers. A working directory outside the repo says nothing about this repo's
+// paths — treating it as a contradiction empties the harvest for the whole session, silently
+// and completely. A directory a `cd` moved to is the leak itself and must contradict. Same
+// data shape, opposite verdicts, so the two cases cannot share one rule.
+test('a working directory outside the repo does not empty the harvest', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-outside-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const app = join(tmp, 'app');
+    mkdirSync(app, { recursive: true });
+    runGit(app, 'init', '-q', '-b', 'main');
+    runGit(app, 'config', 'user.email', 'test@example.com');
+    runGit(app, 'config', 'user.name', 'Test');
+    writeFileSync(join(app, 'README.md'), '# fixture\n');
+    runGit(app, 'add', '.');
+    runGit(app, 'commit', '-qm', 'init');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1; // OURS\n');
+    const elsewhere = join(tmp, 'not-the-repo');
+    mkdirSync(elsewhere, { recursive: true });
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-o', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: { content: [{ type: 'text', text: 'Because the reasoning outlives the diff.' }] },
+      }),
+      // Stamped outside the repo, and NOT moved by anything. The path is still one of ours.
+      JSON.stringify({
+        type: 'assistant',
+        cwd: elsewhere,
+        message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'src/mine.ts' } }] },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-o' }, base);
+
+    const filePaths = ((sentBody as { filePaths?: unknown }).filePaths as string[]) ?? [];
+    assert.deepEqual(filePaths, ['src/mine.ts']);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
