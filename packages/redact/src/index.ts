@@ -591,7 +591,7 @@ export interface PathCandidate {
    *
    * A relative spelling means nothing without the directory it is relative to, and the
    * kernel uses the working directory of the tool call that produced it — not the
-   * session's, and not the repo root. Those differ constantly: measured over 73,406 real
+   * session's, and not the repo root. Those differ constantly: measured over 73,800 real
    * shell commands, **71.9% contain a `cd`**, and 86.8% of the commands carrying a
    * relative path token do. Every escape in this family is the same shape — the fence
    * measuring a DIFFERENT PATH from the one that gets opened — and this is the last
@@ -734,8 +734,9 @@ interface CandidatePath {
  * exactly how the path fence kept losing before it started asking the filesystem.
  *
  * So the question asked here is the CLOSED one: can we prove the command did NOT move? This
- * pattern only has to over-detect. A false positive costs recall — measured at 2.5% of
- * relative shell tokens — while a false negative is a leak, so every doubt is spelled as a
+ * pattern only has to over-detect. A false positive costs recall — measured at 6.8% of
+ * relative shell tokens, most of it `source` — while a false negative is a leak, so every
+ * doubt is spelled as a
  * hit. Whatever it finds, `SHELL_CD` below must be able to ACCOUNT for, or the command is
  * unlocatable and its relative tokens are dropped.
  */

@@ -818,7 +818,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           // bases`) instead of being inferred here, which is the only way the fence and
           // the filesystem can be reading the same string from the same place.
           //
-          // MEASURED SO THE TRADE IS STATED, NOT INHERITED. Over 73,406 real shell
+          // MEASURED SO THE TRADE IS STATED, NOT INHERITED. Over 73,800 real shell
           // commands, 71.9% contain a `cd`. Of the 51,174 relative shell tokens the
           // previous release puts on the wire, this rule drops 606 — 1.2%. 425 of those
           // resolve into a DIFFERENT git repository or into no repository at all, which is
