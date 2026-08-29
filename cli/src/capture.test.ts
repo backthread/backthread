@@ -1036,6 +1036,110 @@ test('a root that does not resolve is dropped from the set rather than kept as a
   assert.deepEqual((sentBody as { filePaths?: string[] }).filePaths, ['src/mine.ts']);
 });
 
+// A TRAILING `..` IS NOT A LEAF, and popping it walks one segment DEEPER than the
+// spelling names. `sub/rootlink/..`, with `sub/rootlink` a link pointing at the checkout
+// root, names the directory the repo SITS IN — outside it. Pop the `..` and the walk
+// stops at the root instead, reads as inside, and the path ships under a name of ours
+// (`sub`) while naming somewhere else. Nothing else in the suite reaches this branch:
+// every other spelling ends in a plain filename.
+test('a trailing .. is walked, not popped, so a link to the root cannot re-enter it', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-trail-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const app = join(tmp, 'app');
+    mkdirSync(join(app, 'sub'), { recursive: true });
+    runGit(app, 'init', '-q', '-b', 'main');
+    runGit(app, 'config', 'user.email', 'test@example.com');
+    runGit(app, 'config', 'user.name', 'Test');
+    writeFileSync(join(app, 'README.md'), '# fixture\n');
+    runGit(app, 'add', '.');
+    runGit(app, 'commit', '-qm', 'init');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+    symlinkSync(app, join(app, 'sub/rootlink'), 'dir'); // a link back to the checkout root
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-t', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/mine.ts') } },
+            { type: 'tool_use', name: 'Read', input: { cwd: app + '/sub/rootlink/..' } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-t' }, base);
+
+    // Only our own file. `sub` must NOT appear: that spelling names the parent of the repo.
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, ['src/mine.ts']);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// A ROOT THAT CANNOT BE RESOLVED SAYS NOTHING — it must not be able to say "no escape"
+// on behalf of the roots that CAN answer. The relative route asks every root in turn and
+// stops at the first contradiction; a root that fails to resolve has to be stepped over,
+// not treated as a verdict, or the first dead root in the list acquits every path behind
+// it. Reached with an injected root set, because the real resolver verifies every root it
+// returns — which is what keeps this a defensive branch rather than a live hole.
+test('an unresolvable root is stepped over, not treated as a verdict of "no escape"', async () => {
+  const transcript = [
+    JSON.stringify({ type: 'user', sessionId: 'sess-d', message: { content: 'why?' } }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-29T09:00:00Z',
+      message: {
+        content: [
+          { type: 'text', text: 'Because the reasoning outlives the diff.' },
+          { type: 'tool_use', name: 'Read', input: { file_path: 'vendor/src/secret.ts' } },
+          { type: 'tool_use', name: 'Edit', input: { file_path: 'src/mine.ts' } },
+        ],
+      },
+    }),
+  ].join('\n');
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+    },
+  });
+  await runCapture(
+    { transcript_path: '/tmp/s.jsonl', cwd: '/real', session_id: 'sess-d' },
+    deps({
+      fetchImpl,
+      readFileImpl: async () => transcript,
+      // The dead root is FIRST, so a mutant that returns "no escape" on it never reaches
+      // the live root that would have contradicted.
+      resolveRepoRootsImpl: () => ['/gone', '/real'],
+      realPathImpl: (p) =>
+        p.startsWith('/gone') ? null : p === '/real/vendor' ? '/elsewhere' : p,
+      isAbsentImpl: () => true,
+      fileExistsImpl: () => true,
+    }),
+  );
+  // `/real` says `vendor` comes out at `/elsewhere`. That contradiction has to survive
+  // the dead root sitting in front of it.
+  assert.deepEqual((sentBody as { filePaths?: string[] }).filePaths, ['src/mine.ts']);
+});
+
 // The walk costs a syscall per segment, so its depth is capped — and the cap DROPS the
 // path rather than waving it through, because a limit that fails open is a documented
 // way in. Pinned because "too deep" is exactly the branch a reader assumes is harmless.

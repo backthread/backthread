@@ -564,16 +564,20 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // The segments of a raw spelling, minus the leaf the walk must not follow. Split on
     // `/` ONLY, which is what the kernel does and therefore the only split that measures
     // the path that actually gets opened: a symlink genuinely named `x\y` is one segment
-    // to the filesystem, and treating it as two was a live escape. `sessionPaths` refuses
-    // any candidate carrying a `\` before it reaches here, so there is nothing left to
-    // disagree about.
+    // to the filesystem, and treating it as two was a live escape.
+    //
+    // THIS LINE AND THE `\` REFUSAL IN `sessionPaths` ARE MUTUALLY REDUNDANT, and it is
+    // worth knowing which way round: measured, either one alone closes the `x\y` escape.
+    // Splitting on `/` only is what makes the walk measure the path the kernel opens, so
+    // it holds even with the refusal removed; the refusal holds even with this reverted,
+    // because the candidate never arrives. Remove BOTH and the escape is back on the
+    // wire. So neither is decoration, and a mutation of this line alone will not go red.
     //
     // A trailing `..` or `.` is NOT a leaf — it is part of how the directory is named —
-    // so only a plain trailing name is dropped. No spelling that survives normalization
-    // ends in `..` today (`dlink/..` reduces to the empty path and is skipped upstream),
-    // so that condition is defence-in-depth for a shape the normalizer currently eats,
-    // and it is deliberately the conservative branch: keeping a segment costs nothing,
-    // dropping the wrong one loses a directory the walk needed to follow.
+    // so only a plain trailing name is dropped. Popping a trailing `..` walks one segment
+    // DEEPER than the spelling names, which is how `sub/rootlink/..` — a link pointing at
+    // the checkout root, with the `..` stepping above it — reads as inside the repo when
+    // it names the directory the repo sits in.
     const walkableSegments = (raw: string): string[] => {
       const segs = raw.split('/').filter((s) => s !== '' && s !== '.');
       if (segs.length > 0 && segs[segs.length - 1] !== '..') segs.pop();

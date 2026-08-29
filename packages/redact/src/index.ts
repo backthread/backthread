@@ -282,6 +282,14 @@ const ENCODED_PATH_SEPARATOR = /%(?:2f|5c|2e|00)/i;
  * thing that renders as two, and nothing downstream is expecting that. It can only come
  * from a malformed or hostile tool-input field; the shell token class has never been
  * able to carry one.
+ *
+ * ONE HONEST QUALIFICATION: a path-named tool input is `trim()`ed before it gets here, so
+ * a control character that JavaScript considers whitespace (tab, LF, VT, FF, CR) and that
+ * sits at either END of the string is removed rather than refused, and the trimmed path is
+ * kept. That is the right outcome — what is emitted carries no control character either
+ * way — but it means "refused" is exactly true only of an INTERIOR one, plus NUL and the
+ * non-whitespace controls (ESC, DEL) in any position. NUL is refused everywhere because
+ * `trim()` does not consider it whitespace.
  */
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
