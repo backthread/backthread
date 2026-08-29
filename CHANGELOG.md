@@ -54,11 +54,25 @@ it under a real shell and reading the other repository's bytes:
 * Everything closed by 0.24.0 and 0.25.0 stays closed; a file in a sibling worktree of the same
   repository is still recorded.
 
-**This is a much stronger fence, not a proof.** A shell can name a command in more ways than
-any scan of text can enumerate, so the honest claim is bounded: every construct found across
-three rounds of adversarial review is refused, and the detection now covers the two mechanisms
-that hide a word — quoting and expansion — rather than a list of spellings. It is not a
-guarantee against a transcript deliberately written to defeat it.
+**This is a much stronger fence, not a proof, and the difference is deliberate.** A shell can
+name a command in more ways than any scan of text can enumerate — quoting, expansion and
+aliasing between them make "does this command change directory?" undecidable from the text.
+That is a property of the problem, not of how hard anyone looked. So the claim is bounded:
+every construct found across three rounds of adversarial review is refused, and detection now
+covers the two *mechanisms* that hide a word — quoting and expansion — rather than a list of
+spellings. **We do not claim that no path from another repository can reach the wire.** The
+residual class is a directory change whose command word cannot be recovered from the text at
+all: an alias, or an expansion whose value is not in the transcript.
+
+**The absolute version of this was considered and rejected, and we would rather say so than
+have it proposed as an obvious improvement later.** Dropping every relative path scraped from
+a shell command *would* close the class completely — nothing measured could escape a route
+that no longer exists. It would also discard about **84% of the file paths shell commands
+contribute**, and shell-derived paths are the reason this tool can anchor a decision to code at
+all: on one measured machine, harvesting them moved the share of decisions anchored to real
+files from **5.3% to 93.0%**. Buying a completeness claim with the capability the product
+exists to provide is the wrong trade. A bounded, measured, honestly-stated fence beats an
+absolute one that has nothing left to protect.
 
 **What this costs, stated plainly.** Two separate reductions, measured over 73,800 real shell
 commands:
