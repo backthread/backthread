@@ -585,6 +585,35 @@ export interface PathCandidate {
   raw: string;
   /** True iff `raw` is POSIX-absolute (starts with `/`). */
   absolute: boolean;
+  /**
+   * The working directories THE TOOL CALL ITSELF NAMED, which is the context the fence
+   * previously had to guess at and kept guessing wrong.
+   *
+   * A relative spelling means nothing without the directory it is relative to, and the
+   * kernel uses the working directory of the tool call that produced it — not the
+   * session's, and not the repo root. Those differ constantly: measured over 73,406 real
+   * shell commands, **71.9% contain a `cd`**, and 86.8% of the commands carrying a
+   * relative path token do. Every escape in this family is the same shape — the fence
+   * measuring a DIFFERENT PATH from the one that gets opened — and this is the last
+   * remaining source of that difference, so the originating directory now travels WITH
+   * the candidate rather than being inferred after the fact.
+   *
+   * Each entry is a composed directory SPELLING: POSIX-absolute when the tool call stated
+   * an absolute one, otherwise relative to whatever the caller measures relative paths
+   * against. They are spellings, not resolved paths, for exactly the reason `raw` is:
+   * this package is pure and cannot ask the filesystem anything, and a reduction applied
+   * before the filesystem has spoken is a reduction that a symlink can make wrong.
+   *
+   * ANY ONE OF THEM CONTRADICTING IS ENOUGH TO DROP THE PATH — the same rule the caller
+   * already applies to roots, and for the same reason. Usually there is exactly one entry
+   * (the tool call's directory, moved by whatever `cd`s precede the token). More than one
+   * means the command could not be read positionally — a `cd "$VAR"`, a subshell — and
+   * the list is then a conservative superset rather than an answer.
+   *
+   * Empty means the tool call named no directory at all, and the caller's existing bases
+   * are all there is. That is the pre-existing behaviour, unchanged.
+   */
+  bases: readonly string[];
 }
 
 /**
@@ -662,21 +691,100 @@ const SHELL_PATH_TOKEN = new RegExp(
 interface CandidatePath {
   raw: string;
   fromShell: boolean;
+  bases: readonly string[];
 }
 
-function pathsFromRecord(rec: unknown): CandidatePath[] {
+/**
+ * A `cd` that actually moves the shell, with its target captured.
+ *
+ * Anchored to a COMMAND POSITION — start of string, or after `;`, `&&`, `||`, `|`, `(`
+ * or a newline — so the word `cd` inside a heredoc, a filename, a flag value or a comment
+ * is not mistaken for one. `cd -` is excluded: it returns to the PREVIOUS directory, which
+ * is a history this scan does not keep, so it is treated as unreadable rather than guessed
+ * at (see `UNREADABLE_CD_TARGET`).
+ *
+ * This is NOT a shell parse and must never become one. It reads exactly one construct,
+ * and everything it cannot read makes the harvest MORE conservative rather than less —
+ * which is the only direction a partial reading of an attacker-shaped string may fail in.
+ */
+const SHELL_CD = /(?:^|[;&|(\n]|&&|\|\|)\s*cd\s+(?!-\s|-$)(?:"([^"]*)"|'([^']*)'|([^\s;&|)]+))/g;
+
+/**
+ * A `cd` target this scan must not pretend to understand: a variable or command
+ * substitution (`$HOME`, `` `pwd` ``), a `~` the shell expands from an environment we do
+ * not have, or a glob. Guessing at any of them would produce a base that is confidently
+ * wrong, and a wrong base is the entire defect class this change exists to close — so an
+ * unreadable target instead makes the command fail CLOSED (every readable target becomes
+ * a base, and any one of them contradicting drops the path).
+ */
+const UNREADABLE_CD_TARGET = /[$`~*?[\]{}]/;
+
+/**
+ * Compose a `cd` target onto the directory in effect. Absolute targets REPLACE it, which
+ * is what `cd /elsewhere` does; relative targets descend from it, which is what `cd sub`
+ * does. Pure string composition — `.` and `..` are left in the spelling for the caller to
+ * resolve against the filesystem, never cancelled here, because cancelling `..` against a
+ * symlink is the original defect in this family wearing a different costume.
+ */
+function composeBase(current: string | null, target: string): string {
+  if (target.startsWith('/')) return target;
+  if (current === null || current.length === 0) return target;
+  return `${current.replace(/\/+$/, '')}/${target}`;
+}
+
+/**
+ * The working directory in effect at each offset in a command string, plus whether that
+ * reading is EXACT.
+ *
+ * Positional, because a command is a sequence: in `cat a/x.ts && cd sub && cat b/y.ts`
+ * the two tokens are relative to different directories, and measuring both against the
+ * union would drop the first one for a move that had not happened yet. Measured, the
+ * positional reading also drops fewer legitimate paths than the union (72.1% vs 73.7% of
+ * an at-risk set that is itself dominated by a measurement artifact).
+ *
+ * `exact: false` means some `cd` in this command could not be read, so no offset in it has
+ * a trustworthy answer and the caller must be handed every readable base at once.
+ */
+function shellCdBases(text: string, cwd: string | null): { at: number; base: string }[] & { exact?: boolean } {
+  const events: { at: number; base: string }[] = [];
+  let exact = true;
+  let chain: string | null = cwd;
+  for (const m of text.matchAll(SHELL_CD)) {
+    const target = m[1] ?? m[2] ?? m[3] ?? '';
+    if (target.length === 0 || UNREADABLE_CD_TARGET.test(target)) {
+      exact = false;
+      continue;
+    }
+    chain = composeBase(chain, target);
+    events.push({ at: (m.index ?? 0) + m[0].length, base: chain });
+  }
+  const out = events as { at: number; base: string }[] & { exact?: boolean };
+  out.exact = exact;
+  return out;
+}
+
+function pathsFromRecord(rec: unknown, sessionCwd: string | null): CandidatePath[] {
   if (!rec || typeof rec !== 'object') return [];
   const out: CandidatePath[] = [];
   const r = rec as {
     type?: unknown;
+    cwd?: unknown;
     message?: { content?: unknown };
     payload?: { type?: unknown; arguments?: unknown };
   };
+  // THE RECORD'S OWN WORKING DIRECTORY. Claude Code stamps `cwd` on every record, and it
+  // is the directory that tool call ran in — the exact context the fence has been
+  // inferring. Measured: present on 73,281 of 73,281 shell tool-use records, while the
+  // `input.cwd` field this was expected to arrive in appears on 0 of 110,141 tool inputs.
+  // The per-record stamp is the real signal; the input field is kept below because Codex
+  // and other agents may still use it, and because it costs nothing.
+  const recordCwd =
+    typeof r.cwd === 'string' && r.cwd.trim().length > 0 ? r.cwd.trim() : sessionCwd;
 
   // A shell command: one string (Claude Code `Bash`) or an argv array (Codex
   // `shell`: ["bash","-lc","…"]). Join an array on a space — the scan is
   // whitespace-boundary-tolerant, so an argv entry is just another token.
-  const pushFromCommand = (command: unknown): void => {
+  const pushFromCommand = (command: unknown, cwd: string | null): void => {
     const text =
       typeof command === 'string'
         ? command
@@ -684,7 +792,31 @@ function pathsFromRecord(rec: unknown): CandidatePath[] {
           ? command.filter((c): c is string => typeof c === 'string').join(' ')
           : null;
     if (text === null || text.length === 0) return;
-    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push({ raw: m[0], fromShell: true });
+    const cds = shellCdBases(text, cwd);
+    const exact = cds.exact !== false;
+    // Every readable base at once, for the case where the command could not be read
+    // positionally. Kept outside the token loop: it does not vary by offset.
+    const conservative = cds.length > 0 || cwd !== null ? [...(cwd !== null ? [cwd] : []), ...cds.map((e) => e.base)] : [];
+    for (const m of text.matchAll(SHELL_PATH_TOKEN)) {
+      let bases: readonly string[];
+      if (!exact) {
+        // FAIL CLOSED. A `cd` we could not read means no offset in this command has a
+        // trustworthy answer, so the token is measured against every directory it could
+        // plausibly have been relative to and a single contradiction drops it. Measured
+        // cost: 851 of 73,406 commands, and it is the honest answer for all of them.
+        bases = conservative;
+      } else {
+        // The directory in effect AT THIS OFFSET — the last `cd` that precedes the token,
+        // or the tool call's own directory when none does.
+        let base: string | null = cwd;
+        for (const e of cds) {
+          if (e.at > (m.index ?? 0)) break;
+          base = e.base;
+        }
+        bases = base === null ? [] : [base];
+      }
+      out.push({ raw: m[0], fromShell: true, bases });
+    }
   };
 
   const pushFromInput = (input: unknown): void => {
@@ -696,6 +828,11 @@ function pathsFromRecord(rec: unknown): CandidatePath[] {
       cwd?: unknown;
       command?: unknown;
     };
+    // The directory THIS tool call ran in. An explicit `cwd` on the input wins over the
+    // record's stamp, because it is the more specific statement of the same fact.
+    const blockCwd =
+      typeof i.cwd === 'string' && i.cwd.trim().length > 0 ? i.cwd.trim() : recordCwd;
+    const inputBases = blockCwd === null ? [] : [blockCwd];
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
       // TRIM THE TAIL ONLY. This used to push `v.trim()`, and trimming the HEAD is an
       // escape: `trim()` erases leading whitespace, the FIRST SEGMENT is a head, and a
@@ -710,9 +847,10 @@ function pathsFromRecord(rec: unknown): CandidatePath[] {
       // trailing newline is common enough in a tool-input field that refusing it would
       // cost real paths. A LEADING control character is not trimmed here and is refused
       // outright by `CONTROL_CHARACTER` below.
-      if (typeof v === 'string' && v.trim().length > 0) out.push({ raw: v.trimEnd(), fromShell: false });
+      if (typeof v === 'string' && v.trim().length > 0)
+        out.push({ raw: v.trimEnd(), fromShell: false, bases: inputBases });
     }
-    pushFromCommand(i.command);
+    pushFromCommand(i.command, blockCwd);
   };
 
   // Claude Code: tool_use blocks inside an assistant message's content array.
@@ -802,14 +940,19 @@ export function sessionPaths(
   );
   // Only fall back to the transcript's own cwd when the caller supplied NOTHING
   // usable — an empty list is "I looked and found no roots", not "use the default".
-  const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? '']);
+  // The transcript's own stated cwd serves TWO purposes, and they are not the same one.
+  // As a ROOT it is a last-resort fallback, used only when the caller supplied nothing.
+  // As a BASE it is always relevant: it is what a relative path in a Codex record is
+  // relative to, and a record that carries no cwd of its own inherits it.
+  const sessionCwd = codexSessionCwd(records);
+  const roots = supplied.length > 0 ? supplied : normalizeRoots([sessionCwd ?? '']);
   const exists = options?.exists;
   const escapesRepo = options?.escapesRepo;
 
   const seen = new Set<string>();
   let shellPathCount = 0;
   for (const rec of records) {
-    for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
+    for (const { raw: p, fromShell, bases } of pathsFromRecord(rec, sessionCwd)) {
       // FAIL CLOSED. A shell token is a guess until something confirms it names a
       // real file in this repo. A consumer that hasn't opted in by supplying
       // `exists` gets the pre-scan behaviour rather than unverified guesses — the
@@ -892,7 +1035,13 @@ export function sessionPaths(
       // question — what we would EMIT — and getting there cost us the `..` segments
       // that are the evidence. `dlink/../src/a.ts` is already spelled `src/a.ts` by
       // this line. The predicate needs what arrived, so that is what it gets.
-      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p) }, roots)) continue;
+      //
+      // IT IS ALSO GIVEN THE DIRECTORIES THE TOOL CALL NAMED. Everything above measures a
+      // relative spelling against directories this module INFERRED — the session's cwd and
+      // the roots — and the kernel uses the working directory of the tool call that
+      // produced it. `bases` is that directory, carried down from the record rather than
+      // guessed at after the fact; see `PathCandidate.bases`.
+      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p), bases }, roots)) continue;
       // Cap in ENCOUNTER order (see MAX_SHELL_PATHS) — never after the sort.
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;

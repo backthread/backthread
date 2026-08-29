@@ -5,6 +5,51 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.26.0
+
+**A relative path is now measured from the directory the command actually ran in.** This
+is the fifth release in this area and the fourth distinct way the same underlying mistake
+has shown up: the fence measuring a *different path* from the one your computer opens.
+The earlier ones were about the spelling of a path. This one is about where you were
+standing when you wrote it.
+
+`src/config.ts` means nothing on its own — it means something different in every
+directory. Your agent runs `cd packages/api && cat src/config.ts`, and the shell reads
+`packages/api/src/config.ts`. The fence, which only knew the directory your *session*
+started in, read it as `src/config.ts` at the top of your repo. Usually that is merely the
+wrong file. When the directory it moved into is a symlink to another repository — or is
+another repository, because the command said `cd ../other-project` — it is that project's
+file, recorded under your project's name.
+
+Two things were on hand the whole time and were not being read: your agent stamps the
+working directory on every record it writes, and a `cd` inside the command is right there
+in the text being scanned. Both now travel with the path they belong to, so the fence and
+the filesystem start from the same place. A `cd` the fence cannot read — `cd "$TARGET"` —
+makes it *more* careful rather than less: the path is measured against every directory it
+could have meant, and one disagreement is enough to drop it. A `cd` to a directory that
+does not exist moves nothing, because in a real shell it does not move anything either.
+
+Measured against real repositories and real symlinks, each spelling first confirmed by
+actually reading the other repository's bytes: **24 newly-invented spellings, all
+refused** — a `cd` before a pipe, after a `;`, on its own line, quoted, chained, absolute,
+through a link, behind an unreadable directory, and a record already sitting in a
+subdirectory with no `cd` at all. **The same probe leaks all 24 on 0.25.0.**
+
+**What this costs, stated plainly.** A relative path is now dropped when the directory it
+was written in resolves outside your repository. Measured over 73,406 real shell commands:
+**1.2% of the relative paths 0.25.0 records are no longer recorded**, and about seven in
+ten of those are the misattribution being corrected — they resolve into a different
+repository, or into no repository at all. The rest are commands whose `cd` could not be
+read, which are dropped deliberately rather than guessed at.
+
+**What is still open.** A path that stays *inside* your repository but was written from a
+subdirectory is still recorded under the name it was spelled with, not the name your
+repository knows it by — `cd packages/api && cat src/config.ts` records `src/config.ts`,
+not `packages/api/src/config.ts`. Nothing belonging to another repository escapes through
+this, and the existing existence check drops most of it, but it is a real gap and it is
+not fixed here. Files you **deleted** during a session still lose their paths, unchanged
+from previous releases and for the same reason.
+
 ## 0.25.0
 
 **The `..` hole 0.24.0 told you about is closed.** That release said, in as many words,

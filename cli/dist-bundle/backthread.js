@@ -8290,22 +8290,66 @@ var SHELL_PATH_TOKEN = new RegExp(
   `(?<![\\w.@~$+/\\\\-])/?[\\w.@~+-]+(?:/[\\w.@~+-]+)+\\.(?:${EXT_ALTERNATION})(?![\\w.@~+/\\\\-])`,
   "g"
 );
-function pathsFromRecord(rec) {
+var SHELL_CD = /(?:^|[;&|(\n]|&&|\|\|)\s*cd\s+(?!-\s|-$)(?:"([^"]*)"|'([^']*)'|([^\s;&|)]+))/g;
+var UNREADABLE_CD_TARGET = /[$`~*?[\]{}]/;
+function composeBase(current, target) {
+  if (target.startsWith("/")) return target;
+  if (current === null || current.length === 0) return target;
+  return `${current.replace(/\/+$/, "")}/${target}`;
+}
+function shellCdBases(text, cwd) {
+  const events = [];
+  let exact = true;
+  let chain = cwd;
+  for (const m of text.matchAll(SHELL_CD)) {
+    const target = m[1] ?? m[2] ?? m[3] ?? "";
+    if (target.length === 0 || UNREADABLE_CD_TARGET.test(target)) {
+      exact = false;
+      continue;
+    }
+    chain = composeBase(chain, target);
+    events.push({ at: (m.index ?? 0) + m[0].length, base: chain });
+  }
+  const out = events;
+  out.exact = exact;
+  return out;
+}
+function pathsFromRecord(rec, sessionCwd) {
   if (!rec || typeof rec !== "object") return [];
   const out = [];
   const r = rec;
-  const pushFromCommand = (command) => {
+  const recordCwd = typeof r.cwd === "string" && r.cwd.trim().length > 0 ? r.cwd.trim() : sessionCwd;
+  const pushFromCommand = (command, cwd) => {
     const text = typeof command === "string" ? command : Array.isArray(command) ? command.filter((c) => typeof c === "string").join(" ") : null;
     if (text === null || text.length === 0) return;
-    for (const m of text.matchAll(SHELL_PATH_TOKEN)) out.push({ raw: m[0], fromShell: true });
+    const cds = shellCdBases(text, cwd);
+    const exact = cds.exact !== false;
+    const conservative = cds.length > 0 || cwd !== null ? [...cwd !== null ? [cwd] : [], ...cds.map((e) => e.base)] : [];
+    for (const m of text.matchAll(SHELL_PATH_TOKEN)) {
+      let bases;
+      if (!exact) {
+        bases = conservative;
+      } else {
+        let base = cwd;
+        for (const e of cds) {
+          if (e.at > (m.index ?? 0)) break;
+          base = e.base;
+        }
+        bases = base === null ? [] : [base];
+      }
+      out.push({ raw: m[0], fromShell: true, bases });
+    }
   };
   const pushFromInput = (input) => {
     if (!input || typeof input !== "object") return;
     const i = input;
+    const blockCwd = typeof i.cwd === "string" && i.cwd.trim().length > 0 ? i.cwd.trim() : recordCwd;
+    const inputBases = blockCwd === null ? [] : [blockCwd];
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
-      if (typeof v === "string" && v.trim().length > 0) out.push({ raw: v.trimEnd(), fromShell: false });
+      if (typeof v === "string" && v.trim().length > 0)
+        out.push({ raw: v.trimEnd(), fromShell: false, bases: inputBases });
     }
-    pushFromCommand(i.command);
+    pushFromCommand(i.command, blockCwd);
   };
   const content = r.message?.content;
   if (Array.isArray(content)) {
@@ -8342,13 +8386,14 @@ function sessionPaths(records, repoRoot, options) {
   const supplied = normalizeRoots(
     typeof repoRoot === "string" ? [repoRoot] : Array.isArray(repoRoot) ? repoRoot : []
   );
-  const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? ""]);
+  const sessionCwd = codexSessionCwd(records);
+  const roots = supplied.length > 0 ? supplied : normalizeRoots([sessionCwd ?? ""]);
   const exists = options?.exists;
   const escapesRepo = options?.escapesRepo;
   const seen = /* @__PURE__ */ new Set();
   let shellPathCount = 0;
   for (const rec of records) {
-    for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
+    for (const { raw: p, fromShell, bases } of pathsFromRecord(rec, sessionCwd)) {
       if (fromShell && exists === void 0) continue;
       if (CONTROL_CHARACTER.test(p)) continue;
       if (ENCODED_PATH_SEPARATOR.test(p)) continue;
@@ -8368,7 +8413,7 @@ function sessionPaths(records, repoRoot, options) {
         if (norm.split("/").some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
         if (!exists(norm)) continue;
       }
-      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p) }, roots)) continue;
+      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p), bases }, roots)) continue;
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;
         shellPathCount += 1;
@@ -10393,6 +10438,29 @@ async function runCapture(input, deps = {}) {
       basesCache.set(key, out2);
       return out2;
     };
+    const allSegments = (raw) => raw.split("/").filter((s) => s !== "" && s !== ".");
+    const declaredCache = /* @__PURE__ */ new Map();
+    const declaredBases = (declared, roots, realRoots) => {
+      if (declared.length === 0) return [];
+      const key = `${JSON.stringify(declared)}\0${JSON.stringify(roots)}`;
+      const hit = declaredCache.get(key);
+      if (hit !== void 0) return hit;
+      const out2 = [];
+      for (const spelling of declared) {
+        const segments = allSegments(spelling);
+        if (spelling.startsWith("/")) {
+          const dest = resolveWalk("/", segments);
+          if (dest !== null && !out2.includes(dest)) out2.push(dest);
+          continue;
+        }
+        for (const from of relativeBases(roots, realRoots)) {
+          const dest = resolveWalk(from, segments);
+          if (dest !== null && !out2.includes(dest)) out2.push(dest);
+        }
+      }
+      declaredCache.set(key, out2);
+      return out2;
+    };
     const escapesCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -10435,8 +10503,8 @@ async function runCapture(input, deps = {}) {
       //      unable to answer at the point the fence asks.
       // `resolveWalk` closes both by following the raw spelling segment by segment and
       // failing closed on any segment that will not resolve.
-      escapesRepo: ({ raw, absolute }, roots) => {
-        const key = raw;
+      escapesRepo: ({ raw, absolute, bases }, roots) => {
+        const key = bases.length === 0 ? raw : `${raw}\0${bases.join("\0")}`;
         const hit = escapesCache.get(key);
         if (hit !== void 0) return hit;
         const realRoots = realRootsOf(roots);
@@ -10447,7 +10515,10 @@ async function runCapture(input, deps = {}) {
             return dest === null || !inside(dest, realRoots);
           }
           const segments = walkableSegments(raw);
-          for (const base of relativeBases(roots, realRoots)) {
+          for (const base of [
+            ...declaredBases(bases, roots, realRoots),
+            ...relativeBases(roots, realRoots)
+          ]) {
             const dest = resolveWalk(base, segments);
             if (dest === null || !inside(dest, realRoots)) return true;
           }

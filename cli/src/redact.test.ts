@@ -761,22 +761,157 @@ test('the escape check receives the RAW spelling, not the one that would be emit
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: './dlink/../src/b.ts' } }] } },
     { type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'cat dlink/../src/c.ts' } }] } },
   ];
-  const seen: { raw: string; absolute: boolean }[] = [];
+  const seen: { raw: string; absolute: boolean; bases: readonly string[] }[] = [];
   const out = sessionPaths(records, '/work/app', {
     exists: () => true,
     escapesRepo: (candidate) => {
-      seen.push({ ...candidate });
+      seen.push({ ...candidate, bases: [...candidate.bases] });
       return false;
     },
   });
+  // `bases` is empty here because none of these records names a working directory. That
+  // is the pre-existing behaviour and it has to stay reachable: a transcript that states
+  // no cwd must leave the caller measuring against exactly what it measured before.
   assert.deepEqual(seen, [
-    { raw: '/work/app/dlink/../src/a.ts', absolute: true },
-    { raw: './dlink/../src/b.ts', absolute: false },
-    { raw: 'dlink/../src/c.ts', absolute: false },
+    { raw: '/work/app/dlink/../src/a.ts', absolute: true, bases: [] },
+    { raw: './dlink/../src/b.ts', absolute: false, bases: [] },
+    { raw: 'dlink/../src/c.ts', absolute: false, bases: [] },
   ]);
   // …while what is EMITTED is still the normalized spelling. Both are true at once, and
   // that is exactly the separation the previous signature did not have.
   assert.deepEqual(out, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+});
+
+// THE DIRECTORY THE TOOL CALL NAMED must cross the boundary with the candidate. Every
+// escape in this family is the fence measuring a different path from the one the kernel
+// opens, and a relative spelling measured from the wrong directory IS a different path.
+// These pin what arrives, because the caller cannot recover it later.
+const basesOf = (records: unknown[], roots?: string | string[]): Record<string, string[]> => {
+  const seen: Record<string, string[]> = {};
+  sessionPaths(records, roots ?? '/work/app', {
+    exists: () => true,
+    escapesRepo: ({ raw, bases }) => {
+      seen[raw] = [...bases];
+      return false;
+    },
+  });
+  return seen;
+};
+
+test('a candidate carries the working directory its own record stamped', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app/sub',
+      message: { content: [{ type: 'tool_use', input: { command: 'cat pkg/a.ts' } }] },
+    },
+    {
+      type: 'assistant',
+      cwd: '/work/app/other',
+      message: { content: [{ type: 'tool_use', input: { file_path: 'pkg/b.ts' } }] },
+    },
+  ]);
+  // The SAME spelling from two records must not collapse onto one answer — which is why
+  // the caller's memo is keyed on the bases too.
+  assert.deepEqual(seen['pkg/a.ts'], ['/work/app/sub']);
+  assert.deepEqual(seen['pkg/b.ts'], ['/work/app/other']);
+});
+
+test('a `cd` inside the scanned command moves the base, positionally', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [
+          { type: 'tool_use', input: { command: 'cat before/a.ts && cd sub && cat after/b.ts' } },
+        ],
+      },
+    },
+  ]);
+  // A token BEFORE the `cd` is relative to where the shell still was. Measuring both
+  // against the union would drop the first one for a move that had not happened yet.
+  assert.deepEqual(seen['before/a.ts'], ['/work/app']);
+  assert.deepEqual(seen['after/b.ts'], ['/work/app/sub']);
+});
+
+test('an absolute `cd` replaces the base; relative `cd`s chain', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [
+          { type: 'tool_use', input: { command: 'cd a && cd b && cat one/x.ts' } },
+          { type: 'tool_use', input: { command: 'cd /elsewhere && cat two/y.ts' } },
+        ],
+      },
+    },
+  ]);
+  assert.deepEqual(seen['one/x.ts'], ['/work/app/a/b']);
+  assert.deepEqual(seen['two/y.ts'], ['/elsewhere']);
+});
+
+test('an unreadable `cd` target makes the command fail CLOSED, not open', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [
+          { type: 'tool_use', input: { command: 'cd "$TARGET" && cd known && cat z/x.ts' } },
+        ],
+      },
+    },
+  ]);
+  // `cd "$TARGET"` cannot be read, so NO offset in this command has a trustworthy answer.
+  // The token is handed every base it could plausibly be relative to, and the caller's
+  // rule — one contradiction drops it — does the rest. The wrong outcome here would be a
+  // single confident base; that is how a fence ends up measuring the wrong path.
+  assert.deepEqual(seen['z/x.ts'], ['/work/app', '/work/app/known']);
+});
+
+test('the word `cd` that is not a command does not move the base', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [
+          // A flag value, a filename and prose inside a heredoc all contain `cd `.
+          { type: 'tool_use', input: { command: 'grep --include=cd notes/cd other/a.ts' } },
+        ],
+      },
+    },
+  ]);
+  assert.deepEqual(seen['other/a.ts'], ['/work/app']);
+});
+
+test('an input `cwd` field outranks the record stamp for its own block', () => {
+  const seen = basesOf([
+    {
+      type: 'assistant',
+      cwd: '/work/app',
+      message: {
+        content: [{ type: 'tool_use', input: { cwd: '/work/app/inner', command: 'cat q/a.ts' } }],
+      },
+    },
+  ]);
+  assert.deepEqual(seen['q/a.ts'], ['/work/app/inner']);
+});
+
+test('a Codex session cwd becomes a base, not only a root fallback', () => {
+  const seen = basesOf(
+    [
+      { type: 'session_meta', payload: { cwd: '/work/app' } },
+      {
+        type: 'response_item',
+        payload: { type: 'function_call', arguments: JSON.stringify({ command: ['bash', '-lc', 'cat deep/a.ts'] }) },
+      },
+    ],
+    '/work/app',
+  );
+  assert.deepEqual(seen['deep/a.ts'], ['/work/app']);
 });
 
 // A URI scheme is not a path this module can measure, and one of them was leaving as a
