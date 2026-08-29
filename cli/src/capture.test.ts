@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseHookInput, runCapture, type CaptureDeps, type HookInput } from './capture.js';
 import type { BackthreadConfig } from './config.js';
+import { runDoctor } from './doctor.js';
 
 // --- helpers -----------------------------------------------------------------
 
@@ -498,6 +499,77 @@ test('END TO END with real symlinks: a link out of the checkout cannot carry ano
     assert.doesNotMatch(wire, /vendor/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// --- what capture has to say, and whether anyone can hear it -----------------
+//
+// The shipped SessionEnd/Stop hook re-spawns its worker with `stdio: 'ignore'`, so a
+// line capture writes to stderr is not a quiet channel — it is no channel. These pin
+// the OTHER end: that the warning root resolution produces travels all the way to the
+// surface a person actually reads, without either test knowing how it got there.
+
+test('a warning from root resolution reaches BOTH channels, not only the dead one', async () => {
+  const logged: string[] = [];
+  const recorded: string[] = [];
+  const { fetch: fetchImpl } = stubFetch({});
+  await runCapture(
+    HOOK,
+    deps({
+      fetchImpl,
+      log: (m) => logged.push(m),
+      recordNoticeImpl: (m) => recorded.push(m),
+      resolveRepoRootsImpl: (cwd, _run, warn) => {
+        warn?.('backthread: 6 worktrees were left out of this capture.');
+        return [cwd];
+      },
+    }),
+  );
+  // stderr, for `backthread capture` run by hand with a terminal attached…
+  assert.ok(
+    logged.includes('backthread: 6 worktrees were left out of this capture.'),
+    `not on stderr: ${JSON.stringify(logged)}`,
+  );
+  // …and the file, which is the only one of the two the shipped hook can use.
+  assert.deepEqual(recorded, ['backthread: 6 worktrees were left out of this capture.']);
+});
+
+// END TO END across the two modules, with a real config directory on disk and no
+// knowledge on either side of how the other works. A guard that stopped at "capture
+// called the recorder" would sit one layer above the break: the question is whether
+// the sentence reaches the report somebody reads.
+test('END TO END: what a detached capture leaves behind is what `backthread doctor` shows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bt-notice-e2e-'));
+  try {
+    const env = { BACKTHREAD_CONFIG_DIR: join(dir, 'cfg') } as NodeJS.ProcessEnv;
+    const message =
+      'backthread: this repo has 70 linked worktrees and only the first 64 were checked, so ' +
+      'file paths in the other 6 were left out of this capture.';
+    const { fetch: fetchImpl } = stubFetch({});
+    const base = deps({
+      fetchImpl,
+      env,
+      // The detached worker's stdio is discarded; model that by throwing the log away.
+      log: () => {},
+      resolveRepoRootsImpl: (cwd, _run, warn) => {
+        warn?.(message);
+        return [cwd];
+      },
+    });
+    // The real recorder — this is the wiring under test.
+    delete base.recordNoticeImpl;
+    await runCapture(HOOK, base);
+
+    const report = await runDoctor({ env, home: dir, cwd: dir, fetchImpl, runNpm: async () => ({ ok: false, stdout: '', stderr: '' }) });
+    assert.match(report.text, /this repo has 70 linked worktrees/);
+    assert.match(report.text, /other 6 were left out/);
+    // A partial capture is not a broken install: it must never drive the exit code.
+    assert.equal(report.exitCode, 1); // (the fail is the absent auth config, not this)
+    const capture = report.checks.find((c) => c.key === 'capture');
+    assert.equal(capture?.status, 'warn');
+    assert.notEqual(capture?.critical, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

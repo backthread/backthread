@@ -496,8 +496,19 @@ test('resolveRepoRoots caps how many linked worktrees one call will probe', () =
   // And it SAYS SO. Past the cap the remaining worktrees' paths are dropped as foreign
   // again — this function's own bug at scale — so the truncation must not be silent.
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /64 linked worktrees/);
-  assert.match(warnings[0], /git worktree prune/);
+  // It has to report THIS MACHINE's numbers. "More than 64" is a fact about a constant
+  // in our source; 500 listed, 64 checked, 436 left out is a fact about the reader's
+  // repo, and it is the only version of the sentence they can do anything with.
+  assert.match(warnings[0], /500 linked worktrees/);
+  assert.match(warnings[0], /first 64 were checked/);
+  assert.match(warnings[0], /other 436/);
+  // AND IT PRESCRIBES NO COMMAND. It used to end by telling the reader to run
+  // `git worktree prune`, which drops stale registrations: it does not show a single
+  // skipped path, does not recover one, and on a machine whose worktrees are all live
+  // does nothing whatsoever. Following it produced no visible change and taught
+  // nothing, which is worse than being told only what happened.
+  assert.doesNotMatch(warnings[0], /prune/);
+  assert.doesNotMatch(warnings[0], /\bRun\b/);
 });
 
 test('resolveRepoRoots stays quiet when it is under the cap', () => {

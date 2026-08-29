@@ -62,6 +62,7 @@ import { versionHeaders } from './version.js';
 import { maybeNudge, maybeUnconnectedNudge, parseRepoStatus, parseNextStep } from './connectNudge.js';
 import { maybeShowTrustGate } from './firstRun.js';
 import { maybeFirstCaptureConfirm } from './firstCapture.js';
+import { recordCaptureNotice } from './captureNotice.js';
 
 /**
  * The Claude Code hook payload (SessionEnd / Stop). Claude Code passes this as a
@@ -152,6 +153,13 @@ export interface CaptureDeps {
    * dropped as foreign.
    */
   resolveRepoRootsImpl?: (cwd: string, run?: GitRunner, warn?: (message: string) => void) => string[];
+  /**
+   * Test seam: leave a notice where `backthread doctor` will find it. Defaults to
+   * `recordCaptureNotice`. This is how anything capture has to say reaches a person at
+   * all in the shipped delivery mode — the hook's worker is spawned with its stdio
+   * discarded, so the log below goes nowhere.
+   */
+  recordNoticeImpl?: (message: string) => void;
   /**
    * ARP-693 — incremental capture watermark: infer ONLY the redacted turns at/after
    * this index, skipping turns already captured on an earlier `stop` of the same
@@ -383,7 +391,18 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // where the repo root already is. Memoised: one session asks thousands of times
     // and a session's working tree does not change under us mid-capture. Bounded by
     // the caps inside sessionPaths, so the map cannot grow without limit either.
-    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, log) : [];
+    // Where a warning from root resolution goes. BOTH channels, because there are two
+    // delivery modes and each one's channel is dead in the other. `backthread capture`
+    // run by hand has a terminal attached and stderr is the right place; the shipped
+    // SessionEnd/Stop hook re-spawns its worker with `stdio: 'ignore'`, so the same
+    // line reaches nobody. The file is what `backthread doctor` reads, which is where
+    // somebody goes when they notice capture doing less than they expected.
+    const doRecordNotice = deps.recordNoticeImpl ?? ((m: string) => void recordCaptureNotice(m, env));
+    const warnAboutRoots = (message: string) => {
+      log(message);
+      doRecordNotice(message);
+    };
+    const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, warnAboutRoots) : [];
     const existsCache = new Map<string, boolean>();
     // The roots as the FILESYSTEM spells them, which is what a resolved path has to be
     // compared against. `repoRoots` deliberately carries logical spellings too (a

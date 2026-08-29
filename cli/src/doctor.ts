@@ -13,6 +13,9 @@
 //   • Repo         — a connected repo slug (owner/name) resolves                      [warn]
 //   • Capture hook — the SessionEnd/Stop hook is wired for a host agent, and NOT      [warn]
 //                    only project-scoped (the ARP-680 worktree-blind trap)
+//   • Capture      — anything the last capture had to say for itself. It runs         [warn]
+//                    detached with its stdio discarded, so a file is the only way
+//                    it can tell anyone anything, and this is where that is read
 //   • Connectivity — the worker + Functions origins are reachable (honors overrides)  [warn]
 //   • Version      — installed vs latest on npm (+ the redact version)                [info]
 //
@@ -28,6 +31,7 @@ import { readConfig, configPath, configDir, type BackthreadConfig } from './conf
 import { cliVersion, redactVersion } from './version.js';
 import { workerBaseUrl, functionsBaseUrl } from './urls.js';
 import { runNpm as realRunNpm, type NpmRun } from './npm.js';
+import { readCaptureNotice, type CaptureNotice } from './captureNotice.js';
 
 export type CheckStatus = 'ok' | 'fail' | 'warn' | 'info';
 
@@ -56,6 +60,8 @@ export interface DoctorDeps {
   statImpl?: (path: string) => Promise<{ mode: number }>;
   /** Connectivity per-request timeout (ms). Default 5000. */
   connectTimeoutMs?: number;
+  /** Test seam: read the notice the last capture left behind. Defaults to `readCaptureNotice`. */
+  readCaptureNoticeImpl?: (env: NodeJS.ProcessEnv) => CaptureNotice | null;
 }
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
@@ -261,6 +267,29 @@ async function versionCheck(deps: DoctorDeps): Promise<Check> {
   return { key: 'version', label: 'Version', status: 'info', detail: `${base} — update available (${latest}): \`backthread update\`` };
 }
 
+/**
+ * Anything the last capture had to say for itself.
+ *
+ * Capture ships as a DETACHED hook whose stdout and stderr are discarded, so it has no
+ * way to tell anyone anything as it runs. What it leaves behind instead is a notice
+ * file, and this is the line that reads it — the reason doctor is where it surfaces is
+ * that doctor is where somebody looks when they notice Backthread doing less than they
+ * expected, which is exactly the situation a notice describes.
+ *
+ * A WARN, never a fail: everything a notice can report is partial work, never broken
+ * setup, and the exit code is reserved for "this is not set up at all".
+ */
+function captureNoticeCheck(deps: DoctorDeps, env: NodeJS.ProcessEnv): Check {
+  const read = deps.readCaptureNoticeImpl ?? readCaptureNotice;
+  const notice = read(env);
+  if (!notice) {
+    return { key: 'capture', label: 'Capture', status: 'ok', detail: 'nothing left unsaid by the last capture' };
+  }
+  const when = new Date(notice.at);
+  const stamp = Number.isFinite(when.getTime()) ? when.toISOString().slice(0, 10) : notice.at;
+  return { key: 'capture', label: 'Capture', status: 'warn', detail: `${notice.message} (${stamp})` };
+}
+
 // --- orchestration + formatting ----------------------------------------------
 
 /** Run every check. Order is stable (matches the report). Never throws. */
@@ -276,7 +305,15 @@ export async function collectChecks(deps: DoctorDeps = {}): Promise<Check[]> {
     connectivityCheck(deps, env),
     versionCheck(deps),
   ]);
-  return [authCheck(loaded, env), perms, repoCheck(loaded), hook, connectivity, version];
+  return [
+    authCheck(loaded, env),
+    perms,
+    repoCheck(loaded),
+    hook,
+    captureNoticeCheck(deps, env),
+    connectivity,
+    version,
+  ];
 }
 
 const GLYPH: Record<CheckStatus, string> = { ok: '✓', fail: '✗', warn: '⚠', info: 'ℹ' };
