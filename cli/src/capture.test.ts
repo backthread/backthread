@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -841,6 +841,11 @@ test('END TO END with real symlinks: no re-spelling of an escape reaches the wir
     // skipping it leaves the walk sitting inside the repo, and the path is kept.
     symlinkSync(app, join(app, 'selfroot'), 'dir');
     symlinkSync(lane, join(app, 'lanelink'), 'dir');
+    // A link whose NAME contains a backslash. On POSIX `\` is an ordinary filename
+    // character, so this is ONE segment to the kernel and it lands in the other repo in
+    // a single hop. A fence that reads `\` as a separator sees two segments that do not
+    // exist, calls that empty ground inside the repo, and keeps the path.
+    symlinkSync(foreign, join(app, 'x\\y'), 'dir');
     mkdirSync(blocked, { recursive: true });
     symlinkSync(foreign, join(blocked, 'vendor'), 'dir');
 
@@ -868,6 +873,9 @@ test('END TO END with real symlinks: no re-spelling of an escape reaches the wir
       'ghost/src/secret.ts',
       app + '/selfroot/../other-repo/src/x5.ts', // `..` climbs out of an in-repo link
       'lanelink/../other-repo/src/x6.ts', // …and the same, via a sibling worktree
+      'x\\y/src/secret.ts', // a link genuinely NAMED `x\y` — one segment to the kernel
+      app + '/x\\y/src/secret.ts', // …and the absolute spelling of it
+      'x\\y/src/../src/secret.ts', // …and with a `..` for good measure
     ];
     // …and the properties that must survive it.
     const keep = [
@@ -912,7 +920,13 @@ test('END TO END with real symlinks: no re-spelling of an escape reaches the wir
     // Not one machine-absolute path, from any of the 21 spellings.
     for (const p of filePaths) assert.ok(!p.startsWith('/') && !p.includes(tmp), p);
     const wire = JSON.stringify(sentBody);
-    assert.doesNotMatch(wire, /other-repo|plaindir|deepdir|secret|vendor|ghost|loop|%2F|selfroot|lanelink/i);
+    assert.doesNotMatch(
+      wire,
+      /other-repo|plaindir|deepdir|secret|vendor|ghost|loop|%2F|selfroot|lanelink|x\/y|x\\\\y/i,
+    );
+    // The `cat`-level truth the backslash rows rest on: that spelling really does open
+    // the other repository's file, in one hop, exactly as the kernel reads it.
+    assert.match(readFileSync(app + '/x\\y/src/secret.ts', 'utf8'), /THEIRS/);
   } finally {
     try {
       chmodSync(blocked, 0o755);
@@ -971,6 +985,55 @@ test('a segment that will not resolve fails closed unless the filesystem says it
   // "Something is here and will not say where it goes" — dangling link, EACCES, ELOOP.
   // The path is refused, and refusing it is the only safe reading.
   assert.deepEqual(await run(() => false), []);
+});
+
+// A ROOT THAT NO LONGER RESOLVES CANNOT CONFIRM ANYTHING, and the tempting way to
+// handle one is to keep its logical spelling in the set "just in case". That fails open:
+// the resolved paths a candidate walks to are physical, and a logical spelling kept
+// beside them is a string that no physical path can match — except by prefix, at which
+// point a directory that has been deleted, renamed or unmounted starts vouching for
+// paths that resolved somewhere else entirely. The code says so in a comment; this is
+// what makes the comment fail when it stops being true.
+test('a root that does not resolve is dropped from the set rather than kept as a string', async () => {
+  const transcript = [
+    JSON.stringify({ type: 'user', sessionId: 'sess-r', message: { content: 'why?' } }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-29T09:00:00Z',
+      message: {
+        content: [
+          { type: 'text', text: 'Because the reasoning outlives the diff.' },
+          { type: 'tool_use', name: 'Read', input: { file_path: '/gone/src/secret.ts' } },
+          { type: 'tool_use', name: 'Read', input: { file_path: '/real/src/mine.ts' } },
+        ],
+      },
+    }),
+  ].join('\n');
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+    },
+  });
+  await runCapture(
+    { transcript_path: '/tmp/s.jsonl', cwd: '/real', session_id: 'sess-r' },
+    deps({
+      fetchImpl,
+      readFileImpl: async () => transcript,
+      // Two checkouts of one repo. One is still there; the other has been deleted,
+      // renamed or unmounted since git listed it.
+      resolveRepoRootsImpl: () => ['/gone', '/real'],
+      realPathImpl: (p) => (p.startsWith('/gone') ? null : p),
+      // Everything under the dead root reads as an ordinary absence, so the ONLY thing
+      // that can decide this path is what the resolved-root set does with `/gone`. Keep
+      // its logical spelling in that set and `/gone/src` prefix-matches it, the path
+      // reads as inside the repo, and another directory's contents ship under our name.
+      isAbsentImpl: () => true,
+    }),
+  );
+  // The live root's own file survives, so a green here cannot mean "nothing was sent".
+  assert.deepEqual((sentBody as { filePaths?: string[] }).filePaths, ['src/mine.ts']);
 });
 
 // The walk costs a syscall per segment, so its depth is capped — and the cap DROPS the

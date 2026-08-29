@@ -561,11 +561,21 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       }
       return cur;
     };
-    // The segments of a raw spelling, minus the leaf the walk must not follow. A
-    // trailing `..` or `.` is NOT a leaf — it is part of how the directory is named —
-    // so only a plain trailing name is dropped.
+    // The segments of a raw spelling, minus the leaf the walk must not follow. Split on
+    // `/` ONLY, which is what the kernel does and therefore the only split that measures
+    // the path that actually gets opened: a symlink genuinely named `x\y` is one segment
+    // to the filesystem, and treating it as two was a live escape. `sessionPaths` refuses
+    // any candidate carrying a `\` before it reaches here, so there is nothing left to
+    // disagree about.
+    //
+    // A trailing `..` or `.` is NOT a leaf — it is part of how the directory is named —
+    // so only a plain trailing name is dropped. No spelling that survives normalization
+    // ends in `..` today (`dlink/..` reduces to the empty path and is skipped upstream),
+    // so that condition is defence-in-depth for a shape the normalizer currently eats,
+    // and it is deliberately the conservative branch: keeping a segment costs nothing,
+    // dropping the wrong one loses a directory the walk needed to follow.
     const walkableSegments = (raw: string): string[] => {
-      const segs = raw.split(/[\\/]/).filter((s) => s !== '' && s !== '.');
+      const segs = raw.split('/').filter((s) => s !== '' && s !== '.');
       if (segs.length > 0 && segs[segs.length - 1] !== '..') segs.pop();
       return segs;
     };
@@ -626,7 +636,11 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       escapesRepo: ({ raw, absolute }, roots) => {
         // Memoised on the raw spelling, keyed with its kind — an absolute and a relative
         // spelling are different questions and must never share an answer.
-        const key = `${absolute ? 'A' : 'R'} ${raw}`;
+        // Memoised on the raw spelling. It needs no other key: `absolute` is a pure
+        // function of `raw` (it IS `raw.startsWith('/')`), so an absolute and a relative
+        // spelling can never collide on one entry, and a kind prefix here would be dead
+        // code dressed as a precaution.
+        const key = raw;
         const hit = escapesCache.get(key);
         if (hit !== undefined) return hit;
         const realRoots = realRootsOf(roots);

@@ -37,12 +37,31 @@ a loop, an error nobody has thought of — stops it and the path is dropped. Tha
 keeps a file you **deleted**: it is genuinely absent, which is an answer, not a refusal
 to answer.
 
+**A file whose name contains a backslash was walking out too, and that one is older than
+`..`.** This code used to treat `\` as a second path separator, so that a Windows
+spelling could be tidied up like a POSIX one. On macOS and Linux it is not a separator —
+it is an ordinary character in a filename. So a symlink genuinely *named* `x\y`, pointing
+at another repository, was read here as two directories that do not exist, which looked
+like empty ground inside your repo, while your computer followed it into the other
+repository in a single hop. Same failure as the `..` one in a different costume: we were
+checking a different path from the one being opened. There is no reading of `\` that is
+right on both platforms and no way for this code to know which one produced the string,
+so a path containing one is now refused outright, and `/` is the only separator anywhere
+past that point. If you are on Windows, note that absolute Windows paths (`C:\…`) were
+already being dropped; this now drops the relative `src\thing.ts` spelling as well.
+
 **`file://` and friends are refused, and with them the one machine-absolute path this
 code was emitting.** A `file://…` spelling is not an absolute path as far as this code is
 concerned, so it fell through to the relative branch and came out as `file:/Users/you/…` —
 a path from your machine, out of a module that promises never to emit one. Percent-escaped
 separators (`vendor%2Fsrc/…`) go the same way: that is two different paths depending on who
 unescapes it, so we would be checking one and your computer would be opening the other.
+
+**Paths containing any control character are refused, not just NUL.** NUL was already
+refused, because no filesystem can name such a file. The rest — a newline, a tab — are
+technically legal in a filename, and a transcript could hand us one; a "path" with a
+newline in it is a thing that renders as two lines everywhere it is later shown. They
+come only from a malformed or hostile tool input.
 
 **One thing got *less* strict, and it is a recovery, not a loosening.** 0.24.0 dropped a
 path as soon as any one of your checkouts said that name leaves the repo — which also

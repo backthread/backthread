@@ -8207,16 +8207,16 @@ function isAbsolute(p) {
 }
 var URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 var ENCODED_PATH_SEPARATOR = /%(?:2f|5c|2e|00)/i;
+var CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 function isForeignRelativePath(p) {
   if (p.startsWith("~")) return true;
-  if (p.startsWith("\\")) return true;
   if (URI_SCHEME.test(p)) return true;
-  const stripped = p.replace(/^(?:\.[\\/])+/, "");
-  return /^\.\.(?:[\\/]|$)/.test(stripped);
+  const stripped = p.replace(/^(?:\.\/)+/, "");
+  return /^\.\.(?:\/|$)/.test(stripped);
 }
 function normalizeRepoRelative(rel) {
   const out = [];
-  for (const seg of rel.split(/[\\/]/)) {
+  for (const seg of rel.split("/")) {
     if (seg === "" || seg === ".") continue;
     if (seg === "..") {
       if (out.length === 0) return null;
@@ -8350,8 +8350,9 @@ function sessionPaths(records, repoRoot, options) {
   for (const rec of records) {
     for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
       if (fromShell && exists === void 0) continue;
-      if (p.includes("\0")) continue;
+      if (CONTROL_CHARACTER.test(p)) continue;
       if (ENCODED_PATH_SEPARATOR.test(p)) continue;
+      if (p.includes("\\")) continue;
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
       let norm;
       if (isAbsolute(p)) {
@@ -10365,7 +10366,7 @@ async function runCapture(input, deps = {}) {
       return cur;
     };
     const walkableSegments = (raw) => {
-      const segs = raw.split(/[\\/]/).filter((s) => s !== "" && s !== ".");
+      const segs = raw.split("/").filter((s) => s !== "" && s !== ".");
       if (segs.length > 0 && segs[segs.length - 1] !== "..") segs.pop();
       return segs;
     };
@@ -10420,7 +10421,7 @@ async function runCapture(input, deps = {}) {
       // `resolveWalk` closes both by following the raw spelling segment by segment and
       // failing closed on any segment that will not resolve.
       escapesRepo: ({ raw, absolute }, roots) => {
-        const key = `${absolute ? "A" : "R"}\0${raw}`;
+        const key = raw;
         const hit = escapesCache.get(key);
         if (hit !== void 0) return hit;
         const realRoots = realRootsOf(roots);

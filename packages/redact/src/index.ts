@@ -272,6 +272,20 @@ const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const ENCODED_PATH_SEPARATOR = /%(?:2f|5c|2e|00)/i;
 
 /**
+ * Any C0 control character, NUL included.
+ *
+ * NUL is the one that cannot be a path at all: the syscall layer stops reading at it, so
+ * a string carrying one names nothing on any filesystem this runs on. The rest — a
+ * newline, a tab, an escape — are technically legal in a POSIX filename and are still
+ * refused, because what arrives here is a transcript-supplied string that goes on to be
+ * stored, joined, logged and rendered as a path. A "path" containing a newline is a
+ * thing that renders as two, and nothing downstream is expecting that. It can only come
+ * from a malformed or hostile tool-input field; the shell token class has never been
+ * able to carry one.
+ */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
+/**
  * True iff a NON-POSIX-absolute string can't be confirmed repo-relative and so
  * must be DROPPED rather than kept verbatim. `isAbsolute` only matches POSIX `/`,
  * so without this guard a `~`-home, a `../`-escape, a URI scheme or a Windows-absolute
@@ -289,12 +303,13 @@ const ENCODED_PATH_SEPARATOR = /%(?:2f|5c|2e|00)/i;
  */
 function isForeignRelativePath(p: string): boolean {
   if (p.startsWith('~')) return true; // ~/secret/key.pem, ~root/x
-  if (p.startsWith('\\')) return true; // \server\share, \repo\x.ts (Win/UNC absolute)
   if (URI_SCHEME.test(p)) return true; // file://…, https://…, and C:\repo\x.ts / C:/repo/x.ts
-  // A `..` segment escaping the root, split on either separator so backslash
-  // paths are caught too. Leading `./` runs are stripped first (canonical form).
-  const stripped = p.replace(/^(?:\.[\\/])+/, '');
-  return /^\.\.(?:[\\/]|$)/.test(stripped); // ../../etc/passwd, ..\x, bare ..
+  // A `..` segment escaping the root. `/` is the ONLY separator this module knows —
+  // see the backslash refusal in `sessionPaths`, which is what makes that true, and
+  // which exists because having two answers to "what is a separator" is how a symlink
+  // named `x\y` walked out of the repo. Leading `./` runs are stripped first.
+  const stripped = p.replace(/^(?:\.\/)+/, '');
+  return /^\.\.(?:\/|$)/.test(stripped); // ../../etc/passwd, bare ..
 }
 
 /**
@@ -306,15 +321,20 @@ function isForeignRelativePath(p: string): boolean {
  * `/repo/../etc/passwd` that prefix-relativizes to `../etc/passwd`) would slip
  * through and be emitted verbatim. We never EMIT a path containing `..`: any
  * unresolved/escaping traversal → null (drop). An in-repo redundant segment
- * (`a/b/../c.ts`) collapses to a clean path (`a/c.ts`) and is kept. Splits on
- * EITHER separator (`/` or `\`) so a backslash mid-path traversal
- * (`a\..\..\etc\passwd`) is caught too — matching the sibling guards
- * `isForeignRelativePath` / `relativizeUnder`, which also treat `\` as a sep.
- * Pure string ops, zero deps (no `node:path`) — load-bearing for the bundle.
+ * (`a/b/../c.ts`) collapses to a clean path (`a/c.ts`) and is kept.
+ *
+ * `/` IS THE ONLY SEPARATOR. This used to split on `\` as well, so that a Windows
+ * spelling could be reduced like a POSIX one, and that second answer to "what is a
+ * separator" was a live escape: on POSIX `\` is an ordinary filename character, so a
+ * symlink named `x\y` pointing at another repository was read here as two segments that
+ * do not exist, while the kernel opened it in one hop. A path carrying `\` is refused
+ * outright in `sessionPaths` now — the ambiguity is not resolvable by this module, and
+ * one answer everywhere beats two. Pure string ops, zero deps (no `node:path`) —
+ * load-bearing for the bundle.
  */
 function normalizeRepoRelative(rel: string): string | null {
   const out: string[] = [];
-  for (const seg of rel.split(/[\\/]/)) {
+  for (const seg of rel.split('/')) {
     if (seg === '' || seg === '.') continue; // collapse empty + same-dir segments
     if (seg === '..') {
       if (out.length === 0) return null; // pops above root → escapes → drop
@@ -780,13 +800,30 @@ export function sessionPaths(
       // and it is metadata that goes on to be stored, joined and rendered. Refuse it
       // at the fence, where every candidate passes, rather than asking each consumer
       // to cope with a string that cannot be a path.
-      if (p.includes('\0')) continue;
+      if (CONTROL_CHARACTER.test(p)) continue;
       // A percent-escaped path separator makes the token TWO different paths depending
       // on who decodes it, and every gate below — and the caller's filesystem check
       // above all — would then be measuring a different path from the one that
       // eventually gets opened. Refused here rather than in `isForeignRelativePath`,
       // because it is true of ABSOLUTE spellings too and that function never sees them.
       if (ENCODED_PATH_SEPARATOR.test(p)) continue;
+      // A BACKSLASH, for exactly the same reason, and it was a live leak.
+      //
+      // This module used to treat `\` as a second path separator, so that a Windows
+      // spelling could be normalized like a POSIX one. POSIX does not: there, `\` is an
+      // ordinary character in a filename. So a symlink genuinely NAMED `x\y`, pointing
+      // at another repository, was split by the fence into the segments `x` and `y`,
+      // neither of which exists — the fence found nothing on disk, read that as empty
+      // ground inside the repo, and kept the path. The kernel resolves `x\y` in one hop
+      // into the other repository. Measured: the file really opens, and the path
+      // reached the wire as `x/y/src/secret.ts`, a path this repo does not have.
+      //
+      // That is the same defect as `..` cancelled on the string, in a different
+      // costume: the fence measuring a DIFFERENT PATH from the one that gets opened.
+      // There is no reading of `\` that is right on both platforms, and this module
+      // cannot know which one produced the string — so it refuses the ambiguity
+      // instead of picking, and `\` is not a separator anywhere below this line.
+      if (p.includes('\\')) continue;
       // Length cap BEFORE the fence: a base64 blob is not a path, and there is no
       // reason to normalize 17 kilobytes of it to find that out.
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
