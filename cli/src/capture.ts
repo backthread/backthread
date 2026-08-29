@@ -42,7 +42,7 @@
 // decisions are all that reach ingest-decisions.
 
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { ensureAuth } from './login.js';
@@ -130,6 +130,14 @@ export interface CaptureDeps {
    * path scraped out of a shell command (see below).
    */
   fileExistsImpl?: (absolutePath: string) => boolean;
+  /**
+   * Test seam: follow an ABSOLUTE path through every symlink to the real directory
+   * it names, or null when it names nothing on disk. Defaults to `fs.realpathSync`.
+   * Backs the `escapesRepo` predicate that gives `sessionPaths` its last word on
+   * containment (see below) — string prefixes cannot see through a link, and the
+   * filesystem is the only thing that can.
+   */
+  realPathImpl?: (absolutePath: string) => string | null;
   /** Test seam: the config reader. Defaults to readConfig(). */
   readConfigImpl?: (env: NodeJS.ProcessEnv) => Promise<BackthreadConfig>;
   /** Test seam: the git-remote reader threaded into resolveRepo. */
@@ -245,6 +253,15 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
   const log = deps.log ?? ((m: string) => console.error(m));
   const doReadFile = deps.readFileImpl ?? ((p: string) => readFile(p, 'utf8'));
   const doFileExists = deps.fileExistsImpl ?? existsSync;
+  const doRealPath =
+    deps.realPathImpl ??
+    ((p: string) => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return null; // names nothing on disk — an absence, never a contradiction
+      }
+    });
   const doResolveRepoRoots = deps.resolveRepoRootsImpl ?? resolveRepoRoots;
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth =
@@ -368,6 +385,20 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // the caps inside sessionPaths, so the map cannot grow without limit either.
     const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, log) : [];
     const existsCache = new Map<string, boolean>();
+    // The roots as the FILESYSTEM spells them, which is what a resolved path has to be
+    // compared against. `repoRoots` deliberately carries logical spellings too (a
+    // checkout reached through a symlinked parent is named both ways, or every path a
+    // session under that link reports would be refused), and a logical spelling never
+    // prefix-matches a resolved path. Resolving the roots once collapses both
+    // spellings onto the one directory they name, so the comparison below is
+    // physical-against-physical. A root that no longer resolves is dropped: it cannot
+    // confirm anything, and treating it as a match would confirm everything.
+    const realRoots: string[] = [];
+    for (const root of repoRoots) {
+      const real = doRealPath(root);
+      if (real !== null && !realRoots.includes(real)) realRoots.push(real);
+    }
+    const escapesCache = new Map<string, boolean>();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
         const hit = existsCache.get(rel);
@@ -379,6 +410,39 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         const ok = repoRoots.some((root) => doFileExists(join(root, rel)));
         existsCache.set(rel, ok);
         return ok;
+      },
+      // Containment, decided by the filesystem instead of by string prefix. A repo
+      // can contain a symlink that leaves it — `repoA/vendor` pointing at `repoB` is
+      // an ordinary thing for a checkout to have — and every rule inside sessionPaths
+      // is a string rule, so `<repoA>/vendor/src/secret.ts` reads as in-repo and is
+      // emitted under repoA's name while naming a file that belongs to repoB. That is
+      // another repository's directory structure entering this one's capture.
+      //
+      // We answer by walking the path for real under each root and asking where it
+      // came out. Any root that resolves it INSIDE the repo settles it — a file may
+      // legitimately exist in only one of several worktrees, and one confirmation is
+      // enough. A CONTRADICTION — it resolved, and every resolution landed outside —
+      // is what drops it. Resolving nowhere is neither: a file the session deleted is
+      // gone from disk, and requiring existence here would quietly extend the shell
+      // path rule to path-named tool inputs, which have never carried it, and lose
+      // every removed file's path. Memoised, like `exists`, for the same reason.
+      escapesRepo: (rel) => {
+        const hit = escapesCache.get(rel);
+        if (hit !== undefined) return hit;
+        let resolvedAnywhere = false;
+        let insideSomeRoot = false;
+        for (const root of repoRoots) {
+          const real = doRealPath(join(root, rel));
+          if (real === null) continue; // nothing there under this root
+          resolvedAnywhere = true;
+          if (realRoots.some((r) => real === r || real.startsWith(r + '/'))) {
+            insideSomeRoot = true;
+            break;
+          }
+        }
+        const escapes = resolvedAnywhere && !insideSomeRoot;
+        escapesCache.set(rel, escapes);
+        return escapes;
       },
     });
     // Prefer the transcript's own session id; fall back to the hook's session_id.

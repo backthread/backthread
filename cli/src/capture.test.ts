@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -405,6 +405,97 @@ test('END TO END with real git: a sibling worktree edit reaches the wire, a fore
     assert.doesNotMatch(wire, /other-repo/);
     assert.doesNotMatch(wire, /private\.ts/);
     for (const p of filePaths) assert.ok(!p.startsWith('/') && !p.includes('..'), p);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// THE SYMLINK LEAK, end to end with real git, real symlinks and real files on disk.
+//
+// A checkout can contain a link that leaves it — `vendor -> ../other-repo` is an
+// ordinary thing to find in one — and containment used to be decided by string
+// prefix, which walks straight through a link. So a file belonging to ANOTHER
+// repository, opened through this repo's own directory, was relativized against this
+// repo's root and sent as one of its paths. Nothing in the pure fence can see that;
+// only the filesystem can, and this is the test that it is asked.
+//
+// The same session also edits a real file in a sibling WORKTREE and a real file in
+// the checkout itself. Both must survive: a fix that closed the leak by tightening
+// containment would take those with it and undo the reason the root set exists.
+test('END TO END with real symlinks: a link out of the checkout cannot carry another repo in', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-link-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const lane = join(tmp, 'app-lane');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    runGit(app, 'worktree', 'add', '-q', '-b', 'lane', lane);
+
+    // The foreign repo's file EXISTS — the leak needs a real file behind the link,
+    // and so does the proof that it is gone.
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    writeFileSync(join(foreign, 'src/secret.ts'), 'export const secret = 1;\n');
+    // The link that escapes: `<app>/vendor` IS `<other-repo>`.
+    symlinkSync(foreign, join(app, 'vendor'), 'dir');
+    // Two files that really are this repo's, in two of its checkouts.
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+    mkdirSync(join(lane, 'src'), { recursive: true });
+    writeFileSync(join(lane, 'src/lane.ts'), 'export const lane = 1;\n');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-link', message: { content: 'why hold until merge?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Holding until merge keeps unmerged reasoning out of the record.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/mine.ts') } },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(lane, 'src/lane.ts') } },
+            // Through the link, so it reads as in-repo by every string rule.
+            { type: 'tool_use', name: 'Read', input: { file_path: join(app, 'vendor/src/secret.ts') } },
+            // And again as a shell token, the other route into the output.
+            { type: 'tool_use', name: 'Bash', input: { command: 'cat vendor/src/secret.ts' } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'hold' }] } };
+      },
+    });
+
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    // Real git, real filesystem: the only stubs left are the network and the transcript.
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-link' }, base);
+
+    const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
+    // The checkout's own file and the sibling worktree's file both survive…
+    assert.deepEqual(filePaths, ['src/lane.ts', 'src/mine.ts']);
+    // …and nothing that belongs to the other repository went anywhere.
+    const wire = JSON.stringify(sentBody);
+    assert.doesNotMatch(wire, /other-repo/);
+    assert.doesNotMatch(wire, /secret/);
+    assert.doesNotMatch(wire, /vendor/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

@@ -668,3 +668,75 @@ test('sessionPaths harvests a Bash command from a REAL Claude Code transcript sh
   assert.doesNotMatch(blob, /rg -n/);
   assert.doesNotMatch(blob, /export async function sendDigest/);
 });
+
+// --- the filesystem's word on containment -----------------------------------
+//
+// Every rule inside sessionPaths is a string rule, and a string prefix does not
+// survive a symlink: a checkout containing `vendor -> ../other-repo` puts another
+// repository's files under a path that reads as in-repo by every test above. The
+// module cannot see that — it is pure — so the caller answers, and these fix what
+// the module does with the answer.
+
+test('sessionPaths drops a path the caller says resolves OUTSIDE the repo', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/src/mine.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/vendor/src/secret.ts' } }] } },
+  ];
+  // Both are under the root by string prefix — that is the whole problem.
+  assert.deepEqual(sessionPaths(records, '/work/app'), ['src/mine.ts', 'vendor/src/secret.ts']);
+  assert.deepEqual(sessionPaths(records, '/work/app', { escapesRepo: (rel) => rel.startsWith('vendor/') }), [
+    'src/mine.ts',
+  ]);
+});
+
+test('the escape check also gets the last word on a SHELL-derived path', () => {
+  const records = [
+    {
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', input: { command: 'cat vendor/src/secret.ts src/mine.ts' } }] },
+    },
+  ];
+  const exists = () => true;
+  assert.deepEqual(sessionPaths(records, '/work/app', { exists }), ['src/mine.ts', 'vendor/src/secret.ts']);
+  assert.deepEqual(
+    sessionPaths(records, '/work/app', { exists, escapesRepo: (rel) => rel.startsWith('vendor/') }),
+    ['src/mine.ts'],
+  );
+});
+
+// A path that resolves NOWHERE is not a path that resolves outside. The file a session
+// DELETED is the common case, and it must keep the behaviour it has always had — the
+// caller reports a contradiction, never an absence — so this pins that the module asks
+// and then obeys the answer it gets, rather than treating the question as a filter.
+test('a caller that reports no escape leaves every path exactly as it was', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/src/deleted.ts' } }] } },
+  ];
+  assert.deepEqual(sessionPaths(records, '/work/app', { escapesRepo: () => false }), ['src/deleted.ts']);
+  assert.deepEqual(sessionPaths(records, '/work/app'), ['src/deleted.ts']);
+});
+
+// A dropped path must not spend the shell budget of a path that would have been kept.
+test('an escaping shell path does not consume the shell-path budget', () => {
+  const command = Array.from({ length: 260 }, (_, i) => `vendor/gen/f${i}.ts`).join(' ') + ' src/mine.ts';
+  const records = [{ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command } }] } }];
+  const out = sessionPaths(records, '/work/app', {
+    exists: () => true,
+    escapesRepo: (rel) => rel.startsWith('vendor/'),
+  });
+  assert.deepEqual(out, ['src/mine.ts']);
+});
+
+// A NUL cannot be part of a filename on any filesystem this runs on — the syscall layer
+// stops reading at it — so a path carrying one names nothing, and it is metadata we
+// would otherwise go on to store, join and render.
+test('sessionPaths refuses a path carrying a NUL byte, whatever its origin', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/src/a\0lpha.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'src/b\0eta.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { path: 'src/ok.ts' } }] } },
+  ];
+  const out = sessionPaths(records, '/work/app');
+  assert.deepEqual(out, ['src/ok.ts']);
+  for (const p of out) assert.ok(!p.includes('\0'), p);
+});

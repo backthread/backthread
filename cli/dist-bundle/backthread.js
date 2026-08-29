@@ -3644,12 +3644,7 @@ var require_fast_uri = __commonJS({
     }
     function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
-      const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
-      const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
-      if (baseMalformed || relativeMalformed) {
-        throw new Error(baseParsed.error || relativeParsed.error || "URI is malformed.");
-      }
-      const resolved = resolveComponent(baseParsed, relativeParsed, schemelessOptions, true);
+      const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
@@ -3774,8 +3769,6 @@ var require_fast_uri = __commonJS({
       return uriTokens.join("");
     }
     var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
-    var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
-    var AUTHORITY_INTRODUCER_REGION = /^(?:[^#/:?]+:)?([/\\\t\n\r]*)/;
     function getParseError(parsed, matches2) {
       if (matches2[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
         return 'URI path must start with "/" when authority is present.';
@@ -3803,25 +3796,6 @@ var require_fast_uri = __commonJS({
           uri = options.scheme + ":" + uri;
         } else {
           uri = "//" + uri;
-        }
-      }
-      const authorityMatch = uri.match(AUTHORITY_PREFIX);
-      if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
-        parsed.error = "URI authority must not contain a literal backslash.";
-        malformedAuthorityOrPort = true;
-      }
-      const introducerMatch = uri.match(AUTHORITY_INTRODUCER_REGION);
-      if (introducerMatch !== null) {
-        const region = introducerMatch[1];
-        const normalizedRegion = region.replace(/[\t\n\r]/g, "");
-        if (normalizedRegion.length >= 2) {
-          if (normalizedRegion.slice(0, 2) !== "//") {
-            parsed.error = parsed.error || "URI authority must not contain a literal backslash.";
-            malformedAuthorityOrPort = true;
-          } else if (region.length !== normalizedRegion.length) {
-            parsed.error = parsed.error || "URI authority introducer must not contain whitespace.";
-            malformedAuthorityOrPort = true;
-          }
         }
       }
       const matches2 = uri.match(URI_PARSE);
@@ -3867,7 +3841,7 @@ var require_fast_uri = __commonJS({
         if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
           if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) {
             try {
-              parsed.host = new URL("http://" + parsed.host).hostname;
+              parsed.host = URL.domainToASCII(parsed.host.toLowerCase());
             } catch (e) {
               parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e;
             }
@@ -6917,7 +6891,7 @@ var require_dist = __commonJS({
 
 // src/bin/backthread.ts
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { realpathSync as realpathSync3 } from "node:fs";
+import { realpathSync as realpathSync4 } from "node:fs";
 
 // src/login.ts
 import { hostname } from "node:os";
@@ -8042,7 +8016,7 @@ function configHint(env) {
 
 // src/capture.ts
 import { readFile as readFile10 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync as realpathSync3 } from "node:fs";
 import { join as join12 } from "node:path";
 
 // ../packages/redact/src/index.ts
@@ -8279,11 +8253,13 @@ function sessionPaths(records, repoRoot, options) {
   );
   const roots = supplied.length > 0 ? supplied : normalizeRoots([codexSessionCwd(records) ?? ""]);
   const exists = options?.exists;
+  const escapesRepo = options?.escapesRepo;
   const seen = /* @__PURE__ */ new Set();
   let shellPathCount = 0;
   for (const rec of records) {
     for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
       if (fromShell && exists === void 0) continue;
+      if (p.includes("\0")) continue;
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
       let norm;
       if (isAbsolute(p)) {
@@ -8298,10 +8274,11 @@ function sessionPaths(records, repoRoot, options) {
       if (fromShell) {
         if (norm.split("/").some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
         if (!exists(norm)) continue;
-        if (!seen.has(norm)) {
-          if (shellPathCount >= MAX_SHELL_PATHS) continue;
-          shellPathCount += 1;
-        }
+      }
+      if (escapesRepo?.(norm)) continue;
+      if (fromShell && !seen.has(norm)) {
+        if (shellPathCount >= MAX_SHELL_PATHS) continue;
+        shellPathCount += 1;
       }
       seen.add(norm);
     }
@@ -10160,6 +10137,13 @@ async function runCapture(input, deps = {}) {
   const log = deps.log ?? ((m) => console.error(m));
   const doReadFile = deps.readFileImpl ?? ((p) => readFile10(p, "utf8"));
   const doFileExists = deps.fileExistsImpl ?? existsSync;
+  const doRealPath = deps.realPathImpl ?? ((p) => {
+    try {
+      return realpathSync3(p);
+    } catch {
+      return null;
+    }
+  });
   const doResolveRepoRoots = deps.resolveRepoRootsImpl ?? resolveRepoRoots;
   const doReadConfig = deps.readConfigImpl ?? readConfig;
   const fireEnsureAuth = deps.ensureAuthImpl ?? ((e) => {
@@ -10210,6 +10194,12 @@ async function runCapture(input, deps = {}) {
     const decidedAt = sessionTimestamp(records) ?? void 0;
     const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, log) : [];
     const existsCache = /* @__PURE__ */ new Map();
+    const realRoots = [];
+    for (const root of repoRoots) {
+      const real = doRealPath(root);
+      if (real !== null && !realRoots.includes(real)) realRoots.push(real);
+    }
+    const escapesCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
         const hit = existsCache.get(rel);
@@ -10217,6 +10207,39 @@ async function runCapture(input, deps = {}) {
         const ok = repoRoots.some((root) => doFileExists(join12(root, rel)));
         existsCache.set(rel, ok);
         return ok;
+      },
+      // Containment, decided by the filesystem instead of by string prefix. A repo
+      // can contain a symlink that leaves it — `repoA/vendor` pointing at `repoB` is
+      // an ordinary thing for a checkout to have — and every rule inside sessionPaths
+      // is a string rule, so `<repoA>/vendor/src/secret.ts` reads as in-repo and is
+      // emitted under repoA's name while naming a file that belongs to repoB. That is
+      // another repository's directory structure entering this one's capture.
+      //
+      // We answer by walking the path for real under each root and asking where it
+      // came out. Any root that resolves it INSIDE the repo settles it — a file may
+      // legitimately exist in only one of several worktrees, and one confirmation is
+      // enough. A CONTRADICTION — it resolved, and every resolution landed outside —
+      // is what drops it. Resolving nowhere is neither: a file the session deleted is
+      // gone from disk, and requiring existence here would quietly extend the shell
+      // path rule to path-named tool inputs, which have never carried it, and lose
+      // every removed file's path. Memoised, like `exists`, for the same reason.
+      escapesRepo: (rel) => {
+        const hit = escapesCache.get(rel);
+        if (hit !== void 0) return hit;
+        let resolvedAnywhere = false;
+        let insideSomeRoot = false;
+        for (const root of repoRoots) {
+          const real = doRealPath(join12(root, rel));
+          if (real === null) continue;
+          resolvedAnywhere = true;
+          if (realRoots.some((r) => real === r || real.startsWith(r + "/"))) {
+            insideSomeRoot = true;
+            break;
+          }
+        }
+        const escapes = resolvedAnywhere && !insideSomeRoot;
+        escapesCache.set(rel, escapes);
+        return escapes;
       }
     });
     const sessionId = redacted.sessionId ?? input.session_id ?? null;
@@ -36880,7 +36903,7 @@ function isEntryPoint() {
     const self = fileURLToPath2(import.meta.url);
     const resolve3 = (p) => {
       try {
-        return realpathSync3(p);
+        return realpathSync4(p);
       } catch {
         return p;
       }
