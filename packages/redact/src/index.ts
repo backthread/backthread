@@ -247,24 +247,77 @@ function isAbsolute(p: string): boolean {
 }
 
 /**
+ * A URI scheme at the head of a token — `file://…`, `https://…`, `data:…` — and also
+ * the Windows drive spelling `C:\`, which is the same shape with a one-letter scheme.
+ *
+ * NONE of these is a path this module can measure, and one of them was leaving.
+ * `file:///…/other-repo/src/secret.ts` is not POSIX-absolute (it does not start with
+ * `/`), so it fell into the "already-relative" branch, survived `..`-resolution as
+ * `file:/…/other-repo/src/secret.ts`, and was EMITTED — a machine-absolute path naming
+ * another repository, out of a module whose stated contract is that it never emits a
+ * machine-absolute path at all. Decoding the URL and measuring the result would be
+ * guessing at an authority, a drive and an encoding we were not given; refusing the
+ * shape is the only answer that is true for every scheme. Matched only BEFORE the first
+ * separator, so an ordinary path with a colon deeper in (`src/a:b.ts`) is untouched.
+ */
+const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+
+/**
+ * Percent-escapes that decode to something structural — `/`, `\`, `.` or NUL. A token
+ * carrying one is TWO different paths depending on who decodes it, and this module is
+ * not the layer that decides: `vendor%2Fsrc/secret.ts` is one segment here and two to
+ * anything that unescapes it, so the fence would be measuring a different path from the
+ * one that eventually gets opened. Refuse the ambiguity rather than pick a reading of it.
+ */
+const ENCODED_PATH_SEPARATOR = /%(?:2f|5c|2e|00)/i;
+
+/**
+ * Any C0 control character, NUL included.
+ *
+ * NUL is the one that cannot be a path at all: the syscall layer stops reading at it, so
+ * a string carrying one names nothing on any filesystem this runs on. The rest — a
+ * newline, a tab, an escape — are technically legal in a POSIX filename and are still
+ * refused, because what arrives here is a transcript-supplied string that goes on to be
+ * stored, joined, logged and rendered as a path. A "path" containing a newline is a
+ * thing that renders as two, and nothing downstream is expecting that. It can only come
+ * from a malformed or hostile tool-input field; the shell token class has never been
+ * able to carry one.
+ *
+ * ONE HONEST QUALIFICATION: a path-named tool input is `trim()`ed before it gets here, so
+ * a control character that JavaScript considers whitespace (tab, LF, VT, FF, CR) and that
+ * sits at either END of the string is removed rather than refused, and the trimmed path is
+ * kept. That is the right outcome — what is emitted carries no control character either
+ * way — but it means "refused" is exactly true only of an INTERIOR one, plus NUL and the
+ * non-whitespace controls (ESC, DEL) in any position. NUL is refused everywhere because
+ * `trim()` does not consider it whitespace.
+ */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
+/**
  * True iff a NON-POSIX-absolute string can't be confirmed repo-relative and so
  * must be DROPPED rather than kept verbatim. `isAbsolute` only matches POSIX `/`,
- * so without this guard a `~`-home, a `../`-escape, or a Windows-absolute path
- * would fall into the "already-relative" branch and be emitted unfiltered even
+ * so without this guard a `~`-home, a `../`-escape, a URI scheme or a Windows-absolute
+ * path would fall into the "already-relative" branch and be emitted unfiltered even
  * when a `repoRoot` was supplied. We treat as foreign (drop): a leading `~`
- * (home dir), a leading `../` or a bare `..` segment escaping the root, and the
- * two Windows-absolute forms — a drive letter (`X:\` / `X:/`) or a leading
- * backslash (`\server\share`, `\repo\x.ts`). Genuinely-relative POSIX paths
- * (`src/x.ts`, `./a/b.ts`) are NOT foreign. Pure string check, zero deps.
+ * (home dir), a leading `../` or a bare `..` segment escaping the root, a URI scheme
+ * (`file://…` — which also subsumes the Windows drive letter `X:`, see `URI_SCHEME`).
+ * Genuinely-relative POSIX paths (`src/x.ts`, `./a/b.ts`) are NOT foreign. Pure string
+ * check, zero deps.
+ *
+ * A backslash and a percent-escaped separator are NOT checked here even though they read
+ * like they belong: they are true of ABSOLUTE spellings too, and an absolute path never
+ * reaches this function. Both live in the `sessionPaths` loop instead.
+ *
  */
 function isForeignRelativePath(p: string): boolean {
   if (p.startsWith('~')) return true; // ~/secret/key.pem, ~root/x
-  if (p.startsWith('\\')) return true; // \server\share, \repo\x.ts (Win/UNC absolute)
-  if (/^[A-Za-z]:[\\/]/.test(p)) return true; // C:\repo\x.ts or C:/repo/x.ts (Win drive)
-  // A `..` segment escaping the root, split on either separator so backslash
-  // paths are caught too. Leading `./` runs are stripped first (canonical form).
-  const stripped = p.replace(/^(?:\.[\\/])+/, '');
-  return /^\.\.(?:[\\/]|$)/.test(stripped); // ../../etc/passwd, ..\x, bare ..
+  if (URI_SCHEME.test(p)) return true; // file://…, https://…, and C:\repo\x.ts / C:/repo/x.ts
+  // A `..` segment escaping the root. `/` is the ONLY separator this module knows —
+  // see the backslash refusal in `sessionPaths`, which is what makes that true, and
+  // which exists because having two answers to "what is a separator" is how a symlink
+  // named `x\y` walked out of the repo. Leading `./` runs are stripped first.
+  const stripped = p.replace(/^(?:\.\/)+/, '');
+  return /^\.\.(?:\/|$)/.test(stripped); // ../../etc/passwd, bare ..
 }
 
 /**
@@ -276,15 +329,20 @@ function isForeignRelativePath(p: string): boolean {
  * `/repo/../etc/passwd` that prefix-relativizes to `../etc/passwd`) would slip
  * through and be emitted verbatim. We never EMIT a path containing `..`: any
  * unresolved/escaping traversal → null (drop). An in-repo redundant segment
- * (`a/b/../c.ts`) collapses to a clean path (`a/c.ts`) and is kept. Splits on
- * EITHER separator (`/` or `\`) so a backslash mid-path traversal
- * (`a\..\..\etc\passwd`) is caught too — matching the sibling guards
- * `isForeignRelativePath` / `relativizeUnder`, which also treat `\` as a sep.
- * Pure string ops, zero deps (no `node:path`) — load-bearing for the bundle.
+ * (`a/b/../c.ts`) collapses to a clean path (`a/c.ts`) and is kept.
+ *
+ * `/` IS THE ONLY SEPARATOR. This used to split on `\` as well, so that a Windows
+ * spelling could be reduced like a POSIX one, and that second answer to "what is a
+ * separator" was a live escape: on POSIX `\` is an ordinary filename character, so a
+ * symlink named `x\y` pointing at another repository was read here as two segments that
+ * do not exist, while the kernel opened it in one hop. A path carrying `\` is refused
+ * outright in `sessionPaths` now — the ambiguity is not resolvable by this module, and
+ * one answer everywhere beats two. Pure string ops, zero deps (no `node:path`) —
+ * load-bearing for the bundle.
  */
 function normalizeRepoRelative(rel: string): string | null {
   const out: string[] = [];
-  for (const seg of rel.split(/[\\/]/)) {
+  for (const seg of rel.split('/')) {
     if (seg === '' || seg === '.') continue; // collapse empty + same-dir segments
     if (seg === '..') {
       if (out.length === 0) return null; // pops above root → escapes → drop
@@ -443,8 +501,8 @@ export interface SessionPathsOptions {
   exists?: (repoRelativePath: string) => boolean;
 
   /**
-   * Does `repoRelativePath`, FOLLOWED ON DISK, land outside every root of this repo?
-   * Return true and the path is dropped.
+   * Does `candidate`, FOLLOWED ON DISK IN THE SPELLING IT ARRIVED IN, land outside
+   * every root of this repo? Return true and the path is dropped.
    *
    * WHY THIS EXISTS. Containment above is decided by string prefix, and a string
    * prefix does not survive a symlink. With `repoA/vendor` linked at `repoB`, the
@@ -457,6 +515,19 @@ export interface SessionPathsOptions {
    * reason — this package is pure and dependency-free (load-bearing for the
    * esbuild-inlined bundle), so the caller, which already holds a filesystem and the
    * roots, answers and this module obeys.
+   *
+   * IT RECEIVES THE ORIGINAL SPELLING, AND THAT IS THE WHOLE POINT. The first version
+   * of this predicate was handed the NORMALIZED path, and could not close the leak it
+   * was written for: `normalizeRepoRelative` cancels `..` arithmetically, and
+   * cancelling `..` against a SYMLINKED segment gives the wrong answer, because the
+   * link does not go where its name says. `dlink/../src/a.ts`, with `dlink` a link to
+   * another repository, reduces on paper to `src/a.ts` — indistinguishable from a file
+   * of our own — while the kernel opens the other repo's `src/a.ts`. By the time a
+   * post-normalization predicate is called the evidence has already been destroyed
+   * upstream, inside this function, and no predicate at that position can recover it.
+   * So the candidate crosses this boundary UNCHANGED, `..` and all, and the caller
+   * resolves it against the filesystem BEFORE anything reduces it. A half-resolved path
+   * crossing this boundary is the defect, not a convenience.
    *
    * Applies to EVERY origin, not just shell tokens. A `file_path` tool input reached
    * through a link escapes just as completely as a scraped one, and the leak was
@@ -485,11 +556,35 @@ export interface SessionPathsOptions {
    * to the predicate is what keeps the promise that there is no second, weaker route
    * into the output.
    *
-   * Omit it and containment stays string-only — the long-standing behaviour, kept so
-   * this remains a compatible addition to a published API. The shipped CLI always
-   * supplies it. Should memoise: one session asks thousands of times.
+   * Omit it and containment stays string-only — the long-standing behaviour. The
+   * shipped CLI always supplies it. Should memoise: one session asks thousands of
+   * times.
    */
-  escapesRepo?: (repoRelativePath: string, roots: readonly string[]) => boolean;
+  escapesRepo?: (candidate: PathCandidate, roots: readonly string[]) => boolean;
+}
+
+/**
+ * A harvested path in the spelling it was harvested in, before any normalization —
+ * what `escapesRepo` is asked about.
+ *
+ * `raw` is verbatim: absolute or relative, `.` and `..` intact, no `./` stripped and no
+ * leading whitespace trimmed. `/` is its only separator — a spelling carrying `\` is
+ * refused before it gets here, so this is never two spellings of one path. That is deliberate and load-bearing (see `escapesRepo`): every
+ * reduction this module could apply first is a reduction that can be wrong in the
+ * presence of a symlink, so none of them is applied before the filesystem has spoken.
+ *
+ * `absolute` says which question the caller is answering, because they are different
+ * questions and only the caller can tell them apart from the string. An ABSOLUTE raw
+ * names exactly one place on this machine and can be resolved on its own. A RELATIVE
+ * raw carries no evidence of what it is relative to, so it can only be measured
+ * against the roots — every one of them, since any single root that says the path left
+ * the repo is a contradiction, while a root that confirms it is merely one opinion.
+ */
+export interface PathCandidate {
+  /** The path exactly as harvested — never reduced, never relativized. */
+  raw: string;
+  /** True iff `raw` is POSIX-absolute (starts with `/`). */
+  absolute: boolean;
 }
 
 /**
@@ -602,7 +697,20 @@ function pathsFromRecord(rec: unknown): CandidatePath[] {
       command?: unknown;
     };
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
-      if (typeof v === 'string' && v.trim().length > 0) out.push({ raw: v.trim(), fromShell: false });
+      // TRIM THE TAIL ONLY. This used to push `v.trim()`, and trimming the HEAD is an
+      // escape: `trim()` erases leading whitespace, the FIRST SEGMENT is a head, and a
+      // symlink can be named ` vendor`. The agent reports ` vendor/src/secret.ts`, the
+      // fence measures `vendor/src/secret.ts`, finds no `vendor` in the repo, reads that
+      // as empty ground inside it, and keeps the path — while the kernel opens the other
+      // repository in one hop. Same defect as `..` cancelled on the string and as `\`
+      // read as a separator: the fence measuring a DIFFERENT PATH from the one opened.
+      //
+      // The tail is safe and is still trimmed, because the walk never follows the last
+      // segment, so nothing the tail does can change where the path resolves — and a
+      // trailing newline is common enough in a tool-input field that refusing it would
+      // cost real paths. A LEADING control character is not trimmed here and is refused
+      // outright by `CONTROL_CHARACTER` below.
+      if (typeof v === 'string' && v.trim().length > 0) out.push({ raw: v.trimEnd(), fromShell: false });
     }
     pushFromCommand(i.command);
   };
@@ -707,14 +815,34 @@ export function sessionPaths(
       // `exists` gets the pre-scan behaviour rather than unverified guesses — the
       // absence of a check must never be the reason something leaks.
       if (fromShell && exists === undefined) continue;
-      // A NUL byte is not part of any path on any filesystem this runs on — the
-      // syscall layer treats it as the end of the string, so nothing downstream can
-      // even name the file it claims to. It arrives only from a malformed or hostile
-      // tool-input field (the shell token class has never been able to carry one),
-      // and it is metadata that goes on to be stored, joined and rendered. Refuse it
-      // at the fence, where every candidate passes, rather than asking each consumer
-      // to cope with a string that cannot be a path.
-      if (p.includes('\0')) continue;
+      // Any C0 control character, NUL included — see `CONTROL_CHARACTER`, which carries
+      // the reasoning and the one honest qualification about trimming. Refused at the
+      // fence, where every candidate passes, rather than asking each consumer to cope
+      // with a string that cannot be, or should not be, a path.
+      if (CONTROL_CHARACTER.test(p)) continue;
+      // A percent-escaped path separator makes the token TWO different paths depending
+      // on who decodes it, and every gate below — and the caller's filesystem check
+      // above all — would then be measuring a different path from the one that
+      // eventually gets opened. Refused here rather than in `isForeignRelativePath`,
+      // because it is true of ABSOLUTE spellings too and that function never sees them.
+      if (ENCODED_PATH_SEPARATOR.test(p)) continue;
+      // A BACKSLASH, for exactly the same reason, and it was a live leak.
+      //
+      // This module used to treat `\` as a second path separator, so that a Windows
+      // spelling could be normalized like a POSIX one. POSIX does not: there, `\` is an
+      // ordinary character in a filename. So a symlink genuinely NAMED `x\y`, pointing
+      // at another repository, was split by the fence into the segments `x` and `y`,
+      // neither of which exists — the fence found nothing on disk, read that as empty
+      // ground inside the repo, and kept the path. The kernel resolves `x\y` in one hop
+      // into the other repository. Measured: the file really opens, and the path
+      // reached the wire as `x/y/src/secret.ts`, a path this repo does not have.
+      //
+      // That is the same defect as `..` cancelled on the string, in a different
+      // costume: the fence measuring a DIFFERENT PATH from the one that gets opened.
+      // There is no reading of `\` that is right on both platforms, and this module
+      // cannot know which one produced the string — so it refuses the ambiguity
+      // instead of picking, and `\` is not a separator anywhere below this line.
+      if (p.includes('\\')) continue;
       // Length cap BEFORE the fence: a base64 blob is not a path, and there is no
       // reason to normalize 17 kilobytes of it to find that out.
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
@@ -752,13 +880,19 @@ export function sessionPaths(
         if (!exists!(norm)) continue;
       }
       // The last word on containment, for EVERY origin. Everything above decided it
-      // by string prefix, which a symlink walks straight through: a path under a root
-      // by every rule this pure module can apply can still name a file in another
-      // repository. Only the filesystem knows, so the caller's predicate answers here
-      // — after the cheap string gates have already rejected what they can, and
-      // BEFORE the shell budget is charged, so a path that is about to be dropped
-      // never consumes the quota of one that would have been kept.
-      if (escapesRepo?.(norm, roots)) continue;
+      // by string prefix and by arithmetic on `..`, and a symlink walks straight
+      // through both: a path under a root by every rule this pure module can apply can
+      // still name a file in another repository. Only the filesystem knows, so the
+      // caller's predicate answers here — after the cheap string gates have already
+      // rejected what they can, and BEFORE the shell budget is charged, so a path that
+      // is about to be dropped never consumes the quota of one that would have been
+      // kept.
+      //
+      // IT IS ASKED ABOUT `p`, NOT `norm`. `norm` is the answer to a different
+      // question — what we would EMIT — and getting there cost us the `..` segments
+      // that are the evidence. `dlink/../src/a.ts` is already spelled `src/a.ts` by
+      // this line. The predicate needs what arrived, so that is what it gets.
+      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p) }, roots)) continue;
       // Cap in ENCOUNTER order (see MAX_SHELL_PATHS) — never after the sort.
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;

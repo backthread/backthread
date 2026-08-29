@@ -42,7 +42,7 @@
 // decisions are all that reach ingest-decisions.
 
 import { readFile } from 'node:fs/promises';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { ensureAuth } from './login.js';
@@ -63,6 +63,16 @@ import { maybeNudge, maybeUnconnectedNudge, parseRepoStatus, parseNextStep } fro
 import { maybeShowTrustGate } from './firstRun.js';
 import { maybeFirstCaptureConfirm } from './firstCapture.js';
 import { recordCaptureNotice } from './captureNotice.js';
+
+/**
+ * How many segments deep the containment walk will follow a single spelling before it
+ * gives up and refuses the path. The walk costs one `realpath` (and sometimes one
+ * `lstat`) per segment, so an unbounded depth is an unbounded number of syscalls from a
+ * single hostile tool-input field. No source file anyone learns a system from is
+ * anywhere near this deep, and a path that is gets DROPPED, never waved through — the
+ * cap is a fail-closed limit, not a fast path.
+ */
+const MAX_WALK_SEGMENTS = 256;
 
 /**
  * The Claude Code hook payload (SessionEnd / Stop). Claude Code passes this as a
@@ -153,12 +163,36 @@ export interface CaptureDeps {
   fileExistsImpl?: (absolutePath: string) => boolean;
   /**
    * Test seam: follow an ABSOLUTE path through every symlink to the real directory
-   * it names, or null when it names nothing on disk. Defaults to `fs.realpathSync`.
+   * it names, or null WHEN THE FILESYSTEM WILL NOT RESOLVE IT, FOR ANY REASON — the
+   * name is absent, or it is a dangling link, an unreadable parent, a symlink loop.
+   * Those are different conditions and only `isAbsentImpl` can tell them apart; a stub
+   * written to return null for absent paths ALONE silently stops exercising the cases
+   * the walk fails closed on. Defaults to `fs.realpathSync`.
    * Backs the `escapesRepo` predicate that gives `sessionPaths` its last word on
    * containment (see below) — string prefixes cannot see through a link, and the
    * filesystem is the only thing that can.
    */
   realPathImpl?: (absolutePath: string) => string | null;
+  /**
+   * Test seam: does the filesystem POSITIVELY say there is nothing at this name?
+   * Defaults to an `fs.lstatSync` that returns true only on `ENOENT`.
+   *
+   * This is the predicate that separates the one case where the containment walk may
+   * keep going from every case where it must stop. `realpath` returning nothing is not
+   * one thing: the name may be genuinely absent (the file the session DELETED, which
+   * has always kept its path), or it may be a dangling symlink, an unreadable parent
+   * (`EACCES`), a symlink loop, a name too long — an entry that IS there and will not
+   * say where it goes. The first is an absence and is safe to walk past; every other is
+   * a refusal to answer, and walking past THOSE is precisely how an escaping link
+   * behind a missing target or a `chmod 000` directory kept reaching the wire. `lstat`
+   * distinguishes them and `realpath` cannot, because `lstat` does not follow the final
+   * link and reports the errno of the name itself.
+   *
+   * Anything other than a clean `ENOENT` — including an error we have not thought of —
+   * answers false and the walk fails closed. That is the rule that generalises: the
+   * fence stops at any segment the filesystem will not resolve, whatever the reason.
+   */
+  isAbsentImpl?: (absolutePath: string) => boolean;
   /** Test seam: the config reader. Defaults to readConfig(). */
   readConfigImpl?: (env: NodeJS.ProcessEnv) => Promise<BackthreadConfig>;
   /** Test seam: the git-remote reader threaded into resolveRepo. */
@@ -287,7 +321,20 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       try {
         return realpathSync(p);
       } catch {
-        return null; // names nothing on disk — an absence, never a contradiction
+        return null; // the filesystem will not resolve this name — see `isAbsentImpl`
+      }
+    });
+  const doIsAbsent =
+    deps.isAbsentImpl ??
+    ((p: string) => {
+      try {
+        lstatSync(p); // an entry IS here (possibly a dangling or looping link)
+        return false;
+      } catch (err) {
+        // ONLY a clean ENOENT is an absence. EACCES, ELOOP, ENOTDIR, ENAMETOOLONG and
+        // anything else are the filesystem declining to answer, and the walk that asks
+        // this must treat a declined answer as an escape, never as empty ground.
+        return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
       }
     });
   const doResolveRepoRoots = deps.resolveRepoRootsImpl ?? resolveRepoRoots;
@@ -425,7 +472,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, warnAboutRoots) : [];
     const existsCache = new Map<string, boolean>();
     // One realpath per distinct absolute path, for the whole capture. Both the root
-    // resolution and the ancestor walk below ask about the same handful of directories
+    // resolution and the segment walk below ask about the same handful of directories
     // over and over, and a session's working tree does not change under us mid-capture.
     const realPathCache = new Map<string, string | null>();
     const realOf = (abs: string): string | null => {
@@ -434,6 +481,18 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       const real = doRealPath(abs);
       realPathCache.set(abs, real);
       return real;
+    };
+    // Memoised for the same reason `realOf` is, and it was missed: the relative route
+    // walks EVERY root, so a name that exists in only one of them asks this question once
+    // per root, per path. On a machine where parallel worktrees are the normal workflow
+    // that is the common case, not the rare one.
+    const absentCache = new Map<string, boolean>();
+    const isAbsentOf = (abs: string): boolean => {
+      const hit = absentCache.get(abs);
+      if (hit !== undefined) return hit;
+      const absent = doIsAbsent(abs);
+      absentCache.set(abs, absent);
+      return absent;
     };
     // The roots as the FILESYSTEM spells them, which is what a resolved path has to be
     // compared against. A root set deliberately carries logical spellings too (a
@@ -459,6 +518,120 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     };
     const inside = (real: string, realRoots: readonly string[]): boolean =>
       isInsideRoot(real, realRoots);
+    // WALK THE SPELLING THROUGH THE FILESYSTEM, ONE SEGMENT AT A TIME, and return where
+    // it physically lands — or null when the filesystem refused to say.
+    //
+    // This is the whole fix, and it replaces resolving the reduced path in one call.
+    // `..` is only safe to cancel arithmetically when the segment it cancels is a real
+    // directory; against a SYMLINK it is simply wrong, because the link does not go
+    // where its name says. So `..` is never cancelled on the string here: by the time a
+    // `..` is reached, everything to its left has already been followed on disk, `cur`
+    // is a resolved physical path, and its parent directory is therefore the true one.
+    // That is what turns `dlink/../src/secret.ts` from "obviously our own `src`" into
+    // "the other repository's `src`", which is what it always was.
+    //
+    // THE FINAL SEGMENT IS NOT FOLLOWED — the caller pops it. What leaks is a path
+    // DESCENDING THROUGH a link into somebody else's directory structure; a symlinked
+    // FILE at a name this repo really has (`src/linked.ts` pointing anywhere at all) is
+    // different in kind — that name is in our own tree, git tracks it, and the path
+    // gives away nothing about where the contents live. Following it would drop our own
+    // metadata to a rule aimed at somebody else's.
+    //
+    // A SEGMENT THE FILESYSTEM WILL NOT RESOLVE STOPS THE WALK — it does not get
+    // skipped. `realpath` failing is not one condition but several, and only one of
+    // them is an absence: the name may be genuinely missing (`ENOENT`), or it may be a
+    // dangling link, a `chmod 000` parent, a symlink loop. The previous fence climbed
+    // PAST any unresolvable segment to an ancestor that was inside the repo and kept
+    // the path, which let both a dangling escaping link and an escaping link behind an
+    // unreadable directory through. Only positive absence continues, and then only
+    // lexically, on ground we know is not a link. Everything else fails closed. Two
+    // mechanisms were measured; the rule is written to cover the ones nobody measured.
+    //
+    // Positive absence continuing is what keeps the DELETED-file case: `src/deleted.ts`
+    // pops its leaf, resolves `src`, lands inside, survives. Resolving to somewhere
+    // else is a reason to drop; resolving to nothing never was.
+    const resolveWalk = (start: string, segments: readonly string[]): string | null => {
+      // A path with this many segments is not a source file anyone learns from, and the
+      // walk costs a syscall each. Fail closed rather than let one hostile tool-input
+      // field spend an unbounded number of them.
+      if (segments.length > MAX_WALK_SEGMENTS) return null;
+      let cur = start;
+      for (const seg of segments) {
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') {
+          // `cur` is already fully resolved, so its lexical parent IS its real parent.
+          cur = dirname(cur);
+          continue;
+        }
+        const next = join(cur, seg);
+        const real = realOf(next);
+        if (real !== null) {
+          cur = real;
+          continue;
+        }
+        if (isAbsentOf(next)) {
+          cur = next; // nothing is here; nothing here can be a link either
+          continue;
+        }
+        return null; // something IS here and will not say where it goes
+      }
+      return cur;
+    };
+    // The segments of a raw spelling, minus the leaf the walk must not follow. Split on
+    // `/` ONLY, which is what the kernel does and therefore the only split that measures
+    // the path that actually gets opened: a symlink genuinely named `x\y` is one segment
+    // to the filesystem, and treating it as two was a live escape.
+    //
+    // THIS LINE AND THE `\` REFUSAL IN `sessionPaths` ARE MUTUALLY REDUNDANT, and it is
+    // worth knowing which way round: measured, either one alone closes the `x\y` escape.
+    // Splitting on `/` only is what makes the walk measure the path the kernel opens, so
+    // it holds even with the refusal removed; the refusal holds even with this reverted,
+    // because the candidate never arrives. Remove BOTH and the escape is back on the
+    // wire. So neither is decoration, and a mutation of this line alone will not go red.
+    //
+    // A trailing `..` is NOT a leaf — it is part of how the directory is named — so only a
+    // plain trailing name is dropped. Popping a trailing `..` walks one segment DEEPER
+    // than the spelling names, which is how `sub/rootlink/..` — a link pointing at the
+    // checkout root, with the `..` stepping above it — reads as inside the repo when it
+    // names the directory the repo sits in.
+    //
+    // A trailing `.` IS NOT PRESERVED, despite reading like a sibling case: the filter
+    // above removes every `.` segment before the pop, so `sub/dlink/.` walks to `sub`
+    // while `sub/dlink/x.ts` walks to `sub/dlink`. Two spellings that share a parent can
+    // therefore walk to different places — which is exactly why the memo below is keyed
+    // on the whole raw spelling and not on the parent.
+    const walkableSegments = (raw: string): string[] => {
+      const segs = raw.split('/').filter((s) => s !== '' && s !== '.');
+      if (segs.length > 0 && segs[segs.length - 1] !== '..') segs.pop();
+      return segs;
+    };
+    // Every RESOLVED directory a relative spelling could be relative to: the session's
+    // own working directory first, then every root.
+    //
+    // The cwd is the base the KERNEL uses, so leaving it out meant the fence and the
+    // filesystem were reading the same string against different starting points — the
+    // whole family of defects this code exists to close. It is only admitted when it
+    // resolves INSIDE the repo: a cwd that resolves somewhere else is not a base this
+    // repo's paths can be measured from, and using it would contradict everything and
+    // empty the harvest rather than protect it.
+    //
+    // A root that no longer resolves is skipped, not treated as a verdict — it can say
+    // nothing, and the first dead root in the list must not acquit everything behind it.
+    const basesCache = new Map<string, string[]>();
+    const relativeBases = (roots: readonly string[], realRoots: readonly string[]): string[] => {
+      const key = JSON.stringify(roots);
+      const hit = basesCache.get(key);
+      if (hit !== undefined) return hit;
+      const out: string[] = [];
+      const realCwd = input.cwd ? realOf(input.cwd) : null;
+      if (realCwd !== null && inside(realCwd, realRoots)) out.push(realCwd);
+      for (const root of roots) {
+        const realRoot = realOf(root);
+        if (realRoot !== null && !out.includes(realRoot)) out.push(realRoot);
+      }
+      basesCache.set(key, out);
+      return out;
+    };
     const escapesCache = new Map<string, boolean>();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -487,61 +660,94 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       // its contents live. Resolving the full path would drop it too, which is losing
       // our own metadata to a rule aimed at somebody else's.
       //
-      // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME root
-      // resolves it inside — is wrong, and wrong in the way that reopens the leak it is
-      // meant to close. Roots are checkouts of one repo, so every tracked directory
-      // exists in all of them: put the escaping link at a name the repo genuinely has
-      // (`ln -s ../../other packages/foo`, with `packages/foo` a real directory in a
-      // sibling worktree) and the sibling vouches for it, laundering the escape. So the
-      // question asked is the opposite one, and a single contradiction drops the path.
-      //
-      // AND WE CLIMB TO THE DEEPEST ANCESTOR THAT EXISTS. Asking only about the
-      // immediate parent means a link into a directory that is MISSING answers
-      // "resolves nowhere", which is an absence, which keeps the path — so
-      // `<repoA>/vendor/gone/secret.ts` leaked while `<repoA>/vendor/src/secret.ts` did
-      // not, purely because of what happened to be on the far side of the link.
-      // Climbing until something resolves reaches `vendor` itself, which is a link out,
-      // and refuses it. It leaves the deleted-file case exactly where it was:
-      // `src/deleted.ts` climbs to `src`, which is inside, so the path survives.
-      //
-      // TWO LIMITS OF THIS, both measured, both open, neither a regression — the same
-      // spellings get through on the previous release. Say them here rather than let
-      // the next reader infer a guarantee from the paragraph above.
-      //   1. A DANGLING link resolves nowhere at every level, so the climb walks PAST
-      //      it to an ancestor that is inside, and the path is kept. The sentence above
-      //      holds only while the link's target exists.
-      //   2. A `..` that cancels a symlinked segment defeats all of this before we are
-      //      asked at all: `normalizeRepoRelative` reduces the path arithmetically, so
-      //      `dlink/../src/a.ts` arrives here already spelled `src/a.ts` and there is
-      //      nothing left to detect. The predicate cannot see it — it receives the
-      //      POST-normalization path, and the evidence was destroyed upstream.
-      // Closing either one means resolving against the filesystem BEFORE normalizing,
-      // which changes what crosses the `sessionPaths` boundary. That is its own change.
-      escapesRepo: (rel, roots) => {
-        // Memoised on the PARENT: nothing else changes the answer, and a session's
-        // paths cluster hard into a few directories, so this is also the cheap key.
-        const parent = dirname(rel);
-        const hit = escapesCache.get(parent);
+      // WE ASK ABOUT THE SPELLING THAT ARRIVED, not the one we would emit. This is
+      // the correction to the previous release, which resolved the NORMALIZED path in a
+      // single call and could not close the leak it was written for. Two mechanisms
+      // defeated it, and they are one shape:
+      //   1. `..` CANCELLED ON THE STRING. `normalizeRepoRelative` reduces
+      //      `dlink/../src/secret.ts` to `src/secret.ts` before the predicate is called,
+      //      so a link out is erased and the path arrives looking like one of our own.
+      //      Cancelling `..` is only valid against a real directory; against a symlink
+      //      it is wrong, because the link does not go where its name says.
+      //   2. AN UNRESOLVABLE SEGMENT CLIMBED PAST. Resolving the deepest ancestor that
+      //      exists treats "cannot say" as "keep looking upward", lands on an ancestor
+      //      that IS inside the repo, and keeps the path. Measured for a DANGLING link
+      //      (`ENOENT`) and for an escaping link behind a `chmod 000` directory
+      //      (`EACCES`) — and the earlier note here named only the first, which
+      //      understated the class. The class is: anything that makes the filesystem
+      //      unable to answer at the point the fence asks.
+      // `resolveWalk` closes both by following the raw spelling segment by segment and
+      // failing closed on any segment that will not resolve.
+      escapesRepo: ({ raw, absolute }, roots) => {
+        // Memoised on the raw spelling. It needs no other key: `absolute` is a pure
+        // function of `raw` (it IS `raw.startsWith('/')`), so an absolute and a relative
+        // spelling can never collide on one entry, and a kind prefix here would be dead
+        // code dressed as a precaution.
+        const key = raw;
+        const hit = escapesCache.get(key);
         if (hit !== undefined) return hit;
         const realRoots = realRootsOf(roots);
-        let escapes = false;
-        for (const root of roots) {
-          // The deepest existing ancestor of `parent`, under THIS root.
-          const segments = parent === '.' || parent === '' ? [] : parent.split(/[\\/]/);
-          let real: string | null = null;
-          for (;;) {
-            real = realOf(segments.length > 0 ? join(root, ...segments) : root);
-            if (real !== null || segments.length === 0) break;
-            segments.pop();
+        const escapes = (): boolean => {
+          if (absolute) {
+            // An absolute spelling names exactly ONE place on this machine, so it is
+            // resolved on its own, from the filesystem root, and no root can vouch for
+            // it. If nothing resolved, there is nothing to measure against and the
+            // pre-existing behaviour (keep) stands rather than emptying the harvest.
+            if (realRoots.length === 0) return false;
+            const dest = resolveWalk('/', walkableSegments(raw));
+            return dest === null || !inside(dest, realRoots);
           }
-          if (real === null) continue; // this root can say nothing about it
-          if (!inside(real, realRoots)) {
-            escapes = true;
-            break;
+          // A relative spelling carries no evidence of what it is relative to, so it is
+          // measured against EVERY base it could plausibly be relative to.
+          //
+          // THE SESSION'S CWD IS ONE OF THOSE BASES, AND IT IS THE ONE THE KERNEL USES.
+          // Measuring only against the repo roots was the fourth escape in this family,
+          // and the same shape as the other three: when the session works in a
+          // SUBDIRECTORY — the ordinary case in a monorepo package — a symlink living in
+          // that subdirectory is invisible from the root. With cwd `<repo>/sub` and
+          // `sub/dlink` a link to another repository, `dlink/src/secret.ts` resolves from
+          // the root to `<repo>/dlink/...`, which does not exist, which reads as empty
+          // ground INSIDE the repo, so the path was kept — while the kernel, resolving it
+          // from the cwd as it actually would, opened the other repository. The same gap
+          // defeated `exists`, whose collision form is worse: with `pkg/src` linked out
+          // and cwd `<repo>/pkg`, `src/keep.ts` names the other repo's file, but this
+          // repo has its own `src/keep.ts`, so existence confirmed it and it shipped
+          // under our name. Both close for the SESSION's cwd, because both were one
+          // missing base.
+          //
+          // WHAT IS STILL OPEN, MEASURED, AND NOT A REGRESSION. The bases here are the
+          // session's cwd and the roots. The kernel resolves a relative path from the
+          // working directory of the TOOL CALL that produced it, and that is not always
+          // one of these: a `cd` inside the very command string we scan moves it, a Bash
+          // tool input carries its own `cwd` field (which `pathsFromRecord` reads as a
+          // path CANDIDATE and never as a base), and a Codex transcript states one in
+          // `session_meta.payload.cwd` (used as a root fallback, never as a base). With
+          // the session at `<repo>` and a link at `<repo>/sub/zlink`, `cd sub && cat
+          // zlink/src/secret.ts` still reaches the wire. Closing it means carrying the
+          // originating directory ALONGSIDE each candidate — a third change to the shape
+          // that crosses the `sessionPaths` boundary — so it is its own change, not a
+          // line bolted onto this one. The same spellings get through on the previous
+          // release; nothing here made them worse.
+          //
+          // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME
+          // root resolves it inside — is wrong, and wrong in the way that reopens the
+          // leak it is meant to close. Roots are checkouts of one repo, so every tracked
+          // directory exists in all of them: put the escaping link at a name the repo
+          // genuinely has (`ln -s ../../other packages/foo`, with `packages/foo` a real
+          // directory in a sibling worktree) and the sibling vouches for it, laundering
+          // the escape. So the question asked is the opposite one, and a single
+          // contradiction drops the path. It has a real cost, and it is deliberate: an
+          // honest file at a colliding name in a sibling checkout is dropped with it.
+          const segments = walkableSegments(raw);
+          for (const base of relativeBases(roots, realRoots)) {
+            const dest = resolveWalk(base, segments);
+            if (dest === null || !inside(dest, realRoots)) return true;
           }
-        }
-        escapesCache.set(parent, escapes);
-        return escapes;
+          return false;
+        };
+        const verdict = escapes();
+        escapesCache.set(key, verdict);
+        return verdict;
       },
     });
     // Prefer the transcript's own session id; fall back to the hook's session_id.

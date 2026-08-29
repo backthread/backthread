@@ -5,6 +5,143 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.25.0
+
+**The `..` hole 0.24.0 told you about is closed.** That release said, in as many words,
+that a path using `..` to step back out of a symlink could still carry another
+repository's file paths into yours, and that fixing it meant resolving paths against the
+disk before reducing them. This is that fix.
+
+The problem was that `..` was cancelled out on the string — `dlink/../src/secret.ts`
+becomes `src/secret.ts` on paper — and cancelling `..` is only correct against a real
+directory. Against a symlink it is simply wrong, because the link does not go where its
+name suggests: the reduced path looked like one of your own files while your computer
+opened somebody else's. Every re-spelling of that trick went through with it: relative,
+`./`-prefixed, backslash-separated, with a redundant `.` or `//` in the middle, hidden a
+level down inside your own `src/`, and — the one nobody had built a fixture for — a link
+that points *inside* your repo, with the `..` after it doing the leaving.
+
+A path is now walked through the filesystem one segment at a time, in the spelling your
+agent reported it in. By the time a `..` is reached everything to its left has already
+been followed for real, so its parent is the true one. Measured against real repositories
+and real symlinks, with each spelling first confirmed by actually reading the other
+repository's bytes: 23 spellings, all refused; the same probe leaks 21 of them on 0.24.0.
+
+**And the class was wider than `..`.** 0.24.0 climbed past any segment the filesystem
+would not resolve, up to the nearest ancestor that did — which lands back inside your
+repo, so the path was kept. Its note named a dangling link as the one case. It was not
+one case: an escaping link behind a directory the process cannot read does it too, and so
+does a symlink loop. The rule now is that only a *positive* "there is nothing here"
+continues the walk. Anything else — a link that resolves nowhere, a permission refusal,
+a loop, an error nobody has thought of — stops it and the path is dropped. That is what
+keeps a file you **deleted**: it is genuinely absent, which is an answer, not a refusal
+to answer.
+
+**A file whose name contains a backslash was walking out too, and that one is older than
+`..`.** This code used to treat `\` as a second path separator, so that a Windows
+spelling could be tidied up like a POSIX one. On macOS and Linux it is not a separator —
+it is an ordinary character in a filename. So a symlink genuinely *named* `x\y`, pointing
+at another repository, was read here as two directories that do not exist, which looked
+like empty ground inside your repo, while your computer followed it into the other
+repository in a single hop. Same failure as the `..` one in a different costume: we were
+checking a different path from the one being opened. There is no reading of `\` that is
+right on both platforms and no way for this code to know which one produced the string,
+so a path containing one is now refused outright, and `/` is the only separator anywhere
+past that point. If you are on Windows, note that absolute Windows paths (`C:\…`) were
+already being dropped; this now drops the relative `src\thing.ts` spelling as well.
+
+**`file://` and friends are refused, and with them the one machine-absolute path this
+code was emitting.** A `file://…` spelling is not an absolute path as far as this code is
+concerned, so it fell through to the relative branch and came out as `file:/Users/you/…` —
+a path from your machine, out of a module that promises never to emit one. Percent-escaped
+separators (`vendor%2Fsrc/…`) go the same way: that is two different paths depending on who
+unescapes it, so we would be checking one and your computer would be opening the other.
+
+**Paths containing any control character are refused, not just NUL.** NUL was already
+refused, because no filesystem can name such a file. The rest — a newline, a tab — are
+technically legal in a filename, and a transcript could hand us one; a "path" with a
+newline in it is a thing that renders as two lines everywhere it is later shown. They
+come only from a malformed or hostile tool input.
+
+**One thing got *less* strict, and it is a recovery, not a loosening.** 0.24.0 dropped a
+path as soon as any one of your checkouts said that name leaves the repo — which also
+threw away an honest file living at that name in a sibling worktree. A name is all a
+*relative* path gives you, so that still holds for those. But an *absolute* path is a
+place, not a name: it can be followed on its own, no other checkout gets a vote, and the
+honest file survives. The escape through that same name is still refused in both
+spellings — the case where a sibling worktree could vouch for an escaping link stays
+closed, because the path is now resolved rather than voted on.
+
+**A leading space in a filename was doing the same thing as the backslash.** A path
+handed to a file-reading tool is trimmed of surrounding whitespace on the way in, and the
+first segment of a path is a "surround" — so a symlink named ` vendor` (leading space)
+pointing at another repository was measured as `vendor`, which your repo does not have,
+which read as empty ground inside it. Your computer, given the spelling the agent actually
+used, opened the other repository. Only the *end* of the path is trimmed now, which cannot
+change where a path resolves.
+
+**And a link in the folder you are working in was invisible.** This is the one most
+likely to have affected a real repository. Paths your agent reports relatively are resolved
+by your computer from the directory the session is running in — but they were being checked
+from the top of your repo. So if you were working inside `packages/thing/` and that folder
+contained a symlink pointing at another checkout, the check looked for that link at the top
+of the repo, did not find it, concluded there was nothing there, and kept the path. Your
+computer, resolving the same text the way it actually does, opened the other repository.
+
+The same gap had a nastier second form. With `pkg/src` linked out and a session running in
+`pkg/`, the path `src/keep.ts` names the *other* repo's file — but your repo has its own
+`src/keep.ts`, so the "does this file exist?" check said yes and the path was recorded
+under your own name. Nothing later could have told the two apart. A relative path is now
+checked from the directory the session was actually in, as well as from every checkout.
+
+### This still does not close it completely, and here is where it does not
+
+Independent verification of this release measured a way through that it does **not** fix.
+It is not a regression — the same spellings get through on 0.24.0 — and we would rather
+you read it here than assume a guarantee we cannot make.
+
+A relative path is now checked from the directory the *session* is running in, and from
+every checkout. But your computer resolves a relative path from the working directory of
+the **individual tool call**, and that is not always one of those. Three ways it differs,
+all measured:
+
+- a `cd` inside the very command being recorded (`cd packages/thing && cat src/x.ts`);
+- a shell tool call that carries its own working directory alongside the command;
+- a transcript that states a working directory of its own, different from where the hook
+  ran.
+
+In each case, if a symlink pointing at another checkout lives in *that* directory, the
+check looks for it somewhere else, does not find it, and keeps the path. Concretely: with
+the session at the top of your repo and a link at `sub/zlink`, the command
+`cd sub && cat zlink/src/secret.ts` still records a path belonging to the other checkout.
+
+Closing it means carrying the originating directory alongside every recorded path, which
+changes the same published interface again, so it is its own release rather than a hurried
+addition to this one. Until then: **if you have a symlink pointing out of a checkout, a
+path reached through it from a subdirectory the session did not start in may still be
+recorded.**
+
+### What is still true rather than fixed
+
+- **A file of yours behind a directory the process cannot read is dropped**, and so is one
+  behind a symlink loop. That is the same rule that refuses an escaping link hiding in
+  those places, and it cannot tell the two apart — it is deliberately the safe way round,
+  but the cost is yours to know about.
+- **The path that gets emitted is still reduced on the string.** Containment is now decided
+  on disk, but the *name* we send is still computed by cancelling `..` arithmetically. When
+  a path stays inside your repo, that can produce a name for a file that was never opened —
+  `src/liblink/../top.ts` is emitted as `src/top.ts`. It cannot cross a repo boundary (the
+  fence refuses those before we get here), so it is a tidiness problem in the recorded
+  path, not a leak.
+- **The shell-command harvest still depends on a file existing.** A path scraped out of a
+  command string is only emitted if it names a real file in your working tree. That has
+  always been the rule and it is unchanged.
+- **If no repo root can be resolved at all, an already-relative path is kept as it is.**
+  There is nothing to measure it against; this is the long-standing behaviour of running
+  outside a repo.
+- **A path deeper than 256 segments is dropped**, not measured. Walking it costs a
+  filesystem call per segment, and no file anyone learns a system from is that deep.
+
 ## 0.24.0
 
 **A symlink pointing out of your checkout was carrying another repository's file paths
