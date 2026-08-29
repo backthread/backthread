@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -680,6 +680,257 @@ test('END TO END with real symlinks: a link out of the checkout cannot carry ano
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
+});
+
+// THE SPELLING IS THE ATTACK. Every case above descends through a link in one straight
+// line, and a fence that resolves the path it is about to EMIT catches all of them. None
+// of these is spelled that way.
+//
+//   1. `..` CANCELLED ON THE STRING. `dlink/../src/secret.ts`, with `dlink` a link into
+//      another repository, reduces arithmetically to `src/secret.ts` — a name this repo
+//      genuinely has — while the kernel opens the other repo's file. Cancelling `..` is
+//      only valid against a real directory; against a symlink it is simply wrong. Every
+//      re-spelling of that trick is here: relative, `./`-prefixed, backslash-separated,
+//      `.`-interleaved, double-slashed, and hidden one level down inside our own `src/`.
+//   2. A SEGMENT THE FILESYSTEM WILL NOT RESOLVE. A dangling link, a `chmod 000` parent
+//      and a symlink loop all make `realpath` fail, and a fence that CLIMBS past a
+//      failure to the nearest ancestor that resolves lands back inside the repo and
+//      keeps the path. `realpath` failing is not an absence — only `ENOENT` is — and
+//      the difference is the whole rule.
+//   3. A URI SCHEME. `file://…` is not POSIX-absolute, so it used to be treated as a
+//      relative path and emitted as `file:/…` — a MACHINE-ABSOLUTE path, out of a module
+//      that promises never to emit one.
+//   4. A PERCENT-ESCAPED SEPARATOR, which is two different paths depending on who
+//      decodes it, so the fence would measure one and the kernel would open the other.
+//
+// Each spelling targets a DISTINCT file so one leak can never be mistaken for another,
+// and every path is built by concatenation — `join` normalizes `..` away, and
+// normalization is the defect.
+test('END TO END with real symlinks: no re-spelling of an escape reaches the wire', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-spell-'));
+  const blocked = join(tmp, 'app/blocked');
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const lane = join(tmp, 'app-lane');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    runGit(app, 'worktree', 'add', '-q', '-b', 'lane', lane);
+
+    // The other repository's files. THEIRS is the marker that must never travel.
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    mkdirSync(join(foreign, 'deepdir/inner'), { recursive: true });
+    for (const n of ['secret', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6'])
+      writeFileSync(join(foreign, `src/${n}.ts`), 'export const v = 1; // THEIRS\n');
+    writeFileSync(join(foreign, 'x7.ts'), 'export const v = 1; // THEIRS\n');
+    writeFileSync(join(foreign, 'deepdir/inner/deep.ts'), 'export const deep = 1; // THEIRS\n');
+    // A directory belonging to NEITHER repo, reachable by climbing out through a link.
+    mkdirSync(join(tmp, 'plaindir/sub'), { recursive: true });
+    writeFileSync(join(tmp, 'plaindir/sub/notes.ts'), 'export const notes = 1; // THEIRS\n');
+
+    // Our own files, in two checkouts of one repo.
+    mkdirSync(join(app, 'src'), { recursive: true });
+    mkdirSync(join(app, 'packages'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+    mkdirSync(join(lane, 'src'), { recursive: true });
+    writeFileSync(join(lane, 'src/lane.ts'), 'export const lane = 1;\n');
+
+    symlinkSync(join(foreign, 'src'), join(app, 'dlink'), 'dir');
+    symlinkSync(foreign, join(app, 'vendor'), 'dir');
+    symlinkSync(foreign, join(app, 'packages/foo'), 'dir'); // at a name the repo has
+    symlinkSync(join(foreign, 'missing'), join(app, 'ghost'), 'dir'); // DANGLING
+    symlinkSync(join(foreign, 'src'), join(app, 'src/vlink'), 'dir'); // inside our own src/
+    symlinkSync(join(foreign, 'src/secret.ts'), join(app, 'src/linked.ts'), 'file'); // our NAME
+    symlinkSync(join(app, 'loopb'), join(app, 'loopa'), 'dir'); // ELOOP
+    symlinkSync(join(app, 'loopa'), join(app, 'loopb'), 'dir');
+    // Links that stay INSIDE the repo — one at the checkout root, one at a sibling
+    // worktree. Nothing about them escapes; the `..` AFTER them is what leaves. They
+    // are the case that separates "take the resolved parent" from "skip the `..`":
+    // skipping it leaves the walk sitting inside the repo, and the path is kept.
+    symlinkSync(app, join(app, 'selfroot'), 'dir');
+    symlinkSync(lane, join(app, 'lanelink'), 'dir');
+    mkdirSync(blocked, { recursive: true });
+    symlinkSync(foreign, join(blocked, 'vendor'), 'dir');
+
+    const escapes = [
+      app + '/dlink/../deepdir/inner/deep.ts', // would emit deepdir/inner/deep.ts
+      app + '/dlink/../src/secret.ts', // would emit src/secret.ts
+      app + '/vendor/../other-repo/src/x1.ts', // would emit other-repo/src/x1.ts
+      app + '/vendor/../plaindir/sub/notes.ts', // would emit plaindir/sub/notes.ts
+      app + '/packages/foo/../other-repo/src/x2.ts', // would emit packages/other-repo/…
+      'file://' + app + '/vendor/src/x3.ts', // would emit a MACHINE-ABSOLUTE path
+      'file:' + app + '/vendor/src/secret.ts', // …and so would the one-slash spelling
+      app + '/blocked/vendor/src/x4.ts', // EACCES behind chmod 000
+      app + '/ghost/src/x5.ts', // dangling link
+      'loopa/src/secret.ts', // symlink loop
+      'vendor%2Fsrc/x6.ts', // percent-escaped separator, relative
+      app + '/vendor%2Fsrc/secret.ts', // …and absolute, which skips the relative branch
+      app + '/src/vlink/../x7.ts', // masquerades as our own src/x7.ts
+      'dlink/../src/secret.ts', // relative
+      './dlink/../src/secret.ts', // ./-prefixed
+      'dlink\\..\\src\\secret.ts', // backslash separators
+      'dlink/.././src/secret.ts', // .-interleaved
+      'dlink//../src/secret.ts', // double slash
+      'vendor/src/secret.ts', // plain descent, relative
+      'blocked/vendor/src/secret.ts',
+      'ghost/src/secret.ts',
+      app + '/selfroot/../other-repo/src/x5.ts', // `..` climbs out of an in-repo link
+      'lanelink/../other-repo/src/x6.ts', // …and the same, via a sibling worktree
+    ];
+    // …and the properties that must survive it.
+    const keep = [
+      join(app, 'src/mine.ts'), // our own file
+      join(lane, 'src/lane.ts'), // a sibling worktree's real file
+      join(app, 'src/deleted.ts'), // a file we deleted
+      join(app, 'src/linked.ts'), // our own NAME, whose file is a link out
+    ];
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-s', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            ...[...escapes, ...keep].map((p) => ({ type: 'tool_use', name: 'Read', input: { file_path: p } })),
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    chmodSync(blocked, 0o000); // the EACCES case, live for the duration of the harvest
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-s' }, base);
+    chmodSync(blocked, 0o755);
+
+    const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
+    // Exactly the four that had to survive, and nothing else at all.
+    assert.deepEqual(filePaths, ['src/deleted.ts', 'src/lane.ts', 'src/linked.ts', 'src/mine.ts']);
+    // Not one machine-absolute path, from any of the 21 spellings.
+    for (const p of filePaths) assert.ok(!p.startsWith('/') && !p.includes(tmp), p);
+    const wire = JSON.stringify(sentBody);
+    assert.doesNotMatch(wire, /other-repo|plaindir|deepdir|secret|vendor|ghost|loop|%2F|selfroot|lanelink/i);
+  } finally {
+    try {
+      chmodSync(blocked, 0o755);
+    } catch {
+      // the fixture may not have got that far
+    }
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+// The rule that generalises past `..`: a segment the filesystem WILL NOT RESOLVE stops
+// the walk. `realpath` returning nothing is several conditions wearing one face, and
+// only ONE of them — a clean `ENOENT` — is an absence that is safe to walk past. The
+// end-to-end test above covers a dangling link, an unreadable parent and a loop through
+// the real filesystem; this pins the seam itself, because the difference between "there
+// is nothing here" and "something is here and will not say where it goes" is invisible
+// in the output of `realpath` alone and is what a mutant would quietly erase.
+test('a segment that will not resolve fails closed unless the filesystem says it is absent', async () => {
+  const run = async (isAbsent: (p: string) => boolean) => {
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-a', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Read', input: { file_path: '/work/app/opaque/secret.ts' } },
+          ],
+        },
+      }),
+    ].join('\n');
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    await runCapture(
+      { transcript_path: '/tmp/s.jsonl', cwd: '/work/app', session_id: 'sess-a' },
+      deps({
+        fetchImpl,
+        readFileImpl: async () => transcript,
+        resolveRepoRootsImpl: () => ['/work/app'],
+        // Only the root itself resolves; `opaque` does not.
+        realPathImpl: (p) => (p === '/work/app' ? '/work/app' : null),
+        isAbsentImpl: isAbsent,
+      }),
+    );
+    return ((sentBody as { filePaths?: string[] }).filePaths ?? []) as string[];
+  };
+
+  // "Nothing is here" — the deleted-directory case, which has always kept its path.
+  assert.deepEqual(await run(() => true), ['opaque/secret.ts']);
+  // "Something is here and will not say where it goes" — dangling link, EACCES, ELOOP.
+  // The path is refused, and refusing it is the only safe reading.
+  assert.deepEqual(await run(() => false), []);
+});
+
+// The walk costs a syscall per segment, so its depth is capped — and the cap DROPS the
+// path rather than waving it through, because a limit that fails open is a documented
+// way in. Pinned because "too deep" is exactly the branch a reader assumes is harmless.
+test('a path deeper than the walk cap is refused, not waved through', async () => {
+  const shallow = 'a/'.repeat(200) + 'ok.ts'; // 201 segments — walked
+  const deep = 'a/'.repeat(300) + 'no.ts'; // 301 segments — refused
+  const transcript = [
+    JSON.stringify({ type: 'user', sessionId: 'sess-c', message: { content: 'why?' } }),
+    JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-08-29T09:00:00Z',
+      message: {
+        content: [
+          { type: 'text', text: 'Because the reasoning outlives the diff.' },
+          { type: 'tool_use', name: 'Read', input: { file_path: shallow } },
+          { type: 'tool_use', name: 'Read', input: { file_path: deep } },
+        ],
+      },
+    }),
+  ].join('\n');
+  let sentBody: unknown = null;
+  const { fetch: fetchImpl } = stubFetch({
+    infer: (body) => {
+      sentBody = body;
+      return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+    },
+  });
+  await runCapture(
+    { transcript_path: '/tmp/s.jsonl', cwd: '/work/app', session_id: 'sess-c' },
+    deps({
+      fetchImpl,
+      readFileImpl: async () => transcript,
+      resolveRepoRootsImpl: () => ['/work/app'],
+      // Every segment resolves to itself and stays inside — so ONLY the cap can
+      // separate these two paths.
+      realPathImpl: (p) => p,
+      isAbsentImpl: () => false,
+    }),
+  );
+  assert.deepEqual((sentBody as { filePaths?: string[] }).filePaths, [shallow]);
 });
 
 // A CHECKOUT REACHED THROUGH A SYMLINKED PARENT still works — the property the

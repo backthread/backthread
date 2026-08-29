@@ -8105,7 +8105,7 @@ function configHint(env) {
 
 // src/capture.ts
 import { readFile as readFile10 } from "node:fs/promises";
-import { existsSync, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync, lstatSync, realpathSync as realpathSync3 } from "node:fs";
 import { dirname as dirname4, join as join13, sep } from "node:path";
 
 // ../packages/redact/src/index.ts
@@ -8205,10 +8205,12 @@ function stripLeadingSlashes(p) {
 function isAbsolute(p) {
   return p.startsWith("/");
 }
+var URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+var ENCODED_PATH_SEPARATOR = /%(?:2f|5c|2e|00)/i;
 function isForeignRelativePath(p) {
   if (p.startsWith("~")) return true;
   if (p.startsWith("\\")) return true;
-  if (/^[A-Za-z]:[\\/]/.test(p)) return true;
+  if (URI_SCHEME.test(p)) return true;
   const stripped = p.replace(/^(?:\.[\\/])+/, "");
   return /^\.\.(?:[\\/]|$)/.test(stripped);
 }
@@ -8349,6 +8351,7 @@ function sessionPaths(records, repoRoot, options) {
     for (const { raw: p, fromShell } of pathsFromRecord(rec)) {
       if (fromShell && exists === void 0) continue;
       if (p.includes("\0")) continue;
+      if (ENCODED_PATH_SEPARATOR.test(p)) continue;
       if (fromShell && p.length > MAX_SHELL_PATH_CHARS) continue;
       let norm;
       if (isAbsolute(p)) {
@@ -8364,7 +8367,7 @@ function sessionPaths(records, repoRoot, options) {
         if (norm.split("/").some((seg) => SHELL_EXCLUDED_DIRS.has(seg))) continue;
         if (!exists(norm)) continue;
       }
-      if (escapesRepo?.(norm, roots)) continue;
+      if (escapesRepo?.({ raw: p, absolute: isAbsolute(p) }, roots)) continue;
       if (fromShell && !seen.has(norm)) {
         if (shellPathCount >= MAX_SHELL_PATHS) continue;
         shellPathCount += 1;
@@ -10211,6 +10214,7 @@ async function maybeFirstCaptureConfirm(count, repoConnected, repo, deps = {}) {
 }
 
 // src/capture.ts
+var MAX_WALK_SEGMENTS = 256;
 function isInsideRoot(real, roots, separator = sep) {
   return roots.some((r) => real === r || real.startsWith(r + separator));
 }
@@ -10250,6 +10254,14 @@ async function runCapture(input, deps = {}) {
       return realpathSync3(p);
     } catch {
       return null;
+    }
+  });
+  const doIsAbsent = deps.isAbsentImpl ?? ((p) => {
+    try {
+      lstatSync(p);
+      return false;
+    } catch (err) {
+      return err?.code === "ENOENT";
     }
   });
   const doResolveRepoRoots = deps.resolveRepoRootsImpl ?? resolveRepoRoots;
@@ -10329,6 +10341,34 @@ async function runCapture(input, deps = {}) {
       return out2;
     };
     const inside = (real, realRoots) => isInsideRoot(real, realRoots);
+    const resolveWalk = (start, segments) => {
+      if (segments.length > MAX_WALK_SEGMENTS) return null;
+      let cur = start;
+      for (const seg of segments) {
+        if (seg === "" || seg === ".") continue;
+        if (seg === "..") {
+          cur = dirname4(cur);
+          continue;
+        }
+        const next = join13(cur, seg);
+        const real = realOf(next);
+        if (real !== null) {
+          cur = real;
+          continue;
+        }
+        if (doIsAbsent(next)) {
+          cur = next;
+          continue;
+        }
+        return null;
+      }
+      return cur;
+    };
+    const walkableSegments = (raw) => {
+      const segs = raw.split(/[\\/]/).filter((s) => s !== "" && s !== ".");
+      if (segs.length > 0 && segs[segs.length - 1] !== "..") segs.pop();
+      return segs;
+    };
     const escapesCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -10361,50 +10401,47 @@ async function runCapture(input, deps = {}) {
       // sibling worktree) and the sibling vouches for it, laundering the escape. So the
       // question asked is the opposite one, and a single contradiction drops the path.
       //
-      // AND WE CLIMB TO THE DEEPEST ANCESTOR THAT EXISTS. Asking only about the
-      // immediate parent means a link into a directory that is MISSING answers
-      // "resolves nowhere", which is an absence, which keeps the path — so
-      // `<repoA>/vendor/gone/secret.ts` leaked while `<repoA>/vendor/src/secret.ts` did
-      // not, purely because of what happened to be on the far side of the link.
-      // Climbing until something resolves reaches `vendor` itself, which is a link out,
-      // and refuses it. It leaves the deleted-file case exactly where it was:
-      // `src/deleted.ts` climbs to `src`, which is inside, so the path survives.
-      //
-      // TWO LIMITS OF THIS, both measured, both open, neither a regression — the same
-      // spellings get through on the previous release. Say them here rather than let
-      // the next reader infer a guarantee from the paragraph above.
-      //   1. A DANGLING link resolves nowhere at every level, so the climb walks PAST
-      //      it to an ancestor that is inside, and the path is kept. The sentence above
-      //      holds only while the link's target exists.
-      //   2. A `..` that cancels a symlinked segment defeats all of this before we are
-      //      asked at all: `normalizeRepoRelative` reduces the path arithmetically, so
-      //      `dlink/../src/a.ts` arrives here already spelled `src/a.ts` and there is
-      //      nothing left to detect. The predicate cannot see it — it receives the
-      //      POST-normalization path, and the evidence was destroyed upstream.
-      // Closing either one means resolving against the filesystem BEFORE normalizing,
-      // which changes what crosses the `sessionPaths` boundary. That is its own change.
-      escapesRepo: (rel, roots) => {
-        const parent = dirname4(rel);
-        const hit = escapesCache.get(parent);
+      // AND WE ASK ABOUT THE SPELLING THAT ARRIVED, not the one we would emit. This is
+      // the correction to the previous release, which resolved the NORMALIZED path in a
+      // single call and could not close the leak it was written for. Two mechanisms
+      // defeated it, and they are one shape:
+      //   1. `..` CANCELLED ON THE STRING. `normalizeRepoRelative` reduces
+      //      `dlink/../src/secret.ts` to `src/secret.ts` before the predicate is called,
+      //      so a link out is erased and the path arrives looking like one of our own.
+      //      Cancelling `..` is only valid against a real directory; against a symlink
+      //      it is wrong, because the link does not go where its name says.
+      //   2. AN UNRESOLVABLE SEGMENT CLIMBED PAST. Resolving the deepest ancestor that
+      //      exists treats "cannot say" as "keep looking upward", lands on an ancestor
+      //      that IS inside the repo, and keeps the path. Measured for a DANGLING link
+      //      (`ENOENT`) and for an escaping link behind a `chmod 000` directory
+      //      (`EACCES`) — and the earlier note here named only the first, which
+      //      understated the class. The class is: anything that makes the filesystem
+      //      unable to answer at the point the fence asks.
+      // `resolveWalk` closes both by following the raw spelling segment by segment and
+      // failing closed on any segment that will not resolve.
+      escapesRepo: ({ raw, absolute }, roots) => {
+        const key = `${absolute ? "A" : "R"}\0${raw}`;
+        const hit = escapesCache.get(key);
         if (hit !== void 0) return hit;
         const realRoots = realRootsOf(roots);
-        let escapes = false;
-        for (const root of roots) {
-          const segments = parent === "." || parent === "" ? [] : parent.split(/[\\/]/);
-          let real = null;
-          for (; ; ) {
-            real = realOf(segments.length > 0 ? join13(root, ...segments) : root);
-            if (real !== null || segments.length === 0) break;
-            segments.pop();
+        const escapes = () => {
+          if (absolute) {
+            if (realRoots.length === 0) return false;
+            const dest = resolveWalk("/", walkableSegments(raw));
+            return dest === null || !inside(dest, realRoots);
           }
-          if (real === null) continue;
-          if (!inside(real, realRoots)) {
-            escapes = true;
-            break;
+          const segments = walkableSegments(raw);
+          for (const root of roots) {
+            const realRoot = realOf(root);
+            if (realRoot === null) continue;
+            const dest = resolveWalk(realRoot, segments);
+            if (dest === null || !inside(dest, realRoots)) return true;
           }
-        }
-        escapesCache.set(parent, escapes);
-        return escapes;
+          return false;
+        };
+        const verdict = escapes();
+        escapesCache.set(key, verdict);
+        return verdict;
       }
     });
     const sessionId = redacted.sessionId ?? input.session_id ?? null;

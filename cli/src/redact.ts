@@ -30,6 +30,7 @@ export {
   redactTranscript,
   sessionPaths,
   sessionTimestamp,
+  type PathCandidate,
   type RedactedTranscript,
   type SessionRoots,
   type TranscriptTurn,

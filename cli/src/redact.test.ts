@@ -260,9 +260,9 @@ test('the escape check is given the roots the harvest actually used, not the cal
   ];
   const seen: string[][] = [];
   const out = sessionPaths(records, [], {
-    escapesRepo: (rel, roots) => {
+    escapesRepo: ({ raw }, roots) => {
       seen.push([...roots]);
-      return rel.startsWith('vendor/');
+      return raw.includes('/vendor/');
     },
   });
   // The predicate was handed the fallback root, not the empty list the caller passed.
@@ -707,7 +707,7 @@ test('sessionPaths drops a path the caller says resolves OUTSIDE the repo', () =
   ];
   // Both are under the root by string prefix — that is the whole problem.
   assert.deepEqual(sessionPaths(records, '/work/app'), ['src/mine.ts', 'vendor/src/secret.ts']);
-  assert.deepEqual(sessionPaths(records, '/work/app', { escapesRepo: (rel) => rel.startsWith('vendor/') }), [
+  assert.deepEqual(sessionPaths(records, '/work/app', { escapesRepo: ({ raw }) => raw.includes('/vendor/') }), [
     'src/mine.ts',
   ]);
 });
@@ -722,7 +722,7 @@ test('the escape check also gets the last word on a SHELL-derived path', () => {
   const exists = () => true;
   assert.deepEqual(sessionPaths(records, '/work/app', { exists }), ['src/mine.ts', 'vendor/src/secret.ts']);
   assert.deepEqual(
-    sessionPaths(records, '/work/app', { exists, escapesRepo: (rel) => rel.startsWith('vendor/') }),
+    sessionPaths(records, '/work/app', { exists, escapesRepo: ({ raw }) => raw.startsWith('vendor/') }),
     ['src/mine.ts'],
   );
 });
@@ -745,9 +745,61 @@ test('an escaping shell path does not consume the shell-path budget', () => {
   const records = [{ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command } }] } }];
   const out = sessionPaths(records, '/work/app', {
     exists: () => true,
-    escapesRepo: (rel) => rel.startsWith('vendor/'),
+    escapesRepo: ({ raw }) => raw.startsWith('vendor/'),
   });
   assert.deepEqual(out, ['src/mine.ts']);
+});
+
+// THE BOUNDARY ITSELF. The predicate's whole value is that it sees what ARRIVED, not
+// what would be emitted: `..` cancelled on the string against a symlinked segment is
+// wrong, and once cancelled the evidence is gone. So pin the shape that crosses — the
+// raw spelling, verbatim, with its `..` and its `./` and its absoluteness intact —
+// rather than trusting a caller to notice when a reduction creeps back in.
+test('the escape check receives the RAW spelling, not the one that would be emitted', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: '/work/app/dlink/../src/a.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: './dlink/../src/b.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'cat dlink/../src/c.ts' } }] } },
+  ];
+  const seen: { raw: string; absolute: boolean }[] = [];
+  const out = sessionPaths(records, '/work/app', {
+    exists: () => true,
+    escapesRepo: (candidate) => {
+      seen.push({ ...candidate });
+      return false;
+    },
+  });
+  assert.deepEqual(seen, [
+    { raw: '/work/app/dlink/../src/a.ts', absolute: true },
+    { raw: './dlink/../src/b.ts', absolute: false },
+    { raw: 'dlink/../src/c.ts', absolute: false },
+  ]);
+  // …while what is EMITTED is still the normalized spelling. Both are true at once, and
+  // that is exactly the separation the previous signature did not have.
+  assert.deepEqual(out, ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+});
+
+// A URI scheme is not a path this module can measure, and one of them was leaving as a
+// MACHINE-ABSOLUTE path — the one thing sessionPaths promises never to emit. Refused
+// before the fence is even consulted, so no `escapesRepo` implementation can be the
+// thing that saves us.
+test('sessionPaths refuses a URI scheme, and never emits a machine-absolute path', () => {
+  const records = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'file:///work/app/vendor/src/secret.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'file://localhost/work/app/vendor/x.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'https://example.com/vendor/y.ts' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'data:text/plain,z.ts' } }] } },
+    // A percent-escaped separator is two paths in one, depending on who decodes it.
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'vendor%2Fsrc/secret.ts' } }] } },
+    // A colon deeper in the path is an ordinary filename and must survive.
+    { type: 'assistant', message: { content: [{ type: 'tool_use', input: { file_path: 'src/a:b.ts' } }] } },
+  ];
+  const out = sessionPaths(records, '/work/app');
+  assert.deepEqual(out, ['src/a:b.ts']);
+  for (const p of out) {
+    assert.ok(!p.startsWith('/'), p);
+    assert.ok(!p.includes('work/app'), p);
+  }
 });
 
 // A NUL cannot be part of a filename on any filesystem this runs on — the syscall layer
