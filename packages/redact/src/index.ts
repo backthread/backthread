@@ -300,14 +300,14 @@ const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
  * path would fall into the "already-relative" branch and be emitted unfiltered even
  * when a `repoRoot` was supplied. We treat as foreign (drop): a leading `~`
  * (home dir), a leading `../` or a bare `..` segment escaping the root, a URI scheme
- * (`file://…` — which also subsumes the Windows drive letter `X:`, see `URI_SCHEME`),
- * a leading backslash (`\server\share`, `\repo\x.ts`), and a percent-escaped path
- * separator. Genuinely-relative POSIX paths (`src/x.ts`, `./a/b.ts`) are NOT foreign.
- * Pure string check, zero deps.
+ * (`file://…` — which also subsumes the Windows drive letter `X:`, see `URI_SCHEME`).
+ * Genuinely-relative POSIX paths (`src/x.ts`, `./a/b.ts`) are NOT foreign. Pure string
+ * check, zero deps.
  *
- * The percent-escape check is NOT here — it belongs to both branches, and putting it in
- * this one left `<root>/vendor%2Fsrc/secret.ts` reaching the wire because an absolute
- * path never consults this function at all. It lives in the loop instead, beside NUL.
+ * A backslash and a percent-escaped separator are NOT checked here even though they read
+ * like they belong: they are true of ABSOLUTE spellings too, and an absolute path never
+ * reaches this function. Both live in the `sessionPaths` loop instead.
+ *
  */
 function isForeignRelativePath(p: string): boolean {
   if (p.startsWith('~')) return true; // ~/secret/key.pem, ~root/x
@@ -567,8 +567,9 @@ export interface SessionPathsOptions {
  * A harvested path in the spelling it was harvested in, before any normalization —
  * what `escapesRepo` is asked about.
  *
- * `raw` is verbatim: absolute or relative, `.` and `..` intact, either separator, no
- * `./` stripped. That is deliberate and load-bearing (see `escapesRepo`): every
+ * `raw` is verbatim: absolute or relative, `.` and `..` intact, no `./` stripped and no
+ * leading whitespace trimmed. `/` is its only separator — a spelling carrying `\` is
+ * refused before it gets here, so this is never two spellings of one path. That is deliberate and load-bearing (see `escapesRepo`): every
  * reduction this module could apply first is a reduction that can be wrong in the
  * presence of a symlink, so none of them is applied before the filesystem has spoken.
  *
@@ -696,7 +697,20 @@ function pathsFromRecord(rec: unknown): CandidatePath[] {
       command?: unknown;
     };
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
-      if (typeof v === 'string' && v.trim().length > 0) out.push({ raw: v.trim(), fromShell: false });
+      // TRIM THE TAIL ONLY. This used to push `v.trim()`, and trimming the HEAD is an
+      // escape: `trim()` erases leading whitespace, the FIRST SEGMENT is a head, and a
+      // symlink can be named ` vendor`. The agent reports ` vendor/src/secret.ts`, the
+      // fence measures `vendor/src/secret.ts`, finds no `vendor` in the repo, reads that
+      // as empty ground inside it, and keeps the path — while the kernel opens the other
+      // repository in one hop. Same defect as `..` cancelled on the string and as `\`
+      // read as a separator: the fence measuring a DIFFERENT PATH from the one opened.
+      //
+      // The tail is safe and is still trimmed, because the walk never follows the last
+      // segment, so nothing the tail does can change where the path resolves — and a
+      // trailing newline is common enough in a tool-input field that refusing it would
+      // cost real paths. A LEADING control character is not trimmed here and is refused
+      // outright by `CONTROL_CHARACTER` below.
+      if (typeof v === 'string' && v.trim().length > 0) out.push({ raw: v.trimEnd(), fromShell: false });
     }
     pushFromCommand(i.command);
   };
@@ -801,13 +815,10 @@ export function sessionPaths(
       // `exists` gets the pre-scan behaviour rather than unverified guesses — the
       // absence of a check must never be the reason something leaks.
       if (fromShell && exists === undefined) continue;
-      // A NUL byte is not part of any path on any filesystem this runs on — the
-      // syscall layer treats it as the end of the string, so nothing downstream can
-      // even name the file it claims to. It arrives only from a malformed or hostile
-      // tool-input field (the shell token class has never been able to carry one),
-      // and it is metadata that goes on to be stored, joined and rendered. Refuse it
-      // at the fence, where every candidate passes, rather than asking each consumer
-      // to cope with a string that cannot be a path.
+      // Any C0 control character, NUL included — see `CONTROL_CHARACTER`, which carries
+      // the reasoning and the one honest qualification about trimming. Refused at the
+      // fence, where every candidate passes, rather than asking each consumer to cope
+      // with a string that cannot be, or should not be, a path.
       if (CONTROL_CHARACTER.test(p)) continue;
       // A percent-escaped path separator makes the token TWO different paths depending
       // on who decodes it, and every gate below — and the caller's filesystem check

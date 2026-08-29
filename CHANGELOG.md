@@ -72,8 +72,26 @@ honest file survives. The escape through that same name is still refused in both
 spellings — the case where a sibling worktree could vouch for an escaping link stays
 closed, because the path is now resolved rather than voted on.
 
+**A leading space in a filename was doing the same thing as the backslash.** A path
+handed to a file-reading tool is trimmed of surrounding whitespace on the way in, and the
+first segment of a path is a "surround" — so a symlink named ` vendor` (leading space)
+pointing at another repository was measured as `vendor`, which your repo does not have,
+which read as empty ground inside it. Your computer, given the spelling the agent actually
+used, opened the other repository. Only the *end* of the path is trimmed now, which cannot
+change where a path resolves.
+
 ### What is still true rather than fixed
 
+- **A file of yours behind a directory the process cannot read is dropped**, and so is one
+  behind a symlink loop. That is the same rule that refuses an escaping link hiding in
+  those places, and it cannot tell the two apart — it is deliberately the safe way round,
+  but the cost is yours to know about.
+- **The path that gets emitted is still reduced on the string.** Containment is now decided
+  on disk, but the *name* we send is still computed by cancelling `..` arithmetically. When
+  a path stays inside your repo, that can produce a name for a file that was never opened —
+  `src/liblink/../top.ts` is emitted as `src/top.ts`. It cannot cross a repo boundary (the
+  fence refuses those before we get here), so it is a tidiness problem in the recorded
+  path, not a leak.
 - **The shell-command harvest still depends on a file existing.** A path scraped out of a
   command string is only emitted if it names a real file in your working tree. That has
   always been the rule and it is unchanged.

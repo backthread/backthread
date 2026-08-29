@@ -8303,7 +8303,7 @@ function pathsFromRecord(rec) {
     if (!input || typeof input !== "object") return;
     const i = input;
     for (const v of [i.file_path, i.path, i.notebook_path, i.cwd]) {
-      if (typeof v === "string" && v.trim().length > 0) out.push({ raw: v.trim(), fromShell: false });
+      if (typeof v === "string" && v.trim().length > 0) out.push({ raw: v.trimEnd(), fromShell: false });
     }
     pushFromCommand(i.command);
   };
@@ -10328,6 +10328,14 @@ async function runCapture(input, deps = {}) {
       realPathCache.set(abs, real);
       return real;
     };
+    const absentCache = /* @__PURE__ */ new Map();
+    const isAbsentOf = (abs) => {
+      const hit = absentCache.get(abs);
+      if (hit !== void 0) return hit;
+      const absent = doIsAbsent(abs);
+      absentCache.set(abs, absent);
+      return absent;
+    };
     const realRootsCache = /* @__PURE__ */ new Map();
     const realRootsOf = (roots) => {
       const key = JSON.stringify(roots);
@@ -10357,7 +10365,7 @@ async function runCapture(input, deps = {}) {
           cur = real;
           continue;
         }
-        if (doIsAbsent(next)) {
+        if (isAbsentOf(next)) {
           cur = next;
           continue;
         }
@@ -10394,15 +10402,7 @@ async function runCapture(input, deps = {}) {
       // its contents live. Resolving the full path would drop it too, which is losing
       // our own metadata to a rule aimed at somebody else's.
       //
-      // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME root
-      // resolves it inside — is wrong, and wrong in the way that reopens the leak it is
-      // meant to close. Roots are checkouts of one repo, so every tracked directory
-      // exists in all of them: put the escaping link at a name the repo genuinely has
-      // (`ln -s ../../other packages/foo`, with `packages/foo` a real directory in a
-      // sibling worktree) and the sibling vouches for it, laundering the escape. So the
-      // question asked is the opposite one, and a single contradiction drops the path.
-      //
-      // AND WE ASK ABOUT THE SPELLING THAT ARRIVED, not the one we would emit. This is
+      // WE ASK ABOUT THE SPELLING THAT ARRIVED, not the one we would emit. This is
       // the correction to the previous release, which resolved the NORMALIZED path in a
       // single call and could not close the leak it was written for. Two mechanisms
       // defeated it, and they are one shape:

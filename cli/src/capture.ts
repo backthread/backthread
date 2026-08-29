@@ -163,7 +163,11 @@ export interface CaptureDeps {
   fileExistsImpl?: (absolutePath: string) => boolean;
   /**
    * Test seam: follow an ABSOLUTE path through every symlink to the real directory
-   * it names, or null when it names nothing on disk. Defaults to `fs.realpathSync`.
+   * it names, or null WHEN THE FILESYSTEM WILL NOT RESOLVE IT, FOR ANY REASON — the
+   * name is absent, or it is a dangling link, an unreadable parent, a symlink loop.
+   * Those are different conditions and only `isAbsentImpl` can tell them apart; a stub
+   * written to return null for absent paths ALONE silently stops exercising the cases
+   * the walk fails closed on. Defaults to `fs.realpathSync`.
    * Backs the `escapesRepo` predicate that gives `sessionPaths` its last word on
    * containment (see below) — string prefixes cannot see through a link, and the
    * filesystem is the only thing that can.
@@ -468,7 +472,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     const repoRoots = input.cwd ? doResolveRepoRoots(input.cwd, deps.readGitImpl, warnAboutRoots) : [];
     const existsCache = new Map<string, boolean>();
     // One realpath per distinct absolute path, for the whole capture. Both the root
-    // resolution and the ancestor walk below ask about the same handful of directories
+    // resolution and the segment walk below ask about the same handful of directories
     // over and over, and a session's working tree does not change under us mid-capture.
     const realPathCache = new Map<string, string | null>();
     const realOf = (abs: string): string | null => {
@@ -477,6 +481,18 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       const real = doRealPath(abs);
       realPathCache.set(abs, real);
       return real;
+    };
+    // Memoised for the same reason `realOf` is, and it was missed: the relative route
+    // walks EVERY root, so a name that exists in only one of them asks this question once
+    // per root, per path. On a machine where parallel worktrees are the normal workflow
+    // that is the common case, not the rare one.
+    const absentCache = new Map<string, boolean>();
+    const isAbsentOf = (abs: string): boolean => {
+      const hit = absentCache.get(abs);
+      if (hit !== undefined) return hit;
+      const absent = doIsAbsent(abs);
+      absentCache.set(abs, absent);
+      return absent;
     };
     // The roots as the FILESYSTEM spells them, which is what a resolved path has to be
     // compared against. A root set deliberately carries logical spellings too (a
@@ -553,7 +569,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           cur = real;
           continue;
         }
-        if (doIsAbsent(next)) {
+        if (isAbsentOf(next)) {
           cur = next; // nothing is here; nothing here can be a link either
           continue;
         }
@@ -611,15 +627,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       // its contents live. Resolving the full path would drop it too, which is losing
       // our own metadata to a rule aimed at somebody else's.
       //
-      // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME root
-      // resolves it inside — is wrong, and wrong in the way that reopens the leak it is
-      // meant to close. Roots are checkouts of one repo, so every tracked directory
-      // exists in all of them: put the escaping link at a name the repo genuinely has
-      // (`ln -s ../../other packages/foo`, with `packages/foo` a real directory in a
-      // sibling worktree) and the sibling vouches for it, laundering the escape. So the
-      // question asked is the opposite one, and a single contradiction drops the path.
-      //
-      // AND WE ASK ABOUT THE SPELLING THAT ARRIVED, not the one we would emit. This is
+      // WE ASK ABOUT THE SPELLING THAT ARRIVED, not the one we would emit. This is
       // the correction to the previous release, which resolved the NORMALIZED path in a
       // single call and could not close the leak it was written for. Two mechanisms
       // defeated it, and they are one shape:
@@ -638,8 +646,6 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       // `resolveWalk` closes both by following the raw spelling segment by segment and
       // failing closed on any segment that will not resolve.
       escapesRepo: ({ raw, absolute }, roots) => {
-        // Memoised on the raw spelling, keyed with its kind — an absolute and a relative
-        // spelling are different questions and must never share an answer.
         // Memoised on the raw spelling. It needs no other key: `absolute` is a pure
         // function of `raw` (it IS `raw.startsWith('/')`), so an absolute and a relative
         // spelling can never collide on one entry, and a kind prefix here would be dead

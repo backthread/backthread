@@ -841,6 +841,12 @@ test('END TO END with real symlinks: no re-spelling of an escape reaches the wir
     // skipping it leaves the walk sitting inside the repo, and the path is kept.
     symlinkSync(app, join(app, 'selfroot'), 'dir');
     symlinkSync(lane, join(app, 'lanelink'), 'dir');
+    // Links whose NAME BEGINS WITH WHITESPACE. A tool input is trimmed on the way in,
+    // and the first segment is a head — trim it and the fence stops measuring the path
+    // the kernel opens. NBSP as well as ASCII space: `trim()` strips every Unicode
+    // whitespace character, so the escape is not spelled one way.
+    symlinkSync(foreign, join(app, ' spacelink'), 'dir');
+    symlinkSync(foreign, join(app, '\u00a0nbsplink'), 'dir');
     // A link whose NAME contains a backslash. On POSIX `\` is an ordinary filename
     // character, so this is ONE segment to the kernel and it lands in the other repo in
     // a single hop. A fence that reads `\` as a separator sees two segments that do not
@@ -876,6 +882,8 @@ test('END TO END with real symlinks: no re-spelling of an escape reaches the wir
       'x\\y/src/secret.ts', // a link genuinely NAMED `x\y` — one segment to the kernel
       app + '/x\\y/src/secret.ts', // …and the absolute spelling of it
       'x\\y/src/../src/secret.ts', // …and with a `..` for good measure
+      ' spacelink/src/secret.ts', // a NAME starting with a space, erased by trim()
+      '\u00a0nbsplink/src/secret.ts', // …and with a non-breaking space
     ];
     // …and the properties that must survive it.
     const keep = [
@@ -922,11 +930,14 @@ test('END TO END with real symlinks: no re-spelling of an escape reaches the wir
     const wire = JSON.stringify(sentBody);
     assert.doesNotMatch(
       wire,
-      /other-repo|plaindir|deepdir|secret|vendor|ghost|loop|%2F|selfroot|lanelink|x\/y|x\\\\y/i,
+      /other-repo|plaindir|deepdir|secret|vendor|ghost|loop|%2F|selfroot|lanelink|spacelink|nbsplink|x\/y|x\\\\y/i,
     );
     // The `cat`-level truth the backslash rows rest on: that spelling really does open
     // the other repository's file, in one hop, exactly as the kernel reads it.
     assert.match(readFileSync(app + '/x\\y/src/secret.ts', 'utf8'), /THEIRS/);
+    // …and so does a name whose leading whitespace the input trim would have eaten.
+    assert.match(readFileSync(app + '/ spacelink/src/secret.ts', 'utf8'), /THEIRS/);
+    assert.match(readFileSync(app + '/\u00a0nbsplink/src/secret.ts', 'utf8'), /THEIRS/);
   } finally {
     try {
       chmodSync(blocked, 0o755);
