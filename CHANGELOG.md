@@ -38,8 +38,10 @@ Two smaller consequences worth stating rather than letting you discover:
 - Paths are now **repo-root-relative** in every case. A session running inside a
   monorepo package used to emit paths relative to that package.
 - Past the linked-worktree cap the extras used to be dropped in silence, leaving their
-  files treated as another repo's. It now says so once on stderr and names the command
-  that shows you what was skipped.
+  files treated as another repo's. It now says so once on stderr, and suggests
+  `git worktree prune` — which is the fix when the surplus is stale registrations, and
+  not otherwise. If you genuinely have more live worktrees than the cap, the warning is
+  telling you that some of them are not being measured.
 
 The fence itself is unchanged and still absolute: nothing machine-absolute, nothing
 outside a resolved root, nothing that traverses upward, ever leaves your machine.
