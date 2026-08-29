@@ -22,52 +22,61 @@ Two things were on hand the whole time and were not being read: your agent stamp
 directory on every record it writes, and a `cd` inside the command is right there in the text
 being scanned. Both now travel with the path they belong to.
 
-**The harder half was knowing when not to trust that reading.** The first attempt at this
-looked for `cd` and, when it did not find one, confidently used the record's directory. Review
-found eleven ways to move a shell that it did not recognise — `pushd`, `cd -P`, `cd --`,
-`{ cd x; }`, `\cd`, `env -C`, `then cd`, `time cd`, `bash -c 'cd x'`, `cd -`, and a Codex
-command array where the `cd` sat behind a flag. Every one produced a confident answer that was
-wrong. That is not eleven bugs; it is one. Reading a command to find out where it moved is an
-open-ended question, and there is always another spelling.
+**The harder half was knowing when not to trust that reading.** The first attempt looked for
+`cd` and, when it did not find one, confidently used the record's directory. Review found
+eleven ways to move a shell that it did not recognise, and a second round found eleven more —
+`pushd`, `cd -P`, `cd --`, `{ cd x; }`, `\cd`, `env -C`, `then cd`, `time cd`,
+`bash -c 'cd x'`, `cd -`, `source ./script.sh`, and — worst of all — `c\d`, `c"d"` and
+`c'd'`, which contain no `cd` for anything to find and run it anyway, because the shell strips
+quoting before it looks the word up. Every one produced a confident answer that was wrong.
+That is not twenty-two bugs; it is one. Reading a command to find out where it moved is an
+open-ended question and there is always another spelling.
 
 So the question is now the closed one: **can we prove the command did not move?** Anything
-that might change a directory is detected crudely and deliberately over-eagerly, and the part
-of the reader that actually interprets `cd` must account for every one of those detections.
-Whatever it cannot explain makes the command *unplaceable*, and an unplaceable relative path is
-dropped rather than attributed to a directory nobody can name. A twelfth spelling nobody has
-thought of is refused by default instead of leaking until someone finds it.
+that might change a directory is detected deliberately over-eagerly — and detected on the
+command as the *shell* will see it, with quoting removed and expansions collapsed, so a `cd`
+spliced together out of pieces is still a `cd`. The part of the reader that actually
+interprets `cd` must then account for every one of those detections. Whatever it cannot
+explain makes the command *unplaceable*, and an unplaceable relative path is dropped rather
+than attributed to a directory nobody can name.
 
-Measured against real repositories and real symlinks, each spelling first confirmed by actually
-reading the other repository's bytes:
+Measured against real repositories and real symlinks, each spelling first confirmed by running
+it under a real shell and reading the other repository's bytes:
 
 * **24 spellings invented before the redesign — all refused.** The same probe leaks all 24 on
   0.25.0.
-* **24 more invented after it, aimed at the new rule itself — all refused**, with no further
-  change to the code. That is the first round in this sequence where a fresh search found
-  nothing new. On 0.25.0 the same probe leaks all 24.
+* **24 more invented after it, aimed at the new rule — all refused**, with no further change.
+* **14 more found by an independent adversarial review of the redesign itself — all refused**,
+  after the fixes described above.
 * Everything closed by 0.24.0 and 0.25.0 stays closed; a file in a sibling worktree of the same
   repository is still recorded.
 
-**What this costs, stated plainly.** Two separate reductions, both measured over 73,806 real
-shell commands:
+**This is a much stronger fence, not a proof.** A shell can name a command in more ways than
+any scan of text can enumerate, so the honest claim is bounded: every construct found across
+three rounds of adversarial review is refused, and the detection now covers the two mechanisms
+that hide a word — quoting and expansion — rather than a list of spellings. It is not a
+guarantee against a transcript deliberately written to defeat it.
 
-* **2.5% of relative paths from shell commands are now dropped as unplaceable** — the command
-  contained something that could change directory and could not be read. This includes cases
-  where nothing actually moved (a `cd` written inside a heredoc, or a `--include=cd` flag).
-  Over-detecting costs paths; under-detecting leaks them, so it errs the first way on purpose.
+**What this costs, stated plainly.** Two separate reductions, measured over 73,800 real shell
+commands:
+
+* **6.8% of relative paths from shell commands are now dropped as unplaceable** — the command
+  contained something that could change directory and could not be read. Most of that is
+  `source`/`.` running a script, which can `cd` anywhere and says nothing about where. It also
+  includes commands where nothing actually moved (a `cd` written inside a heredoc, a
+  `--include=cd` flag). Over-detecting costs paths; under-detecting leaks them, so it errs the
+  first way on purpose.
 * **A further ~1.2% are dropped because the directory they were written in resolves outside
-  your repository.** About seven in ten of those are the misattribution being corrected rather
-  than a loss.
+  your repository.** About seven in ten of those are the misattribution being corrected.
 
 **What is still open, and known.** A path that stays *inside* your repository but was written
 from a subdirectory is still recorded under the name it was spelled with, not the name your
 repository knows it by — `cd packages/api && cat src/config.ts` records `src/config.ts`.
 Nothing belonging to another repository escapes through this, but the file it names may be the
-wrong one, and it is not fixed here. Files you **deleted** during a session still lose their
-paths, unchanged and for the unchanged reason. If your agent's shell keeps its working
-directory between commands, a `cd` in one command would govern the next; measured across 4,055
-real cases where the two readings disagree, the shell had reset in 96.1% of them, so each
-command is read from its own stamped directory.
+wrong one. Files you **deleted** during a session still lose their paths, unchanged and for the
+unchanged reason. If your agent's shell kept its working directory between commands, a `cd` in
+one would govern the next; measured across 4,055 real cases where the two readings disagree,
+the shell had reset in 96.1%, so each command is read from its own stamped directory.
 
 ## 0.25.0
 

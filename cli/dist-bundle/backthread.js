@@ -8290,9 +8290,12 @@ var SHELL_PATH_TOKEN = new RegExp(
   `(?<![\\w.@~$+/\\\\-])/?[\\w.@~+-]+(?:/[\\w.@~+-]+)+\\.(?:${EXT_ALTERNATION})(?![\\w.@~+/\\\\-])`,
   "g"
 );
-var MIGHT_CHANGE_DIRECTORY = /(?:^|[^\w.\-/])(?:cd|pushd|popd|chdir)(?![\w.\-/])|(?:^|\s)(?:-C|--chdir|--directory)(?:[=\s])/g;
+var MIGHT_CHANGE_DIRECTORY = /(?:^|[^\w.\-/])(?:cd|pushd|popd|chdir|source)(?![\w.\-/])|(?:^|[;&|(\n]|&&|\|\|)\s*\.\s|(?:^|\s)(?:-C|--chdir|--directory)(?:[=\s])/g;
+function withoutShellQuoting(text) {
+  return text.replace(/\\(.)/g, "$1").replace(/\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`/g, "").replace(/['"]/g, "");
+}
 var SHELL_CD = /(?:^|[;&|(){}\n]|&&|\|\||\bthen\b|\bdo\b|\belse\b|\btime\b|\\)\s*(cd|pushd)\s+(?!-)(?:"([^"]*)"|'([^']*)'|([^\s;&|)}]+))/g;
-var UNREADABLE_CD_TARGET = /[$`~*?[\]{}]/;
+var UNREADABLE_CD_TARGET = /[$`~*?[\]{}\\'"<>]/;
 var CONDITIONAL_SHELL = /(?:^|[^\w.-])(?:if|elif|while|until|for|case)(?![\w.-])/;
 function composeBase(current, target) {
   if (target.startsWith("/")) return target;
@@ -8301,6 +8304,8 @@ function composeBase(current, target) {
 }
 function shellCdBases(text, cwd) {
   const crude = [...text.matchAll(MIGHT_CHANGE_DIRECTORY)];
+  const unquoted = [...withoutShellQuoting(text).matchAll(MIGHT_CHANGE_DIRECTORY)];
+  if (unquoted.length > crude.length) return { events: [], locatable: false, exact: false };
   if (crude.length === 0) return { events: [], locatable: true, exact: true };
   const refined = [...text.matchAll(SHELL_CD)];
   const events = [];
@@ -8310,6 +8315,8 @@ function shellCdBases(text, cwd) {
     if (m[1] === "pushd" || target.length === 0 || UNREADABLE_CD_TARGET.test(target)) {
       return { events: [], locatable: false, exact: false };
     }
+    const after = text.slice((m.index ?? 0) + m[0].length);
+    if (/^[^\s;&|)}<>]/.test(after)) return { events: [], locatable: false, exact: false };
     chain = composeBase(chain, target);
     events.push({ at: (m.index ?? 0) + m[0].length, base: chain });
   }
@@ -10473,7 +10480,6 @@ async function runCapture(input, deps = {}) {
       if (hit !== void 0) return hit;
       const out2 = [];
       const admit = (dest) => {
-        if (!moved && !inside(dest, realRoots)) return;
         if (!out2.includes(dest)) out2.push(dest);
       };
       for (const spelling of declared) {
@@ -10537,7 +10543,7 @@ async function runCapture(input, deps = {}) {
       // predicate is consulted, so that a consumer without this callback gets the same answer
       // as one with it. Re-checking it here would be a branch no test could turn red.
       escapesRepo: ({ raw, absolute, bases, moved }, roots) => {
-        const key = `${raw}\0${JSON.stringify(bases)}`;
+        const key = `${raw}\0${moved ? "m" : ""}\0${JSON.stringify(bases)}`;
         const hit = escapesCache.get(key);
         if (hit !== void 0) return hit;
         const realRoots = realRootsOf(roots);
@@ -10548,10 +10554,9 @@ async function runCapture(input, deps = {}) {
             return dest === null || !inside(dest, realRoots);
           }
           const segments = walkableSegments(raw);
-          for (const base of [
-            ...declaredBases(bases, moved, roots, realRoots),
-            ...relativeBases(roots, realRoots)
-          ]) {
+          const declared = declaredBases(bases, moved, roots, realRoots);
+          if (!moved && bases.length > 0 && declared.length === 0) return true;
+          for (const base of [...declared, ...relativeBases(roots, realRoots)]) {
             const dest = resolveWalk(base, segments);
             if (dest === null || !inside(dest, realRoots)) return true;
           }

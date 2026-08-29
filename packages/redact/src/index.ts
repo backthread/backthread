@@ -740,7 +740,34 @@ interface CandidatePath {
  * unlocatable and its relative tokens are dropped.
  */
 const MIGHT_CHANGE_DIRECTORY =
-  /(?:^|[^\w.\-/])(?:cd|pushd|popd|chdir)(?![\w.\-/])|(?:^|\s)(?:-C|--chdir|--directory)(?:[=\s])/g;
+  /(?:^|[^\w.\-/])(?:cd|pushd|popd|chdir|source)(?![\w.\-/])|(?:^|[;&|(\n]|&&|\|\|)\s*\.\s|(?:^|\s)(?:-C|--chdir|--directory)(?:[=\s])/g;
+
+/**
+ * The command as the shell will see it once QUOTE REMOVAL has run — `\`, `"` and `'` deleted.
+ *
+ * `cd` is a word, and a word is not a spelling. `c\d`, `c"d"`, `c'd'` and `\c\d` are four
+ * different strings and all four run the `cd` builtin, because the shell strips quoting before
+ * it looks up the command name. A detector reading the raw text sees no `cd` in any of them,
+ * reports the command as move-free, and hands back a confident base — which is the same defect
+ * this whole file exists to close, one layer further out.
+ *
+ * Used ONLY for detection, never for reading a target: stripping changes every offset, so the
+ * stripped text cannot be matched up with the real one. What is compared is the NUMBER of
+ * directory-changing constructs. More of them after stripping means the command hides one
+ * behind quoting, and that is enough to refuse it without needing to know where it is.
+ */
+function withoutShellQuoting(text: string): string {
+  // Expansions collapse to nothing as well as quotes coming off, and for the same reason:
+  // `c${EMPTY}d` is a `cd`, spliced together out of two halves that neither contain one. The
+  // shell builds the command word before it looks the word up, so a scan of the text as
+  // WRITTEN is reading something that never runs. An expansion whose value we cannot know
+  // collapses to the empty string here — that is not a guess at its value, it is the one
+  // substitution that reveals a word hiding across it.
+  return text
+    .replace(/\\(.)/g, '$1')
+    .replace(/\$\{[^{}]*\}|\$\([^()]*\)|`[^`]*`/g, '')
+    .replace(/['"]/g, '');
+}
 
 /**
  * A `cd` this scan can actually READ, with its target captured.
@@ -762,11 +789,19 @@ const SHELL_CD =
 
 /**
  * A `cd` target this scan must not pretend to understand: a variable or command substitution
- * (`$HOME`, `` `pwd` ``), a `~` the shell expands from an environment we do not have, or a
- * glob. Guessing at any of them produces a base that is confidently wrong, and a wrong base
- * is the entire defect class this exists to close.
+ * (`$HOME`, `` `pwd` ``), a `~` the shell expands from an environment we do not have, a glob,
+ * or any QUOTING OR REDIRECTION still embedded in the word.
+ *
+ * That last group is the one that was missed, and it fails in the worst direction. `cd s3\x`,
+ * `cd s3'x'` and `cd sub>/dev/null` all reach the shell as something shorter than they look —
+ * `s3x`, `s3x`, `sub` — while this scan captures the whole run of characters. The composed
+ * base is then a directory that does not exist, and a base that does not resolve is SKIPPED,
+ * which falls back to the session's own directory: the fence ends up measuring from the one
+ * place the command definitely was not. A target we cannot reduce the way the shell does has
+ * to refuse the command instead. Note that an ordinarily quoted target — `cd "sub"` — never
+ * reaches here: the quoted alternatives in `SHELL_CD` capture it without its quotes.
  */
-const UNREADABLE_CD_TARGET = /[$`~*?[\]{}]/;
+const UNREADABLE_CD_TARGET = /[$`~*?[\]{}\\'"<>]/;
 
 /**
  * A construct whose BRANCH we cannot resolve, so we do not know whether its `cd` ran.
@@ -817,6 +852,11 @@ interface CommandBases {
  */
 function shellCdBases(text: string, cwd: string | null): CommandBases {
   const crude = [...text.matchAll(MIGHT_CHANGE_DIRECTORY)];
+  // A directory change the shell will only see AFTER quote removal. Counting rather than
+  // locating, because stripping moves every offset; a command that grows a construct when
+  // its quoting is removed is hiding one, and hiding one is all we need to know.
+  const unquoted = [...withoutShellQuoting(text).matchAll(MIGHT_CHANGE_DIRECTORY)];
+  if (unquoted.length > crude.length) return { events: [], locatable: false, exact: false };
   if (crude.length === 0) return { events: [], locatable: true, exact: true };
 
   const refined = [...text.matchAll(SHELL_CD)];
@@ -828,6 +868,15 @@ function shellCdBases(text: string, cwd: string | null): CommandBases {
     if (m[1] === 'pushd' || target.length === 0 || UNREADABLE_CD_TARGET.test(target)) {
       return { events: [], locatable: false, exact: false };
     }
+    // THE TARGET MUST BE THE WHOLE WORD. `cd "s3"x` is one word to the shell — `s3x` — and a
+    // reader that takes `"s3"` and walks away composes a base that is not where the command
+    // went. The residue after the match is the evidence that this happened, and there is no
+    // safe reading of it: `cd s3\x`, `cd s3'x'` and `cd sub>/dev/null` all end somewhere the
+    // match does not. Composing a wrong base is worse than composing none, because a base
+    // that then fails to resolve is SKIPPED, and skipping falls back to the session's own
+    // directory — the exact behaviour this change exists to remove.
+    const after = text.slice((m.index ?? 0) + m[0].length);
+    if (/^[^\s;&|)}<>]/.test(after)) return { events: [], locatable: false, exact: false };
     chain = composeBase(chain, target);
     events.push({ at: (m.index ?? 0) + m[0].length, base: chain });
   }

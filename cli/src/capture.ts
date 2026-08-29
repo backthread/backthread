@@ -671,16 +671,23 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       realRoots: readonly string[],
     ): string[] => {
       if (declared.length === 0) return [];
-      // Keyed on the roots as well, exactly like `basesCache` and `realRootsCache` above: the
-      // harvest can ask about a root set this function did not pass in, so a key that assumed
-      // one set per capture would be wrong the moment that happens.
+      // Keyed on the roots as well, exactly like `basesCache` and `realRootsCache` above. The
+      // roots cannot in fact vary within one capture — `sessionPaths` computes them once — so
+      // this half of the key is symmetry with those two caches rather than a live guard, and
+      // it is the one thing in this change no mutation can turn red. It stays because the
+      // alternative is a cache whose correctness depends on a caller contract it does not
+      // state.
       const key = `${JSON.stringify(declared)}\0${moved}\0${JSON.stringify(roots)}`;
       const hit = declaredCache.get(key);
       if (hit !== undefined) return hit;
       const out: string[] = [];
+      // Admitted whether or not it is inside the repo. An out-of-repo base contradicts in the
+      // loop below and drops the path, which is the right answer for both the directory a
+      // command MOVED to and the one a record merely sat in. The `moved` distinction that
+      // used to live here decided nothing — both roads ended in a drop — and it is spent
+      // where it does decide something: whether a base that will not RESOLVE means the `cd`
+      // failed (fall through) or that we cannot place the path at all (refuse).
       const admit = (dest: string): void => {
-        // An unmoved base outside the repo can say nothing about this repo's paths.
-        if (!moved && !inside(dest, realRoots)) return;
         if (!out.includes(dest)) out.push(dest);
       };
       for (const spelling of declared) {
@@ -762,11 +769,12 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
         // silent, handing one pair the other's verdict. JSON escapes what would otherwise
         // collide, so no screening of the base spellings is needed to make this sound.
         //
-        // `moved` is deliberately NOT part of the key. It cannot vary while the bases stay
-        // equal: a moved candidate's base is `composeBase(cwd, target)`, which is never the
-        // string `cwd` for any target this scan accepts. Including it would be a key
-        // component no test could turn red.
-        const key = `${raw}\0${JSON.stringify(bases)}`;
+        // `moved` IS part of the key, and it has to be: the same directory arrives both as a
+        // cwd the record merely sat in (`moved` false) and as one a `cd` moved to (`moved`
+        // true, since `composeBase` returns an absolute target verbatim), and those two get
+        // opposite verdicts. Keyed without it, whichever came first would answer for the
+        // other.
+        const key = `${raw}\0${moved ? 'm' : ''}\0${JSON.stringify(bases)}`;
         const hit = escapesCache.get(key);
         if (hit !== undefined) return hit;
         const realRoots = realRootsOf(roots);
@@ -827,10 +835,22 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           // contradiction drops the path. It has a real cost, and it is deliberate: an
           // honest file at a colliding name in a sibling checkout is dropped with it.
           const segments = walkableSegments(raw);
-          for (const base of [
-            ...declaredBases(bases, moved, roots, realRoots),
-            ...relativeBases(roots, realRoots),
-          ]) {
+          const declared = declaredBases(bases, moved, roots, realRoots);
+          // THE TOOL CALL NAMED A DIRECTORY AND NONE OF IT SURVIVED. Either it resolves
+          // outside this repo, or it no longer resolves at all — and in both cases the one
+          // thing we know is that this spelling is NOT relative to our own root. Falling
+          // through to `relativeBases` here lets the root vouch for a token the record
+          // itself said was written somewhere else, which is a leak needing no exotic
+          // spelling at all: a session working inside a DIFFERENT repository emits that
+          // repository's paths under this one's name.
+          //
+          // RESTRICTED TO THE UNMOVED CASE, and the restriction is load-bearing. A base a
+          // command MOVED to is admitted above whether or not it is inside the repo, so it
+          // reaches this function's loop and contradicts on its own. And a `cd` whose target
+          // does not resolve moves nothing — a real shell's `cd` fails and stays put — so
+          // that one must fall through to the ordinary bases, not be refused here.
+          if (!moved && bases.length > 0 && declared.length === 0) return true;
+          for (const base of [...declared, ...relativeBases(roots, realRoots)]) {
             const dest = resolveWalk(base, segments);
             if (dest === null || !inside(dest, realRoots)) return true;
           }
