@@ -10369,6 +10369,20 @@ async function runCapture(input, deps = {}) {
       // Climbing until something resolves reaches `vendor` itself, which is a link out,
       // and refuses it. It leaves the deleted-file case exactly where it was:
       // `src/deleted.ts` climbs to `src`, which is inside, so the path survives.
+      //
+      // TWO LIMITS OF THIS, both measured, both open, neither a regression — the same
+      // spellings get through on the previous release. Say them here rather than let
+      // the next reader infer a guarantee from the paragraph above.
+      //   1. A DANGLING link resolves nowhere at every level, so the climb walks PAST
+      //      it to an ancestor that is inside, and the path is kept. The sentence above
+      //      holds only while the link's target exists.
+      //   2. A `..` that cancels a symlinked segment defeats all of this before we are
+      //      asked at all: `normalizeRepoRelative` reduces the path arithmetically, so
+      //      `dlink/../src/a.ts` arrives here already spelled `src/a.ts` and there is
+      //      nothing left to detect. The predicate cannot see it — it receives the
+      //      POST-normalization path, and the evidence was destroyed upstream.
+      // Closing either one means resolving against the filesystem BEFORE normalizing,
+      // which changes what crosses the `sessionPaths` boundary. That is its own change.
       escapesRepo: (rel, roots) => {
         const parent = dirname4(rel);
         const hit = escapesCache.get(parent);

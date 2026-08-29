@@ -23,6 +23,28 @@ real git repos and real symlinks: a file edited in a sibling worktree still coun
 in a genuinely different repo still does not, and a checkout you reach through a symlinked
 parent still works.
 
+### This does not close the hole completely, and you should know where it still is
+
+Independent verification of this release measured 23 ways of spelling the escape that
+leak in 0.23.0 and are refused here — and **six that still get through**, unchanged from
+0.23.0. They are not a regression, and none of them is fixed by this release. We would
+rather you read that here than assume a guarantee we cannot make yet.
+
+All six need a `..` segment, or a URI scheme, in a path your agent passes to a
+file-reading tool. The cause is one thing: `..` is cancelled out *arithmetically*, on the
+string, before anything asks the filesystem — and cancelling `..` against a symlinked
+directory gives the wrong answer, because the link does not go where its name suggests.
+With `dlink` pointing at another repository's `src`, the path `dlink/../src/secret.ts`
+reduces on paper to `src/secret.ts`, which looks like your own file, while your computer
+opens the other repository's. A `file://` spelling gets through the same way, and emits an
+absolute path from your machine, which this code otherwise never does.
+
+The fix is to stop reducing the path on paper and resolve it against the disk first. That
+is a change to a published interface, so it is its own release rather than a hurried
+addition to this one. Until then: if you have a symlink pointing out of a checkout, a path
+your agent reaches *through* that link is refused, and a path that uses `..` to step back
+out of it may not be.
+
 Two things this deliberately does **not** do, both worth stating rather than letting you
 discover:
 
