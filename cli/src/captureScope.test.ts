@@ -117,3 +117,43 @@ test('checkCaptureScope: a 5xx (server lookup error) → send (fail open)', asyn
     new Response(JSON.stringify({ error: 'scope_lookup_failed' }), { status: 502 })) as typeof fetch;
   assert.equal((await checkCaptureScope(REPO, CONFIG, { fetchImpl })).send, true);
 });
+
+// --- 3. the timeout is a bound, not an off-switch ----------------------------
+//
+// WHY THIS EXISTS. Every stub above resolves on the same tick, so none of them ever
+// races the AbortController that bounds the preflight. That left the timeout constant
+// completely unguarded: setting it to 0 kept this whole file green while destroying
+// the feature in production, because a 0 ms abort always beats a real network
+// round-trip, every preflight then fails OPEN, and a repository the user excluded is
+// captured anyway. Nothing would ever report it — failing open is deliberate and
+// silent, and from the outside "the server said capture" and "we never waited for the
+// answer" look identical.
+//
+// So the fetch here takes REAL time and honours the signal, which is what a preflight
+// against a live server does. A degenerate bound turns the skip verdict into a send.
+
+/** A fetch that answers after `delayMs` and rejects if the caller aborts first. */
+function slowFetch(delayMs: number, status: number, body: unknown): typeof fetch {
+  return ((_input: string | URL, init?: RequestInit) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify(body), { status })), delayMs);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new Error('aborted'));
+      });
+    })) as unknown as typeof fetch;
+}
+
+test('checkCaptureScope: a skip verdict survives a realistic round-trip (the bound is not degenerate)', async () => {
+  // 40 ms is quicker than any real call to the preflight and far under the real bound,
+  // so this is not a timing-flaky test: it fails only when the bound is small enough to
+  // abort a live request, which is exactly the defect being guarded.
+  const fetchImpl = slowFetch(40, 200, { ok: true, decision: 'skip', reason: 'capture_paused' });
+  const v = await checkCaptureScope(REPO, CONFIG, { fetchImpl });
+  assert.deepEqual(
+    v,
+    { send: false, reason: 'capture_paused' },
+    'the preflight aborted before its own answer arrived — the timeout bound is too small, ' +
+      'so every capture now fails OPEN and no repository exclusion is honoured',
+  );
+});
