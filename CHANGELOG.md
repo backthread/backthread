@@ -80,6 +80,20 @@ which read as empty ground inside it. Your computer, given the spelling the agen
 used, opened the other repository. Only the *end* of the path is trimmed now, which cannot
 change where a path resolves.
 
+**And a link in the folder you are working in was invisible.** This is the one most
+likely to have affected a real repository. Paths your agent reports relatively are resolved
+by your computer from the directory the session is running in — but they were being checked
+from the top of your repo. So if you were working inside `packages/thing/` and that folder
+contained a symlink pointing at another checkout, the check looked for that link at the top
+of the repo, did not find it, concluded there was nothing there, and kept the path. Your
+computer, resolving the same text the way it actually does, opened the other repository.
+
+The same gap had a nastier second form. With `pkg/src` linked out and a session running in
+`pkg/`, the path `src/keep.ts` names the *other* repo's file — but your repo has its own
+`src/keep.ts`, so the "does this file exist?" check said yes and the path was recorded
+under your own name. Nothing later could have told the two apart. A relative path is now
+checked from the directory the session was actually in, as well as from every checkout.
+
 ### What is still true rather than fixed
 
 - **A file of yours behind a directory the process cannot read is dropped**, and so is one

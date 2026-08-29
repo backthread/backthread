@@ -599,6 +599,33 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       if (segs.length > 0 && segs[segs.length - 1] !== '..') segs.pop();
       return segs;
     };
+    // Every RESOLVED directory a relative spelling could be relative to: the session's
+    // own working directory first, then every root.
+    //
+    // The cwd is the base the KERNEL uses, so leaving it out meant the fence and the
+    // filesystem were reading the same string against different starting points — the
+    // whole family of defects this code exists to close. It is only admitted when it
+    // resolves INSIDE the repo: a cwd that resolves somewhere else is not a base this
+    // repo's paths can be measured from, and using it would contradict everything and
+    // empty the harvest rather than protect it.
+    //
+    // A root that no longer resolves is skipped, not treated as a verdict — it can say
+    // nothing, and the first dead root in the list must not acquit everything behind it.
+    const basesCache = new Map<string, string[]>();
+    const relativeBases = (roots: readonly string[], realRoots: readonly string[]): string[] => {
+      const key = JSON.stringify(roots);
+      const hit = basesCache.get(key);
+      if (hit !== undefined) return hit;
+      const out: string[] = [];
+      const realCwd = input.cwd ? realOf(input.cwd) : null;
+      if (realCwd !== null && inside(realCwd, realRoots)) out.push(realCwd);
+      for (const root of roots) {
+        const realRoot = realOf(root);
+        if (realRoot !== null && !out.includes(realRoot)) out.push(realRoot);
+      }
+      basesCache.set(key, out);
+      return out;
+    };
     const escapesCache = new Map<string, boolean>();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -665,7 +692,21 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
             return dest === null || !inside(dest, realRoots);
           }
           // A relative spelling carries no evidence of what it is relative to, so it is
-          // measured against EVERY root.
+          // measured against EVERY base it could plausibly be relative to.
+          //
+          // THE SESSION'S CWD IS ONE OF THOSE BASES, AND IT IS THE ONE THE KERNEL USES.
+          // Measuring only against the repo roots was the fourth escape in this family,
+          // and the same shape as the other three: when the session works in a
+          // SUBDIRECTORY — the ordinary case in a monorepo package — a symlink living in
+          // that subdirectory is invisible from the root. With cwd `<repo>/sub` and
+          // `sub/dlink` a link to another repository, `dlink/src/secret.ts` resolves from
+          // the root to `<repo>/dlink/...`, which does not exist, which reads as empty
+          // ground INSIDE the repo, so the path was kept — while the kernel, resolving it
+          // from the cwd as it actually would, opened the other repository. The same gap
+          // defeated `exists`, whose collision form is worse: with `pkg/src` linked out
+          // and cwd `<repo>/pkg`, `src/keep.ts` names the other repo's file, but this
+          // repo has its own `src/keep.ts`, so existence confirmed it and it shipped
+          // under our name. Both close here, because both were one missing base.
           //
           // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME
           // root resolves it inside — is wrong, and wrong in the way that reopens the
@@ -677,10 +718,8 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           // contradiction drops the path. It has a real cost, and it is deliberate: an
           // honest file at a colliding name in a sibling checkout is dropped with it.
           const segments = walkableSegments(raw);
-          for (const root of roots) {
-            const realRoot = realOf(root);
-            if (realRoot === null) continue; // this root can say nothing about anything
-            const dest = resolveWalk(realRoot, segments);
+          for (const base of relativeBases(roots, realRoots)) {
+            const dest = resolveWalk(base, segments);
             if (dest === null || !inside(dest, realRoots)) return true;
           }
           return false;

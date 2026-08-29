@@ -998,6 +998,104 @@ test('a segment that will not resolve fails closed unless the filesystem says it
   assert.deepEqual(await run(() => false), []);
 });
 
+// A RELATIVE SPELLING IS RESOLVED BY THE KERNEL FROM THE SESSION'S CWD, and measuring it
+// only from the repo ROOTS is the same defect as every other one in this family: the fence
+// reading a different path from the one that gets opened. When the session works in a
+// SUBDIRECTORY -- the ordinary case in a monorepo package -- a symlink living there is
+// invisible from the root: `<repo>/dlink` does not exist, which reads as empty ground
+// inside the repo, so the path is kept, while the kernel opens another repository.
+//
+// The second half is worse, and is why `exists` cannot be the answer. With `pkg/src` linked
+// out and the session in `<repo>/pkg`, `src/keep.ts` names the OTHER repo's file -- but this
+// repo has its own `src/keep.ts`, so existence confirms it and it ships under our own name.
+// Nothing downstream could ever tell.
+test('END TO END with real symlinks: a link below the session cwd cannot hide from the fence', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-cwd-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    writeFileSync(join(foreign, 'src/secret.ts'), 'export const secret = 1; // THEIRS\n');
+    writeFileSync(join(foreign, 'src/keep.ts'), 'export const keep = 1; // THEIRS\n');
+
+    // The session's working directory, with the escaping link inside it.
+    mkdirSync(join(app, 'sub'), { recursive: true });
+    symlinkSync(foreign, join(app, 'sub/dlink'), 'dir');
+    // ...and the collision form, at a name this repo genuinely has.
+    mkdirSync(join(app, 'pkg'), { recursive: true });
+    symlinkSync(join(foreign, 'src'), join(app, 'pkg/src'), 'dir');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/keep.ts'), 'export const keep = 1; // OURS\n');
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+
+    // The spellings really do open the other repository, from those working directories.
+    assert.match(readFileSync(join(app, 'sub/dlink/src/secret.ts'), 'utf8'), /THEIRS/);
+    assert.match(readFileSync(join(app, 'pkg/src/keep.ts'), 'utf8'), /THEIRS/);
+
+    const capture = async (cwd: string, inputs: Record<string, string>[]) => {
+      const transcript = [
+        JSON.stringify({ type: 'user', sessionId: 'sess-w', message: { content: 'why?' } }),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-08-29T09:00:00Z',
+          message: {
+            content: [
+              { type: 'text', text: 'Because the reasoning outlives the diff.' },
+              ...inputs.map((input) => ({ type: 'tool_use', name: 'Read', input })),
+            ],
+          },
+        }),
+      ].join('\n');
+      let sentBody: unknown = null;
+      const { fetch: fetchImpl } = stubFetch({
+        infer: (body) => {
+          sentBody = body;
+          return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+        },
+      });
+      const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+      delete base.resolveRepoRootsImpl;
+      delete base.readGitImpl;
+      delete base.fileExistsImpl;
+      await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd, session_id: 'sess-w' }, base);
+      return (sentBody as { filePaths?: string[] }).filePaths as string[];
+    };
+
+    // Relative to a cwd one level down: invisible from the root, refused from the cwd.
+    assert.deepEqual(
+      await capture(join(app, 'sub'), [
+        { file_path: 'dlink/src/secret.ts' },
+        { file_path: join(app, 'src/mine.ts') },
+      ]),
+      ['src/mine.ts'],
+    );
+    // The collision form, through the shell route, where `exists` confirms our own file.
+    assert.deepEqual(
+      await capture(join(app, 'pkg'), [
+        { command: 'cat src/keep.ts' },
+        { file_path: join(app, 'src/mine.ts') },
+      ]),
+      ['src/mine.ts'],
+    );
+    // ...and a genuinely repo-relative path from that same subdirectory still survives.
+    assert.deepEqual(await capture(join(app, 'sub'), [{ file_path: 'src/mine.ts' }]), ['src/mine.ts']);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 // A ROOT THAT NO LONGER RESOLVES CANNOT CONFIRM ANYTHING, and the tempting way to
 // handle one is to keep its logical spelling in the set "just in case". That fails open:
 // the resolved paths a candidate walks to are physical, and a logical spelling kept

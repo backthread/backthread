@@ -10378,6 +10378,21 @@ async function runCapture(input, deps = {}) {
       if (segs.length > 0 && segs[segs.length - 1] !== "..") segs.pop();
       return segs;
     };
+    const basesCache = /* @__PURE__ */ new Map();
+    const relativeBases = (roots, realRoots) => {
+      const key = JSON.stringify(roots);
+      const hit = basesCache.get(key);
+      if (hit !== void 0) return hit;
+      const out2 = [];
+      const realCwd = input.cwd ? realOf(input.cwd) : null;
+      if (realCwd !== null && inside(realCwd, realRoots)) out2.push(realCwd);
+      for (const root of roots) {
+        const realRoot = realOf(root);
+        if (realRoot !== null && !out2.includes(realRoot)) out2.push(realRoot);
+      }
+      basesCache.set(key, out2);
+      return out2;
+    };
     const escapesCache = /* @__PURE__ */ new Map();
     const filePaths = sessionPaths(records, repoRoots, {
       exists: (rel) => {
@@ -10432,10 +10447,8 @@ async function runCapture(input, deps = {}) {
             return dest === null || !inside(dest, realRoots);
           }
           const segments = walkableSegments(raw);
-          for (const root of roots) {
-            const realRoot = realOf(root);
-            if (realRoot === null) continue;
-            const dest = resolveWalk(realRoot, segments);
+          for (const base of relativeBases(roots, realRoots)) {
+            const dest = resolveWalk(base, segments);
             if (dest === null || !inside(dest, realRoots)) return true;
           }
           return false;
