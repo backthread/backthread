@@ -5,6 +5,47 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.23.0
+
+**If you work in more than one checkout of the same repo, capture was throwing away
+almost everything you touched.** Session file paths were measured against a single
+root — the directory the capture hook happened to fire in — and anything outside it
+was dropped as belonging to some other project. A linked git worktree is not some
+other project: same history, same file, same repo-relative path, just a different
+directory. Where several worktrees of one repo are checked out at once, which is how
+a lot of parallel work gets done, that rule discarded most of a session's files. One
+real session recorded hundreds of decisions and not a single file path, because
+everything it edited lived in a worktree next door.
+
+Capture now measures each path against a **set** of roots and picks the deepest one
+that contains it. What makes two directories the same repo is a shared git common dir
+— the object store and refs both checkouts read and write — so every candidate
+worktree has to prove it resolves to the same common dir as the session's own before
+it is accepted. That is an allowlist, closed by construction: a neighbouring repo is
+never a root, a worktree whose directory has since been replaced is refused, and a
+path under a foreign repo is still dropped however many roots are in play.
+
+**And if you reach your checkout through a symlink, this release is what makes any of
+it work for you at all.** Git answers with physical paths; your agent reports the
+paths you actually typed. Those do not prefix-match, and on a plain single checkout
+with no worktrees involved that mismatch took a session's harvest from two files to
+zero. Every root is now also offered under the spelling you use, derived from your own
+working directory — and each alias then has to resolve to the same directory as the
+root it came from, or it is dropped, so this widens the fence by exactly nothing.
+
+Two smaller consequences worth stating rather than letting you discover:
+
+- Paths are now **repo-root-relative** in every case. A session running inside a
+  monorepo package used to emit paths relative to that package.
+- Past the linked-worktree cap the extras used to be dropped in silence, leaving their
+  files treated as another repo's. It now says so once on stderr, and suggests
+  `git worktree prune` — which is the fix when the surplus is stale registrations, and
+  not otherwise. If you genuinely have more live worktrees than the cap, the warning is
+  telling you that some of them are not being measured.
+
+The fence itself is unchanged and still absolute: nothing machine-absolute, nothing
+outside a resolved root, nothing that traverses upward, ever leaves your machine.
+
 ## 0.22.0
 
 **A decision now knows which files it was about, even when your agent worked in the
