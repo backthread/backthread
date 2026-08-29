@@ -589,11 +589,17 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
     // because the candidate never arrives. Remove BOTH and the escape is back on the
     // wire. So neither is decoration, and a mutation of this line alone will not go red.
     //
-    // A trailing `..` or `.` is NOT a leaf — it is part of how the directory is named —
-    // so only a plain trailing name is dropped. Popping a trailing `..` walks one segment
-    // DEEPER than the spelling names, which is how `sub/rootlink/..` — a link pointing at
-    // the checkout root, with the `..` stepping above it — reads as inside the repo when
-    // it names the directory the repo sits in.
+    // A trailing `..` is NOT a leaf — it is part of how the directory is named — so only a
+    // plain trailing name is dropped. Popping a trailing `..` walks one segment DEEPER
+    // than the spelling names, which is how `sub/rootlink/..` — a link pointing at the
+    // checkout root, with the `..` stepping above it — reads as inside the repo when it
+    // names the directory the repo sits in.
+    //
+    // A trailing `.` IS NOT PRESERVED, despite reading like a sibling case: the filter
+    // above removes every `.` segment before the pop, so `sub/dlink/.` walks to `sub`
+    // while `sub/dlink/x.ts` walks to `sub/dlink`. Two spellings that share a parent can
+    // therefore walk to different places — which is exactly why the memo below is keyed
+    // on the whole raw spelling and not on the parent.
     const walkableSegments = (raw: string): string[] => {
       const segs = raw.split('/').filter((s) => s !== '' && s !== '.');
       if (segs.length > 0 && segs[segs.length - 1] !== '..') segs.pop();
@@ -706,7 +712,22 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           // defeated `exists`, whose collision form is worse: with `pkg/src` linked out
           // and cwd `<repo>/pkg`, `src/keep.ts` names the other repo's file, but this
           // repo has its own `src/keep.ts`, so existence confirmed it and it shipped
-          // under our name. Both close here, because both were one missing base.
+          // under our name. Both close for the SESSION's cwd, because both were one
+          // missing base.
+          //
+          // WHAT IS STILL OPEN, MEASURED, AND NOT A REGRESSION. The bases here are the
+          // session's cwd and the roots. The kernel resolves a relative path from the
+          // working directory of the TOOL CALL that produced it, and that is not always
+          // one of these: a `cd` inside the very command string we scan moves it, a Bash
+          // tool input carries its own `cwd` field (which `pathsFromRecord` reads as a
+          // path CANDIDATE and never as a base), and a Codex transcript states one in
+          // `session_meta.payload.cwd` (used as a root fallback, never as a base). With
+          // the session at `<repo>` and a link at `<repo>/sub/zlink`, `cd sub && cat
+          // zlink/src/secret.ts` still reaches the wire. Closing it means carrying the
+          // originating directory ALONGSIDE each candidate — a third change to the shape
+          // that crosses the `sessionPaths` boundary — so it is its own change, not a
+          // line bolted onto this one. The same spellings get through on the previous
+          // release; nothing here made them worse.
           //
           // ONE ROOT SAYING "OUTSIDE" IS ENOUGH. The tempting rule — keep it if SOME
           // root resolves it inside — is wrong, and wrong in the way that reopens the

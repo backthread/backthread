@@ -1096,6 +1096,81 @@ test('END TO END with real symlinks: a link below the session cwd cannot hide fr
   }
 });
 
+// THE MEMO KEY IS THE WHOLE RAW SPELLING, AND IT HAS TO BE. The obvious cheaper key is
+// the parent directory -- that is what the previous release used, and paths do cluster
+// into a few directories -- but two spellings that share a parent do NOT share an answer.
+// `walkableSegments` strips `.` segments BEFORE popping the leaf, so `sub/dlink/.` walks
+// to `sub` while `sub/dlink/secret.ts` walks to `sub/dlink`: one lands inside the repo,
+// the other steps through a link into somebody else's. Under a parent key whichever
+// arrives first decides both, so the order of two tool calls in a transcript decides
+// whether another repository's file ships. Ordered here with the SAFE spelling first,
+// because that is the order that leaks.
+test('the containment memo is keyed on the whole spelling, not on the parent directory', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-memo-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const app = join(tmp, 'app');
+    const foreign = join(tmp, 'other-repo');
+    for (const dir of [app, foreign]) {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    }
+    writeFileSync(join(foreign, 'topsecret.ts'), 'export const secret = 1; // THEIRS\n');
+    mkdirSync(join(app, 'sub'), { recursive: true });
+    symlinkSync(foreign, join(app, 'sub/dlink'), 'dir');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+
+    // The spelling really does open the other repository.
+    assert.match(readFileSync(join(app, 'sub/dlink/topsecret.ts'), 'utf8'), /THEIRS/);
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-m', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/mine.ts') } },
+            // Shares a parent with the next one, and walks one segment less far.
+            { type: 'tool_use', name: 'Read', input: { cwd: app + '/sub/dlink/.' } },
+            // …the one that steps through the link.
+            { type: 'tool_use', name: 'Read', input: { file_path: app + '/sub/dlink/topsecret.ts' } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-m' }, base);
+
+    const filePaths = (sentBody as { filePaths?: string[] }).filePaths as string[];
+    // `sub/dlink` is a name in our own tree and may be reported; the file BEHIND it is
+    // another repository's and must not be, whatever order the two arrived in.
+    assert.ok(!filePaths.includes('sub/dlink/topsecret.ts'), JSON.stringify(filePaths));
+    assert.doesNotMatch(JSON.stringify(sentBody), /topsecret/);
+    assert.ok(filePaths.includes('src/mine.ts'), 'the control must survive');
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 // A ROOT THAT NO LONGER RESOLVES CANNOT CONFIRM ANYTHING, and the tempting way to
 // handle one is to keep its logical spelling in the set "just in case". That fails open:
 // the resolved paths a candidate walks to are physical, and a logical spelling kept

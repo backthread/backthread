@@ -94,6 +94,33 @@ The same gap had a nastier second form. With `pkg/src` linked out and a session 
 under your own name. Nothing later could have told the two apart. A relative path is now
 checked from the directory the session was actually in, as well as from every checkout.
 
+### This still does not close it completely, and here is where it does not
+
+Independent verification of this release measured a way through that it does **not** fix.
+It is not a regression — the same spellings get through on 0.24.0 — and we would rather
+you read it here than assume a guarantee we cannot make.
+
+A relative path is now checked from the directory the *session* is running in, and from
+every checkout. But your computer resolves a relative path from the working directory of
+the **individual tool call**, and that is not always one of those. Three ways it differs,
+all measured:
+
+- a `cd` inside the very command being recorded (`cd packages/thing && cat src/x.ts`);
+- a shell tool call that carries its own working directory alongside the command;
+- a transcript that states a working directory of its own, different from where the hook
+  ran.
+
+In each case, if a symlink pointing at another checkout lives in *that* directory, the
+check looks for it somewhere else, does not find it, and keeps the path. Concretely: with
+the session at the top of your repo and a link at `sub/zlink`, the command
+`cd sub && cat zlink/src/secret.ts` still records a path belonging to the other checkout.
+
+Closing it means carrying the originating directory alongside every recorded path, which
+changes the same published interface again, so it is its own release rather than a hurried
+addition to this one. Until then: **if you have a symlink pointing out of a checkout, a
+path reached through it from a subdirectory the session did not start in may still be
+recorded.**
+
 ### What is still true rather than fixed
 
 - **A file of yours behind a directory the process cannot read is dropped**, and so is one
