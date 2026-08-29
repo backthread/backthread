@@ -5,6 +5,65 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.25.0
+
+**The `..` hole 0.24.0 told you about is closed.** That release said, in as many words,
+that a path using `..` to step back out of a symlink could still carry another
+repository's file paths into yours, and that fixing it meant resolving paths against the
+disk before reducing them. This is that fix.
+
+The problem was that `..` was cancelled out on the string — `dlink/../src/secret.ts`
+becomes `src/secret.ts` on paper — and cancelling `..` is only correct against a real
+directory. Against a symlink it is simply wrong, because the link does not go where its
+name suggests: the reduced path looked like one of your own files while your computer
+opened somebody else's. Every re-spelling of that trick went through with it: relative,
+`./`-prefixed, backslash-separated, with a redundant `.` or `//` in the middle, hidden a
+level down inside your own `src/`, and — the one nobody had built a fixture for — a link
+that points *inside* your repo, with the `..` after it doing the leaving.
+
+A path is now walked through the filesystem one segment at a time, in the spelling your
+agent reported it in. By the time a `..` is reached everything to its left has already
+been followed for real, so its parent is the true one. Measured against real repositories
+and real symlinks, with each spelling first confirmed by actually reading the other
+repository's bytes: 23 spellings, all refused; the same probe leaks 21 of them on 0.24.0.
+
+**And the class was wider than `..`.** 0.24.0 climbed past any segment the filesystem
+would not resolve, up to the nearest ancestor that did — which lands back inside your
+repo, so the path was kept. Its note named a dangling link as the one case. It was not
+one case: an escaping link behind a directory the process cannot read does it too, and so
+does a symlink loop. The rule now is that only a *positive* "there is nothing here"
+continues the walk. Anything else — a link that resolves nowhere, a permission refusal,
+a loop, an error nobody has thought of — stops it and the path is dropped. That is what
+keeps a file you **deleted**: it is genuinely absent, which is an answer, not a refusal
+to answer.
+
+**`file://` and friends are refused, and with them the one machine-absolute path this
+code was emitting.** A `file://…` spelling is not an absolute path as far as this code is
+concerned, so it fell through to the relative branch and came out as `file:/Users/you/…` —
+a path from your machine, out of a module that promises never to emit one. Percent-escaped
+separators (`vendor%2Fsrc/…`) go the same way: that is two different paths depending on who
+unescapes it, so we would be checking one and your computer would be opening the other.
+
+**One thing got *less* strict, and it is a recovery, not a loosening.** 0.24.0 dropped a
+path as soon as any one of your checkouts said that name leaves the repo — which also
+threw away an honest file living at that name in a sibling worktree. A name is all a
+*relative* path gives you, so that still holds for those. But an *absolute* path is a
+place, not a name: it can be followed on its own, no other checkout gets a vote, and the
+honest file survives. The escape through that same name is still refused in both
+spellings — the case where a sibling worktree could vouch for an escaping link stays
+closed, because the path is now resolved rather than voted on.
+
+### What is still true rather than fixed
+
+- **The shell-command harvest still depends on a file existing.** A path scraped out of a
+  command string is only emitted if it names a real file in your working tree. That has
+  always been the rule and it is unchanged.
+- **If no repo root can be resolved at all, an already-relative path is kept as it is.**
+  There is nothing to measure it against; this is the long-standing behaviour of running
+  outside a repo.
+- **A path deeper than 256 segments is dropped**, not measured. Walking it costs a
+  filesystem call per segment, and no file anyone learns a system from is that deep.
+
 ## 0.24.0
 
 **A symlink pointing out of your checkout was carrying another repository's file paths

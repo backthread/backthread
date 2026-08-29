@@ -499,6 +499,88 @@ test('END TO END with real symlinks: a sibling worktree cannot vouch for an esca
   }
 });
 
+// THE COST OF THAT INVERSION, AND HOW MUCH OF IT IS LEFT. "Any root saying outside is
+// enough" is answering a question about a name, and a name is all a RELATIVE spelling
+// gives you — so an honest file at a colliding name in a sibling checkout goes down with
+// the escape. An ABSOLUTE spelling is not a name, it is a place: it can be followed on
+// its own, no root gets to vouch for anything, and the honest file survives while the
+// escape through the very same name is still refused. Both halves are pinned here
+// because the pair is the whole trade-off, and either one alone reads as a bug.
+test('END TO END with real symlinks: an absolute spelling recovers the honest file the name costs us', async () => {
+  const tmp = await mkdtemp(join(tmpdir(), 'bt-cap-cost-'));
+  try {
+    const runGit = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+    const initRepo = (dir: string) => {
+      mkdirSync(dir, { recursive: true });
+      runGit(dir, 'init', '-q', '-b', 'main');
+      runGit(dir, 'config', 'user.email', 'test@example.com');
+      runGit(dir, 'config', 'user.name', 'Test');
+      writeFileSync(join(dir, 'README.md'), '# fixture\n');
+      runGit(dir, 'add', '.');
+      runGit(dir, 'commit', '-qm', 'init');
+    };
+    const app = join(tmp, 'app');
+    const lane = join(tmp, 'app-lane');
+    const foreign = join(tmp, 'other-repo');
+    initRepo(app);
+    initRepo(foreign);
+    runGit(app, 'worktree', 'add', '-q', '-b', 'lane', lane);
+
+    mkdirSync(join(foreign, 'src'), { recursive: true });
+    writeFileSync(join(foreign, 'src/secret.ts'), 'export const secret = 1;\n');
+    // The escaping link, at a name the repo genuinely has…
+    mkdirSync(join(app, 'packages'), { recursive: true });
+    symlinkSync(foreign, join(app, 'packages/foo'), 'dir');
+    // …and the same name, as a real directory with a real file, in the sibling worktree.
+    mkdirSync(join(lane, 'packages/foo/src'), { recursive: true });
+    writeFileSync(join(lane, 'packages/foo/src/honest.ts'), 'export const honest = 1;\n');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+
+    const transcript = [
+      JSON.stringify({ type: 'user', sessionId: 'sess-c', message: { content: 'why?' } }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-08-29T09:00:00Z',
+        message: {
+          content: [
+            { type: 'text', text: 'Because the reasoning outlives the diff.' },
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/mine.ts') } },
+            // The honest file, named as a place. Kept.
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(lane, 'packages/foo/src/honest.ts') } },
+            // The same honest file, named only as a name. Dropped — this is the cost.
+            { type: 'tool_use', name: 'Edit', input: { file_path: 'packages/foo/src/lost.ts' } },
+            // And the escape through that name, in both spellings. Refused.
+            { type: 'tool_use', name: 'Read', input: { file_path: join(app, 'packages/foo/src/secret.ts') } },
+            { type: 'tool_use', name: 'Read', input: { file_path: 'packages/foo/src/secret.ts' } },
+          ],
+        },
+      }),
+    ].join('\n');
+
+    let sentBody: unknown = null;
+    const { fetch: fetchImpl } = stubFetch({
+      infer: (body) => {
+        sentBody = body;
+        return { status: 200, body: { ok: true, persisted: true, decisions: [{ title: 'x' }] } };
+      },
+    });
+    const base = deps({ fetchImpl, readFileImpl: async () => transcript });
+    delete base.resolveRepoRootsImpl;
+    delete base.readGitImpl;
+    delete base.fileExistsImpl;
+    await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-c' }, base);
+
+    assert.deepEqual((sentBody as { filePaths?: unknown }).filePaths, [
+      'packages/foo/src/honest.ts',
+      'src/mine.ts',
+    ]);
+    assert.doesNotMatch(JSON.stringify(sentBody), /secret|lost\.ts/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 // THE DANGLING CASE. Asking only about the immediate parent makes the fence depend on
 // what happens to be on the far side of the link: `vendor/src/secret.ts` was refused
 // because `vendor/src` resolved and landed outside, while `vendor/gone/secret.ts` was
