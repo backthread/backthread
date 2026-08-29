@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { interpretScopeResponse, checkCaptureScope } from './captureScope.js';
+import { interpretScopeResponse, checkCaptureScope, CAPTURE_SCOPE_TIMEOUT_MS } from './captureScope.js';
 import type { BackthreadConfig } from './config.js';
 
 // captureScope.test.ts (ARP-1054) — the pre-send capture-scope check.
@@ -155,5 +155,27 @@ test('checkCaptureScope: a skip verdict survives a realistic round-trip (the bou
     { send: false, reason: 'capture_paused' },
     'the preflight aborted before its own answer arrived — the timeout bound is too small, ' +
       'so every capture now fails OPEN and no repository exclusion is honoured',
+  );
+});
+
+test('checkCaptureScope: the bound clears a real round-trip by a wide margin', () => {
+  // THE FIXTURE ABOVE CANNOT PIN THIS, AND THAT IS NOT A FIXABLE PROPERTY OF FIXTURES.
+  // Its stub answers after 40 ms, so it only proves the bound is somewhere above ~40 ms.
+  // A bound of 45 ms passes it — and 45 ms aborts every real preflight there has ever
+  // been. Measured server-side over 1,271 production requests: p50 472 ms, p95 1,269 ms,
+  // p99 1,682 ms, max 8,419 ms. So the behavioural test proves the wiring, and this one
+  // pins the magnitude, from outside the constant rather than by restating it.
+  //
+  // WHY A FLOOR AND NOT AN EQUALITY. Pinning `=== 10_000` would fail on any deliberate
+  // retune and teach the next person to edit the test in the same commit, which is how a
+  // guard becomes a formality. The floor encodes the actual requirement: comfortably
+  // clear of p99, so a slow-but-alive endpoint still returns a verdict instead of failing
+  // open. Raising it is free; lowering it below this line is the defect.
+  assert.ok(
+    CAPTURE_SCOPE_TIMEOUT_MS >= 5_000,
+    `the capture-scope preflight bound is ${CAPTURE_SCOPE_TIMEOUT_MS} ms, under the 5,000 ms ` +
+      'floor. Production p99 for this endpoint is ~1,700 ms and its max is ~8,400 ms, so a ' +
+      'bound this small aborts live preflights, and every abort FAILS OPEN — the capture is ' +
+      'sent without asking whether the repo was excluded, silently.',
   );
 });

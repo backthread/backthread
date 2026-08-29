@@ -69,7 +69,7 @@ export interface ScopeVerdict {
 // read, so a black-hole endpoint must not hang the (detached) capture process — on
 // abort the catch below fails OPEN (send), like any other network error. Matches the
 // read-path idiom (query.ts / localDecisions.ts wrap fetch in an AbortController).
-const CAPTURE_SCOPE_TIMEOUT_MS = 10_000;
+export const CAPTURE_SCOPE_TIMEOUT_MS = 10_000;
 
 /**
  * PURE core: map a preflight HTTP outcome → the send/skip verdict. FAIL-OPEN — the
