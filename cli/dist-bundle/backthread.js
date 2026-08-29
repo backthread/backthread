@@ -3644,7 +3644,12 @@ var require_fast_uri = __commonJS({
     }
     function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
-      const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
+      const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
+      const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
+      if (baseMalformed || relativeMalformed) {
+        throw new Error(baseParsed.error || relativeParsed.error || "URI is malformed.");
+      }
+      const resolved = resolveComponent(baseParsed, relativeParsed, schemelessOptions, true);
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
@@ -3769,6 +3774,8 @@ var require_fast_uri = __commonJS({
       return uriTokens.join("");
     }
     var URI_PARSE = /^(?:([^#/:?]+):)?(?:\/\/((?:([^#/?@]*)@)?(\[[^#/?\]]+\]|[^#/:?]*)(?::(\d*))?))?([^#?]*)(?:\?([^#]*))?(?:#((?:.|[\n\r])*))?/u;
+    var AUTHORITY_PREFIX = /^(?:[^#/:?]+:)?\/\/([^/?#]*)/;
+    var AUTHORITY_INTRODUCER_REGION = /^(?:[^#/:?]+:)?([/\\\t\n\r]*)/;
     function getParseError(parsed, matches2) {
       if (matches2[2] !== void 0 && parsed.path && parsed.path[0] !== "/") {
         return 'URI path must start with "/" when authority is present.';
@@ -3796,6 +3803,25 @@ var require_fast_uri = __commonJS({
           uri = options.scheme + ":" + uri;
         } else {
           uri = "//" + uri;
+        }
+      }
+      const authorityMatch = uri.match(AUTHORITY_PREFIX);
+      if (authorityMatch !== null && authorityMatch[1].indexOf("\\") !== -1) {
+        parsed.error = "URI authority must not contain a literal backslash.";
+        malformedAuthorityOrPort = true;
+      }
+      const introducerMatch = uri.match(AUTHORITY_INTRODUCER_REGION);
+      if (introducerMatch !== null) {
+        const region = introducerMatch[1];
+        const normalizedRegion = region.replace(/[\t\n\r]/g, "");
+        if (normalizedRegion.length >= 2) {
+          if (normalizedRegion.slice(0, 2) !== "//") {
+            parsed.error = parsed.error || "URI authority must not contain a literal backslash.";
+            malformedAuthorityOrPort = true;
+          } else if (region.length !== normalizedRegion.length) {
+            parsed.error = parsed.error || "URI authority introducer must not contain whitespace.";
+            malformedAuthorityOrPort = true;
+          }
         }
       }
       const matches2 = uri.match(URI_PARSE);
@@ -3841,7 +3867,7 @@ var require_fast_uri = __commonJS({
         if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
           if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) {
             try {
-              parsed.host = URL.domainToASCII(parsed.host.toLowerCase());
+              parsed.host = new URL("http://" + parsed.host).hostname;
             } catch (e) {
               parsed.error = parsed.error || "Host's domain name can not be converted to ASCII: " + e;
             }
@@ -7092,8 +7118,8 @@ function cliVersion() {
 var cachedRedact = null;
 function redactVersion() {
   if (cachedRedact !== null) return cachedRedact;
-  if ("0.1.4".length > 0) {
-    cachedRedact = "0.1.4";
+  if ("0.1.5".length > 0) {
+    cachedRedact = "0.1.5";
     return cachedRedact;
   }
   cachedRedact = readRedactVersionFromDisk();
@@ -8080,7 +8106,7 @@ function configHint(env) {
 // src/capture.ts
 import { readFile as readFile10 } from "node:fs/promises";
 import { existsSync, realpathSync as realpathSync3 } from "node:fs";
-import { join as join13 } from "node:path";
+import { dirname as dirname4, join as join13 } from "node:path";
 
 // ../packages/redact/src/index.ts
 var CODE_REDACTION = "[code redacted]";
@@ -10295,13 +10321,25 @@ async function runCapture(input, deps = {}) {
       // gone from disk, and requiring existence here would quietly extend the shell
       // path rule to path-named tool inputs, which have never carried it, and lose
       // every removed file's path. Memoised, like `exists`, for the same reason.
+      //
+      // WE FOLLOW THE DIRECTORY, NOT THE FILE, AND THE DIFFERENCE IS THE WHOLE POINT.
+      // What leaks is a path DESCENDING THROUGH a link into another repo: only
+      // `vendor` exists in repoA, so `vendor/src/secret.ts` is repoB's directory
+      // structure wearing repoA's name. A symlinked FILE at a path this repo really
+      // has — `src/linked.ts` pointing anywhere at all — is different in kind: that
+      // name is in repoA's own tree, git tracks it, and the path gives away nothing
+      // about wherever its contents live. Resolving the full path would drop it too,
+      // which is losing our own metadata to a rule aimed at somebody else's. So the
+      // question asked is where the containing DIRECTORY comes out, which admits the
+      // repo's own leaf names and still refuses every path whose parent chain leaves.
       escapesRepo: (rel) => {
-        const hit = escapesCache.get(rel);
+        const parent = dirname4(rel);
+        const hit = escapesCache.get(parent);
         if (hit !== void 0) return hit;
         let resolvedAnywhere = false;
         let insideSomeRoot = false;
         for (const root of repoRoots) {
-          const real = doRealPath(join13(root, rel));
+          const real = doRealPath(join13(root, parent));
           if (real === null) continue;
           resolvedAnywhere = true;
           if (realRoots.some((r) => real === r || real.startsWith(r + "/"))) {
@@ -10310,7 +10348,7 @@ async function runCapture(input, deps = {}) {
           }
         }
         const escapes = resolvedAnywhere && !insideSomeRoot;
-        escapesCache.set(rel, escapes);
+        escapesCache.set(parent, escapes);
         return escapes;
       }
     });

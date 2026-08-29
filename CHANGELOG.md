@@ -5,6 +5,49 @@ pushing a `v*` tag (see [`RELEASING.md`](./RELEASING.md)); the GitHub Release al
 carries auto-generated notes. Earlier versions are recorded in the git tags + GitHub
 Releases (`v0.5.1` and prior).
 
+## 0.24.0
+
+**A symlink pointing out of your checkout was carrying another repository's file paths
+into this one's record.** Whether a path belonged to your repo was decided by comparing
+strings, and a string comparison cannot see through a link. So if your checkout contains
+something like `vendor -> ../other-project` — an ordinary thing for a checkout to have —
+then a file your agent opened through it read as one of yours by every rule the harvest
+applies, and was sent as `vendor/src/whatever.ts` against this repo, while the file it
+named belonged to the other one. Nothing about it looked wrong from the outside.
+
+Containment is now settled by the filesystem rather than by the shape of the string. A
+path is followed for real, through every link, and kept only when it comes out inside one
+of your repo's checkouts. The three properties the previous release bought are all still
+here and are tested against real git repos and real symlinks: a file edited in a sibling
+worktree still counts, a file in a genuinely different repo still does not, and a checkout
+you reach through a symlinked parent still works.
+
+One thing this deliberately does **not** do: it does not require a file to still exist.
+Resolving to somewhere else is a reason to drop a path; resolving to nothing is not.
+A file you deleted during the session keeps its path, exactly as before.
+
+**Paths containing a NUL byte are refused.** No filesystem this runs on can name such a
+file — the syscall layer stops reading at the NUL — so the path named nothing, and it was
+being stored and rendered anyway.
+
+**`backthread doctor` gained a `Capture` line, because capture had no way to tell you
+anything.** The session-end hook re-spawns its real work as a detached process with its
+output discarded, which is what stops a slow capture being killed when your agent exits —
+and it also means anything capture printed went nowhere at all. The one thing it needed
+to say was that it had left some of your file paths out. It now leaves that on disk and
+`doctor` reads it, so the place you already go when Backthread seems to be doing less than
+you expected is the place that tells you. Nothing to dismiss: a condition that is still
+happening is re-recorded every capture, and one that has stopped ages out by itself.
+
+**That message is also a different message.** It used to say "more than 64 linked
+worktrees" — a fact about a constant in our source, not about your machine — and then tell
+you to run `git worktree prune`. Pruning drops stale *registrations*; it does not show you
+a single skipped path and does not recover one, and if your worktrees are all live it does
+nothing whatsoever. Following that advice produced no visible change and taught you
+nothing. It now tells you how many worktrees you have, how many were checked, how many
+were left out, and that which ones is decided by git's listing order rather than by
+anything you did. There is no command that fixes it, so it no longer pretends there is.
+
 ## 0.23.0
 
 **If you work in more than one checkout of the same repo, capture was throwing away

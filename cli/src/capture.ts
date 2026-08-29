@@ -43,7 +43,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { readConfig, type BackthreadConfig } from './config.js';
 import { ensureAuth } from './login.js';
 import { parseJsonl, redactTranscript, sessionPaths, sessionTimestamp } from './redact.js';
@@ -445,13 +445,27 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
       // gone from disk, and requiring existence here would quietly extend the shell
       // path rule to path-named tool inputs, which have never carried it, and lose
       // every removed file's path. Memoised, like `exists`, for the same reason.
+      //
+      // WE FOLLOW THE DIRECTORY, NOT THE FILE, AND THE DIFFERENCE IS THE WHOLE POINT.
+      // What leaks is a path DESCENDING THROUGH a link into another repo: only
+      // `vendor` exists in repoA, so `vendor/src/secret.ts` is repoB's directory
+      // structure wearing repoA's name. A symlinked FILE at a path this repo really
+      // has — `src/linked.ts` pointing anywhere at all — is different in kind: that
+      // name is in repoA's own tree, git tracks it, and the path gives away nothing
+      // about wherever its contents live. Resolving the full path would drop it too,
+      // which is losing our own metadata to a rule aimed at somebody else's. So the
+      // question asked is where the containing DIRECTORY comes out, which admits the
+      // repo's own leaf names and still refuses every path whose parent chain leaves.
       escapesRepo: (rel) => {
-        const hit = escapesCache.get(rel);
+        // Memoised on the PARENT: the answer depends on nothing else, and a session's
+        // paths cluster hard into a few directories, so this is also the cheap key.
+        const parent = dirname(rel);
+        const hit = escapesCache.get(parent);
         if (hit !== undefined) return hit;
         let resolvedAnywhere = false;
         let insideSomeRoot = false;
         for (const root of repoRoots) {
-          const real = doRealPath(join(root, rel));
+          const real = doRealPath(join(root, parent));
           if (real === null) continue; // nothing there under this root
           resolvedAnywhere = true;
           if (realRoots.some((r) => real === r || real.startsWith(r + '/'))) {
@@ -460,7 +474,7 @@ export async function runCapture(input: HookInput, deps: CaptureDeps = {}): Prom
           }
         }
         const escapes = resolvedAnywhere && !insideSomeRoot;
-        escapesCache.set(rel, escapes);
+        escapesCache.set(parent, escapes);
         return escapes;
       },
     });

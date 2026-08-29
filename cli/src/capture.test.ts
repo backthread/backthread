@@ -452,6 +452,11 @@ test('END TO END with real symlinks: a link out of the checkout cannot carry ano
     // Two files that really are this repo's, in two of its checkouts.
     mkdirSync(join(app, 'src'), { recursive: true });
     writeFileSync(join(app, 'src/mine.ts'), 'export const mine = 1;\n');
+    // A symlinked FILE at a name this repo really has. `src/linked.ts` is in repoA's
+    // own tree and git tracks it; where its contents happen to live is not something
+    // the path gives away. It must survive — the leak is a path DESCENDING THROUGH a
+    // link into somebody else's directory structure, not a leaf name of our own.
+    symlinkSync(join(foreign, 'src/secret.ts'), join(app, 'src/linked.ts'), 'file');
     mkdirSync(join(lane, 'src'), { recursive: true });
     writeFileSync(join(lane, 'src/lane.ts'), 'export const lane = 1;\n');
 
@@ -469,6 +474,8 @@ test('END TO END with real symlinks: a link out of the checkout cannot carry ano
             { type: 'tool_use', name: 'Read', input: { file_path: join(app, 'vendor/src/secret.ts') } },
             // And again as a shell token, the other route into the output.
             { type: 'tool_use', name: 'Bash', input: { command: 'cat vendor/src/secret.ts' } },
+            // A name this repo genuinely has, whose file happens to be a link out.
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(app, 'src/linked.ts') } },
           ],
         },
       }),
@@ -490,8 +497,9 @@ test('END TO END with real symlinks: a link out of the checkout cannot carry ano
     await runCapture({ transcript_path: join(tmp, 's.jsonl'), cwd: app, session_id: 'sess-link' }, base);
 
     const filePaths = (sentBody as { filePaths?: unknown }).filePaths as string[];
-    // The checkout's own file and the sibling worktree's file both survive…
-    assert.deepEqual(filePaths, ['src/lane.ts', 'src/mine.ts']);
+    // The checkout's own file, the sibling worktree's file, and this repo's own name
+    // for a file that is a link out, all survive…
+    assert.deepEqual(filePaths, ['src/lane.ts', 'src/linked.ts', 'src/mine.ts']);
     // …and nothing that belongs to the other repository went anywhere.
     const wire = JSON.stringify(sentBody);
     assert.doesNotMatch(wire, /other-repo/);
