@@ -9,6 +9,9 @@ import {
   slugifyCwd,
   type ManualCaptureDeps,
 } from './captureCommand.js';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CaptureDeps, CaptureOutcome, HookInput } from './capture.js';
 import type { BackthreadConfig } from './config.js';
 
@@ -283,8 +286,13 @@ test('end-to-end: manual capture drives the real runCapture with all seams mocke
     return { ok: true, status: 200, json: async () => r } as Response;
   }) as typeof fetch;
 
+  // "All seams mocked" must include the filesystem: the real trust gate and the real
+  // first-capture confirmation both run here and both persist first-run.json under the
+  // config dir, which with a bare env is the developer's own ~/.backthread. A temp dir
+  // gives them somewhere harmless to land.
+  const cfgDir = await mkdtemp(join(tmpdir(), 'bt-manual-capture-'));
   const captureDeps: CaptureDeps = {
-    env: {} as NodeJS.ProcessEnv,
+    env: { BACKTHREAD_CONFIG_DIR: cfgDir } as NodeJS.ProcessEnv,
     readConfigImpl: async () => FAKE_CONFIG,
     readFileImpl: async () => TRANSCRIPT_JSONL,
     readRemoteImpl: () => 'git@github.com:acme/app.git',

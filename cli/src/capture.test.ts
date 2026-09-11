@@ -2861,12 +2861,22 @@ test('empty inference result → nothing-to-capture (no ingest POST)', async () 
 // --- the load-bearing guarantee: NEVER throws --------------------------------
 
 test('runCapture never throws even when a dep throws synchronously', async () => {
+  // Built by hand rather than through deps() so the throwing reader is the ONLY seam
+  // overridden — which means the real trust gate runs, and the real trust gate writes
+  // first-run.json under the config dir. With a bare env that dir is the developer's
+  // own ~/.backthread; point it at a temp dir so this test has nowhere real to write.
+  // The no-auth path this test lands on then fires ensureAuth — and the REAL one opens
+  // a login session against the production app and tries to launch a browser. On a
+  // developer machine an existing token short-circuited it; on a fresh home (CI) it
+  // ran for real. Stub it, as every other test here does through deps().
+  const cfgDir = await mkdtemp(join(tmpdir(), 'bt-capture-throws-'));
   const out = await runCapture(HOOK, {
-    env: ENV,
+    env: { BACKTHREAD_CONFIG_DIR: cfgDir } as NodeJS.ProcessEnv,
     log: () => {},
     readConfigImpl: () => {
       throw new Error('boom');
     },
+    ensureAuthImpl: () => {},
   });
   // readConfig is wrapped in .catch → treated as empty config → no-auth path.
   assert.equal(out.status, 'no-auth');
