@@ -75,6 +75,15 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME != cli/package.json ($PKG). Bump cli/package.json + the plugin/extension manifests to match the tag." >&2
             exit 1
           fi
+      # Guard: the fence version the bundle STAMPS must be one npm SERVES. The CLI sends
+      # `x-backthread-redact-version` on every request, inlined from
+      # packages/redact/package.json — a claim that the fence which redacted the transcript
+      # is @backthread/redact@<that>, which is public so the claim can be read. It was found
+      # stamping four versions past what npm had, with nothing to notice. Fails closed.
+      - name: The redact version the bundle stamps is published on npm
+        run: node scripts/check-published-version.mjs @backthread/redact
+      - name: Self-test — that guard can fail
+        run: node scripts/check-published-version.mjs --self-test
       # `npm publish` runs the cli's `prepack` (build + bundle), so the published bin is
       # always a fresh self-contained bundle. With OIDC trusted publishing npm
       # authenticates via the workflow's id-token (no NODE_AUTH_TOKEN) and auto-attaches

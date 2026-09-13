@@ -1,0 +1,90 @@
+# Release @backthread/redact — on a `redact-v*` tag: test → verify the tag matches
+# packages/redact/package.json → publish `@backthread/redact` to npm via OIDC TRUSTED
+# PUBLISHING → cut a GitHub Release with auto-generated notes.
+#
+# WHY THIS EXISTS. The fence ships source-only and the CLI bundle INLINES it, so nothing
+# functional needs the npm package — the CLI works without it. The npm package is the
+# AUDIT COPY: the CLI stamps `x-backthread-redact-version` on every request, naming the
+# fence that redacted the transcript, and the package is public so that a stranger can
+# read exactly that version. Without a release path the version in package.json kept
+# moving (0.1.3 → 0.1.6, four rounds of hardening) while npm stayed at 0.1.2, and the
+# header named code nobody could fetch. release.yml now refuses to publish a CLI whose
+# stamped redact version npm does not serve, which makes this workflow the way to unblock
+# it. Same shape as release-extractor.yml.
+#
+# SETUP (founder, one-time, NO TOKEN): on npmjs.com → the @backthread/redact package
+# (or the backthread org) → Settings → Trusted Publisher, add a GitHub Actions publisher:
+#   Organization or user: backthread   Repository: backthread
+#   Workflow filename:    release-redact.yml   Environment name: release-redact
+#   Allowed actions:      Allow npm publish
+#
+# To cut a release:
+#   1. bump packages/redact/package.json version (a SINGLE file — redact is not part of
+#      the CLI's four-file lockstep), add the CHANGELOG entry, commit, merge.
+#   2. `git tag redact-v<version> && git push origin redact-v<version>`
+#      (tag MUST match the version).
+name: Release redact
+
+on:
+  push:
+    tags: ['redact-v*']
+
+# id-token: write → the OIDC token that trusted publishing + provenance need.
+# contents: write → create the GitHub Release.
+permissions:
+  contents: write
+  id-token: write
+
+# Serialize redact releases; its own group — it does not contend with the CLI or the
+# extractor.
+concurrency:
+  group: release-redact
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # MUST equal the "Environment name" set on the npm Trusted Publisher.
+    environment: release-redact
+    steps:
+      # SHA-pinned (not floating tags) — see ci.yml + .github/dependabot.yml.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      # OIDC trusted publishing needs npm >= 11.5.1; Node 22 ships npm 10.x. Pinned to
+      # 11.18.0 for the same reason as release.yml (npm 12 regressed --provenance).
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@11.18.0
+      - run: npm ci
+      # redact has no test script of its own: its tests live in the cli workspace
+      # (cli/src/redact.test.ts and the capture golden tests), which is also the
+      # consumer that inlines it. The extractor must be built first for the cli to
+      # resolve its types — same as ci.yml.
+      - name: Build @backthread/extractor (the cli resolves its types from dist/)
+        run: npm run build --workspace @backthread/extractor
+      - name: Typecheck
+        run: npm run typecheck -w backthread
+      - name: Test (the fence's tests live in the cli workspace)
+        run: npm test -w backthread
+      # Nothing published may carry an internal reference — re-run at release time
+      # because the tarball is what strangers read.
+      - name: No internal references in the tarball
+        run: node scripts/check-no-internal-refs.mjs
+      - name: Tag matches redact version
+        run: |
+          PKG="redact-v$(node -p "require('./packages/redact/package.json').version")"
+          if [ "$PKG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME != packages/redact/package.json ($PKG). Bump packages/redact/package.json to match the tag." >&2
+            exit 1
+          fi
+      # With OIDC trusted publishing npm authenticates via the workflow's id-token (no
+      # NODE_AUTH_TOKEN) and auto-attaches build provenance.
+      - name: Publish @backthread/redact to npm (OIDC trusted publishing)
+        run: npm publish -w @backthread/redact --provenance --access public
+      - name: GitHub Release (auto-generated notes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"

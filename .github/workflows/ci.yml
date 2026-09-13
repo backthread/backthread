@@ -287,6 +287,33 @@ jobs:
           fi
           echo "ok — the floor rejects a count below its minimum"
 
+  # The cli suite must leave the home directory alone. Two tests were found rewriting the
+  # developer's own ~/.backthread/first-run.json on every run (a bare `env: {}` where the
+  # real trust gate then persisted its flag), and one of them fired the REAL login — a
+  # session against the production app — on any home without a token, i.e. on every CI
+  # run. This re-runs the cli suite under a fresh empty home with BACKTHREAD_CONFIG_DIR
+  # cleared and fails if `.backthread/` appeared under it or the real one changed; then
+  # proves, with a probe that does write, that it would have said so. Its own job rather
+  # than a conditional step in `test`: the matrix guard refuses `if:` there, rightly —
+  # a step that skips does not fail a run.
+  home-isolation:
+    name: The cli suite writes nothing into the home directory
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build @backthread/extractor (the cli resolves its types from dist/)
+        run: npm run build --workspace @backthread/extractor
+      - name: Run the cli suite under a fresh home and check what it left behind
+        run: node scripts/check-home-isolation.mjs
+      - name: Self-test — the check reports a write it is shown
+        run: node scripts/check-home-isolation.mjs --self-test
+
   # The Claude Code marketplace plugin is cloned from git with NO build step on install, so
   # the COMMITTED bundle must equal a fresh build (esbuild is deterministic for the
   # lockfile-pinned version). This used to piggyback on `npm test` having rebuilt the

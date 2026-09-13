@@ -54,6 +54,44 @@ carries an npm **publish attestation + SLSA provenance**.
 
 ---
 
+# Releasing `@backthread/redact`
+
+The fence (`packages/redact`) ships **source-only** and the CLI bundle **inlines** it, so
+nothing functional needs the npm package. The npm package is the **audit copy**: the CLI
+stamps `x-backthread-redact-version` on every request, naming the fence that redacted the
+transcript, and the package is public so a stranger can read exactly that version. Its
+version therefore has to be **on npm before a CLI that stamps it ships** — `release.yml`
+refuses to publish a CLI whose stamped redact version npm does not serve
+(`scripts/check-published-version.mjs`, self-tested in the same run).
+
+Release path: [`.github/workflows/release-redact.yml`](.github/workflows/release-redact.yml),
+on a `redact-v*` tag, same OIDC trusted-publishing shape as the extractor.
+
+## One-time setup (founder) — TODO
+
+Add a Trusted Publisher for the `@backthread/redact` package (the CLI's `release`
+publisher does not cover it). On npmjs.com → `@backthread/redact` → Settings → Trusted
+Publisher, add a GitHub Actions publisher:
+
+- Publisher: **GitHub Actions** · Org/user **backthread** · Repo **backthread**
+- Workflow filename: **`release-redact.yml`** · Environment name: **`release-redact`**
+- Allowed actions: **Allow `npm publish`**
+
+Until this exists the workflow runs and fails at `npm publish`. The manual fallback is
+`npm publish -w @backthread/redact --otp=<code>` from an up-to-date `main` checkout.
+
+## Cutting a redact release
+
+1. **Bump** `packages/redact/package.json`'s `version` (a **single file** — redact is NOT
+   part of the CLI's four-file lockstep) and add the entry to `packages/redact/CHANGELOG.md`
+   (it ships in the tarball). Commit, open a PR, let CI go green, merge.
+2. **Tag + push:** `git tag redact-v<version> && git push origin redact-v<version>` — the
+   tag MUST equal the version (the release job asserts it).
+3. Only then cut the CLI release that stamps it. The order matters: the CLI's release guard
+   asks npm for the redact version and fails closed.
+
+---
+
 # Releasing `@backthread/extractor`
 
 The deterministic structural extractor (`packages/extractor`) has its **own** release
