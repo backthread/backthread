@@ -4,7 +4,7 @@
 [![npm: @backthread/redact](https://img.shields.io/npm/v/@backthread/redact?label=%40backthread%2Fredact&logo=npm)](https://www.npmjs.com/package/@backthread/redact)
 [![license](https://img.shields.io/npm/l/backthread?label=license)](./LICENSE)
 
-**Backthread keeps the thread on what your AI coding agent ships — it captures the why behind every change and turns it into a living 'How it works' view of your codebase you can actually query.**
+**Backthread captures how your codebase works from your AI agent sessions — the why behind every change — and teaches it back to the team as a living 'How it works' view you can actually query.**
 
 ```bash
 npx backthread

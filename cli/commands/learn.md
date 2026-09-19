@@ -43,7 +43,7 @@ week, not about them.
    included):
 
    ```
-   node "<the path the lesson printed>" learn --answer <question-id> <<'ANSWER'
+   <the command the lesson printed> --answer <question-id> <<'ANSWER'
    ...their reply, verbatim...
    ANSWER
    ```

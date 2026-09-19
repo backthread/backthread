@@ -79,7 +79,45 @@ import {
   readStdinText,
 } from '../lesson.js';
 
-const USAGE = `backthread — keep the thread on what your AI agent actually shipped
+const TAGLINE = 'backthread — how your codebase works, captured from your agent sessions and taught back to the team';
+
+const FOOTER = `Your source never leaves your machine unredacted — it's checkable in this OSS repo.
+Docs:     https://app.backthread.dev
+Security: https://backthread.dev/security`;
+
+// The default `backthread help`: four commands a new user needs, then everything else
+// on one line each. Every flag lives in USAGE_FULL (`backthread help --all`) — a first
+// read should not have to scan 25 commands and their flags to find "how do I start".
+const USAGE = `${TAGLINE}
+
+Usage:
+  backthread [command] [flags]
+
+Start here
+  backthread                    Set up Backthread here: sign in, connect this repo, wire up capture
+  backthread how <question>     Ask how or why something here works — a cited answer from the record
+  backthread learn              Today's short lesson about this codebase, from what was recorded here
+  backthread doctor             Check your setup — prints ✓/✗ with a fix hint for anything broken
+
+More
+  backthread start              Same as bare \`backthread\` (behind the /backthread:start slash command)
+  backthread login              Authorize this device (opens your browser; works over SSH)
+  backthread logout             Sign this device out — drop the local token, keep the repo link
+  backthread whoami             Show this device's config (the token is never printed)
+  backthread learn --answer <question-id>   Submit one answer to today's lesson (text on stdin)
+  backthread ask-me             Get asked one question about this codebase; nothing is recorded unless you answer
+  backthread capture            Capture this session's decisions (run by the hook; --manual runs it now)
+  backthread mcp                Start the MCP server (capture + query tools) over stdio
+  backthread graph              Refresh the local structure cache for this repo (offline, incremental)
+  backthread sync               Sync this repo's merged decision log into the local cache
+  backthread install            Set up capture for this repo (login + hook + backfill history)
+  backthread update             Update a global install to the latest (also -u)
+  backthread version            Print the installed version (also --version, -v)
+  backthread help --all         The full reference, every flag included (also -h -v)
+
+${FOOTER}`;
+
+const USAGE_FULL = `${TAGLINE}
 
 Usage:
   backthread [command] [flags]
@@ -133,7 +171,8 @@ Manage
   backthread doctor             Diagnose your setup — auth, capture hook, connectivity,
                           version, repo. Prints ✓/✗ with fix hints; exits non-zero if broken.
   backthread version            Print the installed version (also --version, -v)
-  backthread help               Show this message (also --help, -h)
+  backthread help               The short list: start here + everything else, one line each
+  backthread help --all         This full reference (also --help --all, -h -v)
 
 Global flags
   --verbose               When something fails, also print the operator detail — the
@@ -142,9 +181,15 @@ Global flags
                           sites, not anything you can act on. (Also BACKTHREAD_VERBOSE=1,
                           which the MCP tools read too.)
 
-Your source never leaves your machine unredacted — it's checkable in this OSS repo.
-Docs:     https://app.backthread.dev
-Security: https://backthread.dev/security`;
+${FOOTER}`;
+
+/**
+ * `help --all` / `-h -v` / `--help --verbose` → the full reference; anything else → the
+ * short list. Takes the RAW argv: `--verbose` is consumed as the global flag before dispatch.
+ */
+export function usageFor(argv: string[]): string {
+  return argv.some((a) => a === '--all' || a === '-v' || a === '--verbose' || a === '-a') ? USAGE_FULL : USAGE;
+}
 
 // The user-facing subcommands "did you mean …?" suggests against (see suggest.ts). The
 // bare front door, internal hook entrypoints (session-start / capture --from-hook), and
@@ -689,7 +734,7 @@ export async function main(rawArgv: string[], deps: MainDeps = {}): Promise<numb
     case 'help':
     case '--help':
     case '-h':
-      console.log(USAGE);
+      console.log(usageFor(rawArgv));
       return 0;
     default:
       // A leading FLAG (e.g. `npx backthread --claim <code>` / `--device`) is still the

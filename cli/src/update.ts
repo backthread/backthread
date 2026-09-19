@@ -29,7 +29,7 @@ export type { NpmRun } from './npm.js';
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 /** npm's ephemeral npx cache always lives under a `_npx` path segment (all npm versions/OSes). */
-const NPX_SEGMENT_RE = /(?:^|[\\/])_npx[\\/]/;
+export const NPX_SEGMENT_RE = /(?:^|[\\/])_npx[\\/]/;
 
 export type InstallContext = 'npx' | 'plugin' | 'global';
 

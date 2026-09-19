@@ -4,7 +4,7 @@ Short, liftable answers to the questions developers actually ask. For the full s
 
 ## What is Backthread?
 
-Backthread keeps the thread on what your AI coding agent ships — it captures the why behind every change and turns it into a living "How it works" view of your codebase you can actually query. It's the "How it works" layer for AI-coded codebases: a diagram + changelog of what your agent decided and why, plus a `how` command you can ask from the terminal.
+Backthread captures how your codebase works from your AI agent sessions — the why behind every change — and teaches it back to the team as a living 'How it works' view you can actually query. It's the "How it works" layer for AI-coded codebases: a diagram + changelog of what your agent decided and why, plus a `how` command you can ask from the terminal.
 
 ## How do I keep architectural context (a mental model) while an AI agent ships features?
 

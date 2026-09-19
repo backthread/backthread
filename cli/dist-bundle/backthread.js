@@ -8083,8 +8083,12 @@ function formatReport(checks) {
   const fails = checks.filter((c) => c.status === "fail").length;
   const warns = checks.filter((c) => c.status === "warn").length;
   let summary;
-  if (fails > 0) summary = `
-${fails} issue${fails === 1 ? "" : "s"} to fix \u2014 see the \u2717 above, then re-run \`backthread doctor\`.`;
+  const count = `${fails} issue${fails === 1 ? "" : "s"} to fix`;
+  if (fails > 0 && checks.some((c) => c.key === "auth" && c.status === "fail"))
+    summary = `
+${count} \u2014 run \`backthread\` to sign in and connect this repo, then re-run \`backthread doctor\`.`;
+  else if (fails > 0) summary = `
+${count} \u2014 see the \u2717 above, then re-run \`backthread doctor\`.`;
   else if (warns > 0) summary = `
 Mostly good \u2014 the \u26A0 above are worth a look but capture can still run.`;
   else summary = `
@@ -36154,6 +36158,7 @@ async function runGrepContext(rawStdin, deps = {}) {
 }
 
 // src/lesson.ts
+import { basename as basename2 } from "node:path";
 var LESSON_START_TIMEOUT_MS = 9e4;
 var LESSON_ANSWER_TIMEOUT_MS = 6e4;
 function isDeclaredOutcome(v) {
@@ -36403,6 +36408,8 @@ function normalizeAnswer(raw, fallbackQuestionId) {
 function learnInvocation(argv = process.argv) {
   const self = argv[1];
   if (!self) return "backthread learn";
+  if (NPX_SEGMENT_RE.test(self)) return "npx backthread learn";
+  if (basename2(self) === "backthread") return "backthread learn";
   return `node "${self}" learn`;
 }
 function readStdinText(stdin = process.stdin) {
@@ -36456,15 +36463,15 @@ function formatLesson(outcome, submitCommand) {
     return out.join("\n");
   }
   out.push("--- how to submit an answer ---");
-  out.push("One question at a time. Pipe the person's own words in on stdin:");
+  out.push(`One at a time, the person's own words on stdin: ${submitCommand} --answer <question-id>`);
   out.push("");
-  out.push(`  ${submitCommand} --answer <question-id> <<'ANSWER'`);
+  out.push(`  ${submitCommand} --answer q_123 <<'ANSWER'`);
   out.push("  ...their answer, verbatim...");
   out.push("  ANSWER");
   out.push("");
-  out.push("Two more replies are always available, and neither costs anything:");
-  out.push(`  ${submitCommand} --answer <question-id> --disagree       (the record looks wrong to me)`);
-  out.push(`  ${submitCommand} --answer <question-id> --bad-question   (this question is no good)`);
+  out.push("Two other replies, neither costs anything:");
+  out.push(`  --disagree       the record looks wrong to me`);
+  out.push(`  --bad-question   this question is no good`);
   if (outcome.upgrade) out.push("", outcome.upgrade);
   return out.join("\n");
 }
@@ -36903,7 +36910,39 @@ async function runInflowDeadTime(rawStdin, deps = {}) {
 }
 
 // src/bin/backthread.ts
-var USAGE = `backthread \u2014 keep the thread on what your AI agent actually shipped
+var TAGLINE = "backthread \u2014 how your codebase works, captured from your agent sessions and taught back to the team";
+var FOOTER = `Your source never leaves your machine unredacted \u2014 it's checkable in this OSS repo.
+Docs:     https://app.backthread.dev
+Security: https://backthread.dev/security`;
+var USAGE = `${TAGLINE}
+
+Usage:
+  backthread [command] [flags]
+
+Start here
+  backthread                    Set up Backthread here: sign in, connect this repo, wire up capture
+  backthread how <question>     Ask how or why something here works \u2014 a cited answer from the record
+  backthread learn              Today's short lesson about this codebase, from what was recorded here
+  backthread doctor             Check your setup \u2014 prints \u2713/\u2717 with a fix hint for anything broken
+
+More
+  backthread start              Same as bare \`backthread\` (behind the /backthread:start slash command)
+  backthread login              Authorize this device (opens your browser; works over SSH)
+  backthread logout             Sign this device out \u2014 drop the local token, keep the repo link
+  backthread whoami             Show this device's config (the token is never printed)
+  backthread learn --answer <question-id>   Submit one answer to today's lesson (text on stdin)
+  backthread ask-me             Get asked one question about this codebase; nothing is recorded unless you answer
+  backthread capture            Capture this session's decisions (run by the hook; --manual runs it now)
+  backthread mcp                Start the MCP server (capture + query tools) over stdio
+  backthread graph              Refresh the local structure cache for this repo (offline, incremental)
+  backthread sync               Sync this repo's merged decision log into the local cache
+  backthread install            Set up capture for this repo (login + hook + backfill history)
+  backthread update             Update a global install to the latest (also -u)
+  backthread version            Print the installed version (also --version, -v)
+  backthread help --all         The full reference, every flag included (also -h -v)
+
+${FOOTER}`;
+var USAGE_FULL = `${TAGLINE}
 
 Usage:
   backthread [command] [flags]
@@ -36957,7 +36996,8 @@ Manage
   backthread doctor             Diagnose your setup \u2014 auth, capture hook, connectivity,
                           version, repo. Prints \u2713/\u2717 with fix hints; exits non-zero if broken.
   backthread version            Print the installed version (also --version, -v)
-  backthread help               Show this message (also --help, -h)
+  backthread help               The short list: start here + everything else, one line each
+  backthread help --all         This full reference (also --help --all, -h -v)
 
 Global flags
   --verbose               When something fails, also print the operator detail \u2014 the
@@ -36966,9 +37006,10 @@ Global flags
                           sites, not anything you can act on. (Also BACKTHREAD_VERBOSE=1,
                           which the MCP tools read too.)
 
-Your source never leaves your machine unredacted \u2014 it's checkable in this OSS repo.
-Docs:     https://app.backthread.dev
-Security: https://backthread.dev/security`;
+${FOOTER}`;
+function usageFor(argv) {
+  return argv.some((a) => a === "--all" || a === "-v" || a === "--verbose" || a === "-a") ? USAGE_FULL : USAGE;
+}
 var KNOWN_COMMANDS = [
   "start",
   "login",
@@ -37238,7 +37279,7 @@ async function main(rawArgv, deps = {}) {
     case "help":
     case "--help":
     case "-h":
-      console.log(USAGE);
+      console.log(usageFor(rawArgv));
       return 0;
     default:
       if (command.startsWith("-")) return onboarding(argv);
@@ -37282,5 +37323,6 @@ if (isEntryPoint()) {
 export {
   main,
   runOnboarding,
-  stripFlag
+  stripFlag,
+  usageFor
 };
