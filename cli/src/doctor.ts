@@ -331,7 +331,13 @@ export function formatReport(checks: Check[]): string {
   const fails = checks.filter((c) => c.status === 'fail').length;
   const warns = checks.filter((c) => c.status === 'warn').length;
   let summary: string;
-  if (fails > 0) summary = `\n${fails} issue${fails === 1 ? '' : 's'} to fix — see the ✗ above, then re-run \`backthread doctor\`.`;
+  const count = `${fails} issue${fails === 1 ? '' : 's'} to fix`;
+  // Not signed in is the fresh-directory case: the ✗ already says `backthread login`,
+  // but the one command that fixes ALL of it (sign in + connect this repo + capture)
+  // is the bare front door — name it, so the fix is one line, not a scavenger hunt.
+  if (fails > 0 && checks.some((c) => c.key === 'auth' && c.status === 'fail'))
+    summary = `\n${count} — run \`backthread\` to sign in and connect this repo, then re-run \`backthread doctor\`.`;
+  else if (fails > 0) summary = `\n${count} — see the ✗ above, then re-run \`backthread doctor\`.`;
   else if (warns > 0) summary = `\nMostly good — the ⚠ above are worth a look but capture can still run.`;
   else summary = `\nAll good — Backthread is set up. 🧵`;
   return ['backthread doctor\n', ...lines, summary].join('\n');

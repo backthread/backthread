@@ -1,7 +1,7 @@
 {
   "name": "backthread",
   "version": "0.26.0",
-  "description": "Backthread keeps the thread on what your AI coding agent ships — it captures the why behind every change and turns it into a living 'How it works' view of your codebase you can actually query.",
+  "description": "Backthread captures how your codebase works from your AI agent sessions — the why behind every change — and teaches it back to the team as a living 'How it works' view you can actually query.",
   "license": "MIT",
   "author": "Backthread",
   "homepage": "https://backthread.dev",

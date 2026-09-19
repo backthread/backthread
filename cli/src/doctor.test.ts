@@ -224,7 +224,12 @@ test('formatReport aligns labels and picks the right summary', async () => {
   ];
   assert.match(formatReport(green), /All good/);
   const failed: Check[] = [{ key: 'auth', label: 'Auth', status: 'fail', critical: true, detail: 'no' }];
-  assert.match(formatReport(failed), /1 issue to fix/);
+  assert.match(formatReport(failed), /1 issue to fix — run `backthread` to sign in and connect this repo/);
+  const hookOnly: Check[] = [
+    { key: 'auth', label: 'Auth', status: 'ok', detail: 'signed in' },
+    { key: 'hook', label: 'Capture hook', status: 'fail', detail: 'not wired' },
+  ];
+  assert.match(formatReport(hookOnly), /1 issue to fix — see the ✗ above/, 'signing in is not the fix when already signed in');
   const warned: Check[] = [{ key: 'repo', label: 'Repo', status: 'warn', detail: 'x' }];
   assert.match(formatReport(warned), /Mostly good/);
 });

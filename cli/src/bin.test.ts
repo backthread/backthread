@@ -96,6 +96,54 @@ test('usage documents the bare command as the unified front door', async () => {
   assert.match(out, /^\s*backthread\s+Set up Backthread/m);
 });
 
+// --- short help by default, the full reference on demand ----------------------
+
+const START_HERE = ['backthread how <question>', 'backthread learn', 'backthread doctor'];
+
+test('`backthread help` leads with a Start-here block of four commands, then More', async () => {
+  const { out } = await captureConsole(() => main(['help'], { runOnboardingImpl: async () => 0 }));
+  const startHere = out.indexOf('Start here');
+  const more = out.indexOf('\nMore\n');
+  assert.ok(startHere > -1 && more > startHere, 'Start here precedes More');
+  const block = out.slice(startHere, more);
+  for (const cmd of START_HERE) assert.ok(block.includes(cmd), `Start here lists ${cmd}`);
+  assert.equal(block.split('\n').filter((l) => /^\s+backthread/.test(l)).length, 4, 'exactly four rows');
+  // Flags are the full reference's business: the short list has no wrapped sub-bullets.
+  assert.doesNotMatch(out, /^\s{20,}\[/m, 'no flag continuation lines');
+  assert.doesNotMatch(out, /Global flags/);
+  assert.match(out, /backthread help --all/, 'points at the full reference');
+  // Every user-typed command is still listed somewhere on the short page.
+  for (const cmd of ['login', 'logout', 'whoami', 'ask-me', 'capture', 'mcp', 'graph', 'sync', 'install', 'update', 'version'])
+    assert.match(out, new RegExp(`^\\s+backthread ${cmd}\\b`, 'm'), `lists ${cmd}`);
+});
+
+for (const argv of [['help', '--all'], ['-h', '-v'], ['--help', '--verbose'], ['help', '-a']]) {
+  test(`\`backthread ${argv.join(' ')}\` prints the full reference with flags`, async () => {
+    // `--verbose` is the global flag: give it its own env so it can't leak into later tests.
+    const { out, result } = await captureConsole(() => main([...argv], { runOnboardingImpl: async () => 0, env: {} }));
+    assert.equal(result, 0);
+    assert.match(out, /Global flags/);
+    assert.match(out, /--skip-backfill/, 'install flags are documented');
+    assert.match(out, /ask-me --promise/);
+    assert.doesNotMatch(out, /Start here/);
+  });
+}
+
+for (const argv of [['help'], ['help', '--all']]) {
+  test(`\`backthread ${argv.join(' ')}\` keeps the trust line and both links`, async () => {
+    const { out } = await captureConsole(() => main([...argv], { runOnboardingImpl: async () => 0 }));
+    assert.match(out, /Your source never leaves your machine unredacted/);
+    assert.match(out, /https:\/\/app\.backthread\.dev/);
+    assert.match(out, /https:\/\/backthread\.dev\/security/);
+  });
+
+  test(`\`backthread ${argv.join(' ')}\` never uses the retired "thread" pun outside the product name`, async () => {
+    const { out } = await captureConsole(() => main([...argv], { runOnboardingImpl: async () => 0 }));
+    const stripped = out.replace(/backthread/gi, '');
+    assert.doesNotMatch(stripped, /thread/i, `retired word found: ${stripped.match(/.*thread.*/i)?.[0]}`);
+  });
+}
+
 // --- version → prints the bare version, no auth/network ----------------------
 
 for (const arg of ['version', '--version', '-v']) {
@@ -297,8 +345,8 @@ test('`--verbose` works on a subcommand that takes its own flags', async () => {
   assert.deepEqual(seen, { questionId: 'q1', answer: 'because', outcome: null });
 });
 
-test('`backthread help` documents the global flag it accepts', async () => {
-  const { out } = await captureConsole(() => main(['help']));
+test('`backthread help --all` documents the global flag it accepts', async () => {
+  const { out } = await captureConsole(() => main(['help', '--all']));
   assert.match(out, /--verbose/);
   assert.match(out, /BACKTHREAD_VERBOSE=1/);
 });

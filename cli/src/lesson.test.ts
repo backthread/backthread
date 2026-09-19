@@ -357,7 +357,21 @@ test('an unrecognized payload never renders as "Not yet." — the one label we m
   assert.match(text, /A uuid per attempt was rejected/, 'and still shows the rationale');
 });
 
-test('the submit invocation is absolute, because the host shell has no plugin root', () => {
+test('the submit invocation is what the person would type, absolute only for a bundle run by file', () => {
+  // The CC plugin copy: nothing on PATH, and the host shell has no plugin root later.
   assert.equal(learnInvocation(['/usr/bin/node', '/plug/dist-bundle/backthread.js']), 'node "/plug/dist-bundle/backthread.js" learn');
+  // npx: the raw `_npx` cache path is noise and expires; name the invocation instead.
+  assert.equal(learnInvocation(['/usr/bin/node', '/Users/x/.npm/_npx/abc123/node_modules/.bin/backthread']), 'npx backthread learn');
+  // A global / local install exposes a `backthread` bin.
+  assert.equal(learnInvocation(['/usr/bin/node', '/usr/local/bin/backthread']), 'backthread learn');
   assert.equal(learnInvocation(['/usr/bin/node']), 'backthread learn');
+});
+
+test('the submit block is short: the command, one example, and the two no-cost replies on their own lines', () => {
+  const text = formatLesson(okLesson(GRADED_LESSON), 'npx backthread learn');
+  assert.match(text, /npx backthread learn --answer <question-id>/);
+  assert.match(text, /npx backthread learn --answer q_123 <<'ANSWER'/, 'one concrete example');
+  assert.match(text, /^  --disagree\s+the record looks wrong to me$/m);
+  assert.match(text, /^  --bad-question\s+this question is no good$/m);
+  assert.doesNotMatch(text, /_npx/);
 });

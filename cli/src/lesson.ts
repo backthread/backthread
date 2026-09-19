@@ -43,6 +43,8 @@ import { resolveQueryRepo } from './query.js';
 import { buildLessonStartUrl, buildLessonAnswerUrl } from './urls.js';
 import { describeFailure, readServerMessage, withOperatorDetail } from './failureCopy.js';
 import { versionHeaders } from './version.js';
+import { NPX_SEGMENT_RE } from './update.js';
+import { basename } from 'node:path';
 
 // The server races its own build against a ~55s ceiling (three model phases on a
 // thin day). Bound the client a bit above that so a build that legitimately used
@@ -505,15 +507,20 @@ export function normalizeAnswer(raw: unknown, fallbackQuestionId: string): Lesso
 // --- invocation + stdin ----------------------------------------------------------
 
 /**
- * The absolute command a follow-up answer is submitted with, derived from how THIS
- * process was started rather than hardcoded — so it is correct for a plugin copy
- * (`node <plugin>/dist-bundle/backthread.js`), a global install, and an npx run
- * alike. It has to be absolute because the host agent submits the answer from a
- * plain shell later in the conversation, where `${CLAUDE_PLUGIN_ROOT}` is not set.
+ * The command a follow-up answer is submitted with, derived from how THIS process was
+ * started rather than hardcoded. A person reads this line, so it is the command they
+ * would type: `npx backthread learn` under npx (the raw `_npx` cache path is noise to
+ * them and expires anyway), `backthread learn` for an installed bin. Only a bundle run
+ * by file (the CC plugin copy: `node <plugin>/dist-bundle/backthread.js`) keeps its
+ * absolute path — there is nothing on PATH to name, and the host agent submits the
+ * answer from a plain shell later in the conversation where `${CLAUDE_PLUGIN_ROOT}`
+ * is not set.
  */
 export function learnInvocation(argv: string[] = process.argv): string {
   const self = argv[1];
   if (!self) return 'backthread learn';
+  if (NPX_SEGMENT_RE.test(self)) return 'npx backthread learn';
+  if (basename(self) === 'backthread') return 'backthread learn';
   return `node "${self}" learn`;
 }
 
@@ -597,15 +604,15 @@ export function formatLesson(outcome: LessonStartOutcome, submitCommand: string)
   }
 
   out.push('--- how to submit an answer ---');
-  out.push('One question at a time. Pipe the person\'s own words in on stdin:');
+  out.push(`One at a time, the person's own words on stdin: ${submitCommand} --answer <question-id>`);
   out.push('');
-  out.push(`  ${submitCommand} --answer <question-id> <<'ANSWER'`);
+  out.push(`  ${submitCommand} --answer q_123 <<'ANSWER'`);
   out.push('  ...their answer, verbatim...');
   out.push('  ANSWER');
   out.push('');
-  out.push('Two more replies are always available, and neither costs anything:');
-  out.push(`  ${submitCommand} --answer <question-id> --disagree       (the record looks wrong to me)`);
-  out.push(`  ${submitCommand} --answer <question-id> --bad-question   (this question is no good)`);
+  out.push('Two other replies, neither costs anything:');
+  out.push(`  --disagree       the record looks wrong to me`);
+  out.push(`  --bad-question   this question is no good`);
   if (outcome.upgrade) out.push('', outcome.upgrade);
   return out.join('\n');
 }
