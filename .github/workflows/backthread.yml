@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 15
     steps:
       # SHA-pinned, like every other action in this repository — see ci.yml.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Depth 1 is enough: the extractor never executes repository code and reads
           # only the tree, and the git metadata that travels (HEAD sha, its date, its
