@@ -52,7 +52,7 @@ jobs:
           # only the tree, and the git metadata that travels (HEAD sha, its date, its
           # subject) is present at depth 1.
           fetch-depth: 1
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       # No `npm ci`. The client is self-contained and this repository's own dependency
